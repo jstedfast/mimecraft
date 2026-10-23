@@ -54,6 +54,11 @@ MimeKit. The crate is not configured for publication.
   space stuffing, UTF-8-safe wrapping, and explicit CRLF/LF output.
 - Plain-text previews with Unicode whitespace normalization, checked length
   limits, and character-safe ellipsis truncation.
+- HTML character-data and quoted attribute encoding with decimal Unicode
+  references and MimeKit-compatible control-character handling.
+- HTML character-reference decoding with the complete named-entity table,
+  longest-name matching, numeric-reference recovery, attribute-context rules,
+  a bounded incremental decoder, and opt-in, per-violation-capped diagnostics.
 - Delivery-status parts with bounded raw header-group parsing, encoded-remainder
   compatibility, and atomic edits that preserve outer metadata.
 - Disposition-notification parts with bounded raw field access, global-subtype
@@ -1343,6 +1348,470 @@ charset decoding, MIME body selection, or stream I/O. Use
 and flowed conversion before previewing, or pass an already-decoded string.
 MimeKit's stream overloads and automatic TextPart preview generation remain
 deferred.
+
+### HTML text and attribute encoding
+
+`text::html_encode` escapes plain text for HTML character data.
+`text::html_attribute_encode` encodes an attribute value and includes its
+surrounding quotes. `text::HtmlAttributeQuote` selects `Double` (also its
+default) or `Single`; invalid quote characters cannot be supplied.
+
+```rust
+use mimecraft::text::{HtmlAttributeQuote, html_attribute_encode, html_encode};
+
+assert_eq!(html_encode("<b>caf\u{e9}</b>"), "&lt;b&gt;caf&#233;&lt;/b&gt;");
+assert_eq!(
+    html_attribute_encode("a \"quote\" & 'another'", HtmlAttributeQuote::Double),
+    "\"a &quot;quote&quot; &amp; 'another'\""
+);
+assert_eq!(
+    html_attribute_encode("it's", HtmlAttributeQuote::Single),
+    "'it&#39;s'"
+);
+```
+
+Both functions escape ampersands and angle brackets. Text encoding also
+escapes both quote characters; attribute encoding escapes only its delimiter
+and leaves the other quote literal. Tabs, CR, LF, and form feed are preserved
+without newline normalization. Other C0 controls and U+007F through U+009F are
+dropped, matching MimeKit rather than providing a lossless transformation.
+Characters from U+00A0 onward become decimal numeric references, making the
+result ASCII. Supplementary characters produce one reference per Unicode
+scalar; Rust strings cannot contain MimeKit's unpaired UTF-16 surrogates.
+
+Existing references are escaped again, not parsed: `"&amp;"` becomes
+`"&amp;amp;"`. These helpers do not sanitize HTML, validate URL schemes or
+attribute names, escape JavaScript/CSS, add document markup, or perform
+stream I/O. Encoding an event handler or URL attribute does not make its
+meaning safe. `text::HtmlWriter` provides separate in-memory markup construction;
+HTML-input converters remain deferred.
+
+### Writing HTML in memory
+
+`text::HtmlWriter` builds HTML in an owned `String`, using MimeKit's tag and
+attribute state transitions and the encoding helpers above.
+
+```rust
+use mimecraft::text::{HtmlWriter, HtmlWriterError, HtmlWriterState};
+
+let mut html = HtmlWriter::new();
+html.write_start_tag("a")?;
+assert_eq!(html.state(), HtmlWriterState::Tag);
+html.write_attribute("href", "https://example.com/?a=1&b=2")?;
+html.write_text("Visit <example>");
+html.write_end_tag("a")?;
+assert_eq!(
+    html.finish(),
+    "<a href=\"https://example.com/?a=1&amp;b=2\">Visit &lt;example&gt;</a>"
+);
+# Ok::<(), HtmlWriterError>(())
+```
+
+`write_start_tag` leaves a tag unfinished for attributes; `write_empty_element_tag`
+does the same but closes with `/>` instead of `>`. Another tag, text, raw markup,
+or `flush()` completes the pending tag. `write_end_tag` writes a complete end tag
+immediately. `finish()` flushes and consumes the writer, returning its string.
+Neither method synthesizes missing element end tags. `as_str()` borrows the
+current buffer **without flushing**, so it may contain an unfinished start tag.
+
+`HtmlWriterState` has `Content` (MimeKit's `Default`), `Tag`, and `Attribute`.
+`write_attribute_name` enters `Attribute` state; an optional
+`write_attribute_value` then appends a complete double-quoted, escaped value.
+Omitting the value leaves a valueless attribute; `write_attribute(name, "")`
+instead produces `name=""`. `write_attribute(name, value)` writes both pieces.
+Names and duplicate attributes retain their original spelling and order.
+`HtmlWriterError` reports invalid names and invalid attribute/value states;
+rejected operations leave the buffer and state unchanged.
+
+Name validation follows MimeKit's delimiter checks, not full HTML grammar.
+Tag names reject NUL, TAB, CR, LF, form feed, SPACE, `/`, and `>`; attribute
+names additionally reject `=`, quotes, and `<`. Names and raw markup must be
+trusted: this is not a sanitizer or a check of nesting, void elements, URL
+schemes, or event-handler attributes. `write_markup_text` copies markup
+verbatim without parsing it. `write_text` escapes character data but does not
+perform JavaScript/CSS escaping, automatic linking, or whitespace normalization.
+Even empty text or markup completes the pending tag.
+
+String-based operations use `&str` slices instead of buffer/index/count overloads.
+`write_html_attribute` also accepts checked `HtmlAttribute` objects, preserving
+valueless versus empty values. Identifier enums expose canonical names through
+`as_str()` for the existing string-based tag and attribute operations.
+`write_token` flushes any pending syntax and writes a complete `HtmlToken`,
+returning to `Content` state even for a tag token or empty data. It respects
+the token's encoding mode and does not validate raw token names or contents.
+HTML tokenization, charset conversion, stream output, and callbacks remain
+deferred.
+
+### HTML identifiers and attributes
+
+`text::HtmlTagId` recognizes all 134 MimeKit tag names; `HtmlAttributeId`
+recognizes all 106 attribute names. `from_name()` performs allocation-free,
+ASCII case-insensitive lookup without trimming whitespace or parsing markup.
+Unrecognized names map to `Unknown`; any tag name beginning with `!` maps to
+`Comment`. `as_str()` and `Display` return canonical names, including `img`
+for `HtmlTagId::Image` and `accept-charset` for `HtmlAttributeId::AcceptCharset`.
+`Unknown.as_str()` is the diagnostic label `"Unknown"`, not an original name;
+do not use it to serialize an unrecognized name.
+
+Tag identifiers expose MimeKit's exact `is_empty_element()` and
+`is_formatting_element()` classifications, including legacy elements. They do
+not change writer behavior or provide HTML validation. Enum numeric values are
+not a compatibility contract; acronym variants use Rust casing such as `Hr`,
+`Em`, `NoBr`, `BgColor`, and `XmlNs`.
+
+`HtmlAttribute::new(name, Option<String>)` preserves a checked name and an
+unescaped value. `from_id()` uses the canonical name and rejects `Unknown`;
+custom names are accepted by `new()`. Both report `HtmlAttributeError` on
+invalid construction. Names use the same delimiter checks as the HTML writer,
+not full HTML grammar. `None` means valueless, while `Some(String::new())` means
+an explicit empty value. Names and values are immutable, and `id()` does not
+change their original spelling.
+
+```rust
+use mimecraft::text::{HtmlAttribute, HtmlAttributeCollection, HtmlAttributeId,
+                     HtmlTagId, HtmlWriter};
+
+let attributes: HtmlAttributeCollection = vec![
+    HtmlAttribute::from_id(HtmlAttributeId::Disabled, None)?,
+    HtmlAttribute::new("ID", Some("a&b".into()))?,
+].into();
+assert_eq!(attributes.index_of("id"), Some(1));
+
+let mut html = HtmlWriter::new();
+html.write_empty_element_tag(HtmlTagId::Input.as_str())?;
+for attribute in &attributes {
+    html.write_html_attribute(attribute)?;
+}
+assert_eq!(html.finish(), "<input disabled ID=\"a&amp;b\"/>");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`HtmlAttributeCollection` owns an ordered, read-only vector; construct one from
+a vector or by collecting an iterator. Duplicate names retain their original
+case and order. `get`, `contains`, and `index_of` use ASCII case-insensitive
+names; `get_by_id`, `contains_id`, and `index_of_id` compare identifiers.
+Every lookup returns the first match, including a valueless attribute.
+Looking up `Unknown` finds the first custom/unrecognized name rather than
+rejecting the identifier. Non-ASCII name characters compare exactly, unlike
+.NET's Unicode ordinal case folding.
+
+Use indexing or `as_slice()` for positional access, `iter()` or borrowed
+iteration for traversal, and `into_vec()` or owned iteration to recover the
+attributes. There is no unchecked public constructor or tokenizer path yet.
+These types do not sanitize attribute names, URL schemes, or event handlers.
+
+### HTML token serialization
+
+`text::HtmlToken` is an owned enum replacing MimeKit's HTML token hierarchy:
+`CData(String)`, `Comment(HtmlCommentToken)`, `Data(HtmlDataToken)`,
+`DocType(HtmlDocTypeToken)`, `ScriptData(String)`, and `Tag(HtmlTagToken)`.
+`kind()` returns `HtmlTokenKind`; `to_html()` creates a string and `write_to()`
+appends to an existing string. Neither method parses HTML, inserts separators,
+checks nesting, or performs stream I/O.
+
+```rust
+use mimecraft::text::{HtmlDataToken, HtmlDocTypeToken, HtmlToken, HtmlWriter};
+
+let mut doctype = HtmlDocTypeToken::new();
+doctype.set_name(Some("html".into()))?;
+let mut html = HtmlWriter::new();
+html.write_token(&HtmlToken::DocType(doctype));
+html.write_start_tag("p")?;
+html.write_token(&HtmlToken::Data(HtmlDataToken::from_text("a < b")));
+html.write_end_tag("p")?;
+assert_eq!(html.finish(), "<!DOCTYPE html><p>a &lt; b</p>");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`HtmlDataToken::new` preserves already-encoded or intentionally raw contents,
+matching MimeKit's public constructor. `from_text` instead applies the HTML
+character-data encoder. `from_data_state` represents raw tokenizer data-state
+contents: only a final literal `<` is encoded, preventing it from forming a new
+tag if intervening markup is removed. It does not validate the asserted context
+or escape other content. Script data stays raw, and CDATA is wrapped in
+`<![CDATA[` and `]]>` without rewriting embedded terminators.
+
+`HtmlCommentToken::new` writes a normal comment. `bogus` restores `<` when the
+contents begin with `?`, otherwise `</`; `bang` restores `<!`. This retains the
+malformed-end-tag distinction needed for bogus-comment round-tripping.
+Contents are not escaped or checked for embedded closing delimiters.
+
+`HtmlTagToken::start(name, attributes)`, `empty(name, attributes)`, and `end(name)`
+create complete tags. Original names, attribute order, duplicates, and valueless
+versus empty values are preserved; values use double-quoted attribute encoding.
+Unlike the writer's name-based operations, token names are deliberately
+unvalidated, matching MimeKit's token constructors. Empty-element spelling is
+explicit rather than inferred from `id()`. Attributes still require checked
+construction; unchecked tokenizer attributes are not yet exposed.
+
+`HtmlDocTypeToken` defaults to an unnamed `<!DOCTYPE>`. Its checked `set_name`,
+`set_public_identifier`, and `set_system_identifier` methods accept
+`Option<String>` and leave every field unchanged on error. Names reject empty
+strings, NUL, TAB, LF, form feed, CR, SPACE, and `>`; identifiers reject NUL,
+`>`, and the presence of both quote characters. Empty identifiers are allowed.
+`HtmlDocTypeError` distinguishes the three rejected edits.
+
+DOCTYPE identifiers remain literal rather than entity-encoded, with a usable
+quote delimiter selected automatically. Missing names suppress identifier
+output without deleting stored values. Keyword getters retain MimeKit's
+PUBLIC/SYSTEM edit transitions, including a retained PUBLIC keyword after
+clearing its identifier. `force_quirks_mode` is metadata only and does not
+affect output.
+
+**Tokens are representations, not sanitizers.** Raw names, comments, script
+contents, CDATA, and already-encoded data must be trusted. HTML tokenization,
+reusable tokenizer buffers, token-filtering callbacks, and HTML-input converters
+remain deferred; this milestone provides owned tokens and serialization only.
+
+### HTML character-reference decoding
+
+`text::html_decode` decodes named and numeric references in a complete Unicode
+string, using MimeKit's character-data rules.
+
+```rust
+use mimecraft::text::html_decode;
+
+assert_eq!(html_decode("&lt;b&gt;caf&#233;&lt;/b&gt;"), "<b>caf\u{e9}</b>");
+assert_eq!(html_decode("&notin; &notit;"), "\u{2209} \u{ac}it;");
+assert_eq!(html_decode("&#x110000; &unknown;"), "\u{fffd} &unknown;");
+```
+
+The sorted static table contains all 2,231 names from MimeKit, including 106
+legacy spellings without semicolons. Matching is case-sensitive and chooses
+the longest known prefix; unknown names and unmatched suffixes are retained.
+Some names expand to two Unicode scalars. Decimal and hexadecimal numeric
+references accept missing semicolons and arbitrarily long digit runs, including
+leading zeros. Saturating arithmetic prevents overflow without stopping digit
+consumption.
+
+Numeric zero, surrogate values, and values beyond U+10FFFF become U+FFFD.
+Selected C1 control values use the HTML Windows-1252 compatibility mappings;
+other controls and noncharacters remain unchanged. References without any
+digits stay literal. These recovery rules match MimeKit; the string-returning
+helpers do not perform compliance checks.
+
+This is a single decoding pass, so `"&amp;lt;"` becomes `"&lt;"`, not `"<"`.
+Literal Unicode, markup, quotes, whitespace, and line endings are preserved.
+`html_decode` does not apply attribute-context restrictions: `"&notit;"` becomes
+`"\u{ac}it;"`, even inside text resembling an HTML attribute. This is not an
+HTML parser, sanitizer, or HTML-to-text converter. It can introduce markup
+characters; escape its result again if embedding it as literal HTML text.
+No charset conversion or stream I/O occurs.
+
+`text::html_attribute_decode` instead applies the historical attribute rule:
+a named reference without `;` remains literal when the character immediately
+after the longest match is `=` or an ASCII letter/digit. Numeric references
+and semicolon-terminated names still decode normally.
+
+```rust
+use mimecraft::text::html_attribute_decode;
+
+assert_eq!(html_attribute_decode("?a=1&not=2"), "?a=1&not=2");
+assert_eq!(html_attribute_decode("&noti;&notin;&not!"), "&noti;\u{2209}\u{ac}!");
+assert_eq!(html_attribute_decode("&#65= &amp;lt;"), "A= &lt;");
+```
+
+Supply attribute contents, not a complete tag or document. This helper does not
+remove quotes, parse unquoted delimiters, normalize whitespace, replace literal
+NUL characters, or validate URLs. `HtmlAttribute` constructors still accept
+already-decoded logical values and do not automatically decode them.
+
+`text::HtmlEntityDecoder` decodes a single reference character by character.
+Push the initial `&`, then continue until `push` returns `Ok(false)` or input
+ends. The refused character remains the caller's responsibility. A first
+character other than `&` returns `HtmlEntityDecoderError::ExpectedAmpersand`;
+an accepted semicolon makes all subsequent pushes return `Ok(false)`.
+
+```rust
+use mimecraft::text::HtmlEntityDecoder;
+
+let mut decoder = HtmlEntityDecoder::new();
+for character in "&noti".chars() {
+    assert!(decoder.push(character).unwrap());
+}
+assert_eq!(decoder.value(), "\u{ac}i");
+assert_eq!(decoder.attribute_value(None), "&noti");
+for character in "n;".chars() {
+    assert!(decoder.push(character).unwrap());
+}
+assert_eq!(decoder.value(), "\u{2209}");
+assert!(!decoder.push('!').unwrap());
+decoder.reset();
+assert_eq!(decoder.value(), "");
+```
+
+`value()` uses character-data rules; `attribute_value(next)` uses attribute
+rules, with the first unconsumed character or `None` for end-of-input. Any
+pushed suffix beyond the longest matching name takes precedence over that
+lookahead. Neither accessor changes state. State survives input chunk
+boundaries, so do not finalize or reset merely because a chunk ended.
+Call `reset()` between references; it retains the allocated buffer.
+
+The decoder retains at most 33 ASCII input characters, including `&`, even
+while consuming arbitrarily long numeric references. A narrowing range into
+the shared sorted entity table replaces MimeKit's generated transition tables.
+This is not a chunk-fed whole-document decoder or HTML tokenizer.
+
+#### Character-reference diagnostics
+
+`html_decode_with_options` and `html_attribute_decode_with_options` return
+`DecodedHtml { text, issues }`. Their text exactly matches the corresponding
+string-only helpers. Diagnostics do not change recovery or stop decoding.
+
+```rust
+use mimecraft::text::{
+    HtmlDecodeOptions, HtmlEntityViolation, html_decode_with_options,
+};
+
+let options = HtmlDecodeOptions { max_issues_per_violation: 1 };
+let decoded = html_decode_with_options("&#0;&#0; &foo;", &options);
+assert_eq!(decoded.text, "\u{fffd}\u{fffd} &foo;");
+assert_eq!(decoded.issues[0].violation, HtmlEntityViolation::NullCharacterReference);
+assert_eq!(decoded.issues[1].violation, HtmlEntityViolation::TooManyComplianceIssues);
+assert_eq!(decoded.issues[1].offset, 4);
+assert_eq!(decoded.issues[2].violation, HtmlEntityViolation::UnknownNamedCharacterReference);
+```
+
+`HtmlEntityViolation` covers missing digits, values outside the Unicode range,
+controls, missing semicolons, noncharacters, nulls, surrogates, and unknown
+names. At a shared offset, a missing semicolon is reported before a
+numeric-value violation. Classification uses the original numeric value,
+before C1 remapping or replacement. TAB, LF, and FF are exempt from the
+control-character diagnostic, but CR is not.
+
+An unknown name requires ASCII alphanumeric characters followed by `;` and
+no recognized prefix. Thus `&foo;` is unknown, `&foo` has no violation, and
+`&noti;` instead lacks a semicolon after the recognized `not` prefix. In
+attribute context that last reference is preserved literally without a
+violation, as are other historical attribute exceptions.
+
+Each `HtmlDecodeIssue` stores a violation and the zero-based **UTF-8 byte
+offset** of its original leading `&`, not MimeKit's UTF-16 offset or a position
+in the decoded result. BOMs, line endings, quotes, and other literal characters
+are preserved and counted as supplied. Line/column metadata is not synthesized.
+
+`HtmlDecodeOptions::default()` reports every issue (`max_issues_per_violation`
+is zero). Set a positive limit when report size must be bounded. Budgets are
+per violation and per call, so repeated low-interest issues cannot hide a
+different kind. At most eight times the limit plus one issues are stored.
+The first suppressed issue emits one `TooManyComplianceIssues` marker at its
+offset; reaching the budget without suppressing anything emits no marker.
+Decoding and other violation budgets continue normally.
+
+For character-fed use, `HtmlEntityDecoder::violations()` and
+`attribute_violations(next)` inspect current state without changing it or
+allocating an issue collection. They yield at most two reference violations.
+Read them at the end of a reference, not an intermediate chunk boundary.
+Unknown names require scanning the refused suffix through a possible `;`,
+which the whole-string APIs do but these accessors do not.
+
+These are reference-only diagnostics, not an HTML compliance framework:
+literal controls, tag structure, comment/script context, and URL safety are
+not checked. General HTML compliance logging, severity/category metadata, and
+HTML tokenization remain deferred.
+
+### Converting plain text to HTML
+
+`text::TextToHtml` converts decoded plain text into an HTML document or fragment,
+escaping input markup and adding line breaks, quote blocks, and automatic links.
+
+```rust
+use mimecraft::text::TextToHtml;
+
+let converter = TextToHtml {
+    output_html_fragment: true,
+    ..TextToHtml::new()
+};
+assert_eq!(
+    converter.convert("> Hello & goodbye"),
+    "<blockquote>Hello &amp; goodbye<br/></blockquote>"
+);
+assert_eq!(
+    converter.convert("Visit www.example.com"),
+    "Visit <a href=\"http://www.example.com\">www.example.com</a><br/>"
+);
+```
+
+By default, output includes `<html><body>` and `</body></html>`. Fragment mode
+omits only those wrappers. Each logical line produces `<br/>`, including an
+unterminated final line; empty input adds no break. CRLF, LF, and bare CR are
+accepted. Leading `>` markers, optionally separated by one ASCII space each,
+become nested blockquotes. Outstanding quotes close at the end of each fragment.
+Whitespace otherwise follows `html_encode`; spaces and tabs are not expanded,
+so browsers may collapse them.
+
+The optional `header` and `footer` fields are `Option<String>`.
+`header_format` and `footer_format` default to `HeaderFooterFormat::Text`,
+converting each decoration as an independent fragment with the same quote/link
+rules. `HeaderFooterFormat::Html` instead copies trusted markup verbatim.
+No separators are inserted between fragments, and decorations are emitted even
+with an empty body. This is not HTML sanitization; never use the HTML format for
+untrusted decorations without a separate sanitization policy.
+
+Automatic links recognize MimeKit's fixed `http://`, `https://`, `ftp://`,
+`sftp://`, `file://`, `news://`, `nntp://`, `telnet://`, `webcal://`, `callto:`,
+`h323:`, `sip:`, and `mailto:` prefixes, ignoring ASCII case. `www.` and `ftp.`
+gain their implied schemes, and bare email addresses gain `mailto:`.
+Bare-address domains require at least two labels and a final label containing
+at least two Unicode letters or a validated IDNA A-label (`xn--...`), using
+the existing `mimecraft::idna` helpers. Whitespace, controls, and Unicode format
+characters terminate unquoted components. Local-part, label, and domain limits count 64, 63, and 255
+UTF-8 bytes, respectively, instead of the source's UTF-16 units.
+
+Trailing prose punctuation and enclosing delimiters are excluded, while balanced
+inner brackets in paths, queries, and fragments remain part of the URL. Queries
+and fragments can follow a host directly, including an empty `#`. Schemes ending
+in `://` support userinfo and bracketed IPv6 hosts. Address literals follow SMTP
+syntax, while URI IPv6 hosts use URI compression and embedded IPv4 rules;
+IPvFuture and scoped IPv6 hosts are not recognized. These are source heuristics,
+not full URL/address validation: partial-word matches and unrestricted numeric
+ports are preserved.
+Targets are escaped, not canonicalized, resolved, or checked for trustworthiness.
+Conversion does not change MIME parts or decode charsets. HTML-input conversion,
+custom tag callbacks and streaming adapters remain deferred; `HtmlWriter`
+provides a separate in-memory markup construction API.
+
+### Converting flowed text to HTML
+
+`text::FlowedToHtml` converts decoded `format=flowed` text into HTML paragraphs.
+It removes one stuffing space after contiguous quote markers, joins soft-broken
+lines, and lets quote-depth changes take precedence over continuation.
+Nonempty paragraphs become `<p>...</p>`, empty hard paragraphs become `<br/>`,
+and quotation levels become nested `<blockquote>` elements. Links are detected
+after unwrapping, using the same scanner and escaping rules as `TextToHtml`.
+
+```rust
+use mimecraft::text::FlowedToHtml;
+
+let mut converter = FlowedToHtml::new();
+converter.output_html_fragment = true;
+assert_eq!(
+    converter.convert("> hello \n> world"),
+    "<blockquote><p>hello world</p>\r\n</blockquote>"
+);
+converter.delete_space = true;
+assert_eq!(converter.convert("soft \nbreak"), "<p>softbreak</p>\r\n");
+```
+
+Set `delete_space` only for `delsp=yes` (ignoring ASCII case); it removes
+exactly one trailing soft-break space. Tabs and Unicode whitespace do not mark
+continuation. CRLF, LF, and bare CR input endings are accepted. A final nonempty
+flowed paragraph is emitted even at EOF, with its closing tag and markup newline.
+Empty pending paragraphs are omitted, including on quote-depth changes. Like
+MimeKit, `-- ` is treated as a soft break, not a signature separator.
+
+The default output is a complete document with CRLF paragraph markup newlines
+on every platform. `with_new_line_format(NewLineFormat::Unix)` selects LF;
+`Mixed` is rejected. `new_line_format()` reports the setting. This affects only
+paragraph markup newlines, not wrappers, quotation tags, or decorations.
+`output_html_fragment` omits the outer `<html><body>` wrapper.
+
+`header`, `footer`, `header_format`, and `footer_format` work like `TextToHtml`:
+text decorations are converted as independent **plain-text**, not flowed,
+fragments, while HTML decorations are trusted markup copied verbatim.
+Each fragment closes its own quotes; no separators are inserted between them.
+Conversion does not modify MIME parts, decode charsets, sanitize trusted HTML,
+or expose the C# tag callbacks and stream APIs.
 
 ### Delivery-status groups
 
@@ -3844,6 +4313,80 @@ the default and checked length range in `Text/TextPreviewer.cs`, and
 trim-before-ellipsis ordering are retained; Unicode scalar counts replace
 UTF-16 code-unit counts. Stream overloads, automatic body previews, and
 charset-recovery behavior are not ported.
+HTML encoding adapts `Text/HtmlUtils.cs` and
+`UnitTests/Text/HtmlUtilsTests.cs`, preserving the unchanged-prefix fast path,
+quote-specific escaping, control handling, and decimal-reference boundaries.
+The shared numeric writer retains the source's stack-buffer layout and inline
+comments without allocating a temporary string per Unicode character.
+Typed attribute quotes replace invalid-character errors, and UTF-8 scalar
+iteration replaces surrogate-pair handling. Name validation uses the source's
+delimiter checks for the in-memory writer; stream overloads remain deferred.
+The in-memory `HtmlWriter` adapts `Text/HtmlWriter.cs`,
+`Text/HtmlWriterState.cs`, and `UnitTests/Text/HtmlWriterTests.cs`.
+Checked operations and an owned string replace exceptions and external writer
+lifetime management; `finish()` consumes the writer after flushing a pending
+start tag. Applicable inline comments are retained. Tokenizer-supplied unchecked
+attribute names are not exposed: public names reject a leading `=`, rather than
+needing the token serializer's previous-valueless-attribute workaround.
+HTML identifiers and attributes adapt `Text/HtmlTagId.cs`,
+`Text/HtmlAttributeId.cs`, `Text/HtmlAttribute.cs`, and
+`Text/HtmlAttributeCollection.cs`, with regression coverage from their
+corresponding `UnitTests/Text` tests. Sorted static tables replace runtime
+dictionaries; immutable names allow identifiers to be resolved at construction
+instead of through a lazy sentinel cache. Ordered vectors, `Option` lookups,
+and checked constructors replace nullable lists, out parameters, and exceptions.
+Applicable comments are retained or adapted; ASCII name matching deliberately
+avoids .NET-specific Unicode ordinal folding.
+HTML tokens adapt `Text/HtmlToken.cs`, `Text/HtmlTokenKind.cs`, and the
+`HtmlWriter.WriteToken` path, with fixtures from `UnitTests/Text/HtmlTokenTests.cs`,
+`HtmlTokenizerTests.cs`, and `HtmlWriterTests.cs`. An owned enum replaces
+inheritance, and explicit data constructors replace internal encoding/context
+flags. Applicable comments preserve the bogus-comment slash restoration,
+trailing-less-than protection, and DOCTYPE name/quote rationale. Checked
+DOCTYPE setters retain keyword transitions and reject unrepresentable values
+atomically. String output replaces `TextWriter`; tokenization and reusable
+character buffers are not included.
+Character-reference decoding follows `Text/HtmlEntityDecoder.cs`,
+`Text/HtmlEntityDecoder.g.cs`, and `HtmlUtils.HtmlDecode`. The standalone Rust
+generator adapts HtmlKit's `CodeGenerator/Program.cs` and bundles its
+`HtmlEntities.json` input. The generated named table is cross-checked against
+MimeKit's `UnitTests/TestData/html/HtmlEntities.json`;
+`UnitTests/Text/HtmlEntityDecoderTests.cs` supplies numeric recovery cases.
+Bounded longest-prefix searches replace the named-entity state machine, while
+numeric references consume unlimited digits with saturating arithmetic.
+Applicable recovery and compatibility comments are retained. `HtmlEntityDecoder`
+ports character-at-a-time consumption and reset semantics with bounded retained
+input; its attribute accessor and `html_attribute_decode` also apply MimeKit's
+historical attribute exception, including lookahead inside a pushed suffix.
+`UnitTests/Text/HtmlTokenizerTests.cs` supplies the attribute-reference fixture.
+Opt-in reference diagnostics port `HtmlEntityDecoder.GetComplianceViolations`
+and `HtmlTokenizer.ReadAmbiguousAmpersand`, using the character-reference subset
+of `HtmlComplianceViolation`. `HtmlComplianceOptions` and
+`HtmlCappedComplianceLogger` supply the per-kind budget and single-marker
+semantics. `HtmlTokenizerComplianceTests` and `HtmlCappedComplianceLoggerTests`
+supply recovery, ordering, and reporting-limit cases. Explicit Rust results
+replace callbacks, and source locations use UTF-8 byte offsets rather than
+UTF-16 code units. General HTML compliance logging and tokenization remain
+deferred.
+Plain-text HTML rendering adapts `Text/TextToHtml.cs`, `Text/UrlScanner.cs`,
+the fixed patterns in `Text/TextConverter.cs`, and
+`Text/HeaderFooterFormat.cs`, with cases from `UnitTests/Text/TextToHtmlTests.cs`
+and `UnitTests/Text/UrlScannerTests.cs`. Applicable scanner rationale and
+compatibility comments are retained. Fixed, ordered pattern tables replace
+runtime registration; bounded UTF-8 scanning replaces UTF-16 indexing.
+The `unicode-general-category` dependency supplies the letter and format
+classifications used by the scanner; existing IDNA helpers validate A-label
+top-level domains. HTML encoding reuses the existing append helper, and
+plain-text quote-prefix parsing is shared with
+`TextToFlowed`. Document/fragment output and independent text/HTML decorations
+are retained without the C# writer state machine, tag callbacks, or stream APIs.
+Flowed HTML rendering adapts `Text/FlowedToHtml.cs` and
+`UnitTests/Text/FlowedToHtmlTests.cs`, including applicable inline comments.
+It shares HTML link/decoration/quotation output with `TextToHtml` and
+space-unstuffing with `FlowedToText`, but retains its own paragraph state machine:
+the source converters differ when a pending flowed paragraph is empty.
+Paragraph markup newlines default to CRLF rather than the platform newline,
+with the same checked `NewLineFormat` constructor pattern as `FlowedToText`.
 Delivery-status groups adapt `MessageDeliveryStatus.cs`,
 `MimeParser.ParseStatusGroup`, `MimeReader.SkipBlankLines`, and
 `UnitTests/MessageDeliveryStatusTests.cs`; `ParserOptions.cs` supplies the
@@ -4116,6 +4659,40 @@ Unit tests explicitly exercise every supported backend, comparing outputs and
 pending decoder state with the scalar implementation. Cases cover every byte
 value inserted or replaced across vector boundaries, unaligned input, line
 wrapping, chunk splitting, padding, random noise, and cloned/reset codec state.
+
+### Regenerating HTML entities
+
+`tools\html-entities` is a standalone Rust port of HtmlKit's
+`CodeGenerator`. It generates `src\text\html_entities.rs` from the bundled
+`HtmlEntities.json`, emitting a sorted lookup table rather than C# transition
+tables. Unicode scalar escapes replace UTF-16 surrogate escapes, and the
+maximum name length is derived from the input. Update the JSON snapshot and
+regenerate instead of editing the generated Rust file.
+
+```text
+cargo run --manifest-path tools\html-entities\Cargo.toml
+cargo run --manifest-path tools\html-entities\Cargo.toml -- --check
+cargo test --manifest-path tools\html-entities\Cargo.toml
+cargo fmt --manifest-path tools\html-entities\Cargo.toml --check
+cargo clippy --manifest-path tools\html-entities\Cargo.toml --all-targets -- -D warnings
+```
+
+Default paths are relative to the tool's manifest directory, not the current
+working directory. To use another snapshot or output file, pass both paths:
+
+```text
+cargo run --manifest-path tools\html-entities\Cargo.toml -- INPUT.json OUTPUT.rs
+cargo run --manifest-path tools\html-entities\Cargo.toml -- --check INPUT.json OUTPUT.rs
+```
+
+The generator checks entity-name syntax, nonempty values, Unicode scalar
+validity, and agreement between `codepoints` and `characters`. Malformed JSON,
+duplicate names/fields, and invalid entries fail before output is written.
+Output is deterministic ASCII with LF newlines, independent of JSON property
+order. `--check` compares the exact generated bytes without writing and exits
+unsuccessfully for stale or missing output. The tool has its own manifest and
+lockfile; its JSON dependencies are not dependencies of the MIME library and
+generation is not part of normal library builds.
 
 ### Benchmarks
 

@@ -1,7 +1,7 @@
 // Adapted from MimeKit's Text/FlowedToText.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use super::{next_line, output_newline};
+use super::{next_line, output_newline, unquote_flowed};
 use crate::encodings::{EncoderOptionsError, NewLineFormat};
 
 /// Unwraps flowed text using MimeKit's paragraph and quote-depth rules.
@@ -79,10 +79,7 @@ impl FlowedToText {
         let mut paragraph_depth = None;
         let mut remaining = text;
         while let Some(line) = next_line(&mut remaining) {
-            let depth = line.bytes().take_while(|&byte| byte == b'>').count();
-            let unquoted = &line[depth..];
-            // A leading space after the quote markers is stuffing, not text.
-            let unquoted = unquoted.strip_prefix(' ').unwrap_or(unquoted);
+            let (unquoted, depth) = unquote_flowed(line);
             if let Some(previous) = paragraph_depth
                 && depth != previous
             {

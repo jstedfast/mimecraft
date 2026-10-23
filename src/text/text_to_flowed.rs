@@ -1,7 +1,7 @@
 // Adapted from MimeKit's Text/TextToFlowed.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use super::{next_line, output_newline};
+use super::{next_line, output_newline, unquote};
 use crate::encodings::{EncoderOptionsError, NewLineFormat};
 
 /// Wraps plain text for `text/plain; format=flowed; delsp=yes`.
@@ -75,12 +75,7 @@ impl TextToFlowed {
         let mut remaining = text;
         while let Some(line) = next_line(&mut remaining) {
             // Trim spaces before user-inserted hard line breaks.
-            let mut line = line.trim_end_matches(' ');
-            let mut depth = 0;
-            while let Some(unquoted) = line.strip_prefix('>') {
-                depth += 1;
-                line = unquoted.strip_prefix(' ').unwrap_or(unquoted);
-            }
+            let (line, depth) = unquote(line.trim_end_matches(' '));
             let mut index = 0;
             let mut word_end = 0;
             loop {

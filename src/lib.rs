@@ -78,6 +78,27 @@
 //! and footers, without inserting separators or normalizing line endings.
 //! [`text::PlainTextPreviewer`] produces length-limited, whitespace-normalized
 //! previews of decoded plain text without selecting or reading MIME bodies.
+//! [`text::html_encode`] and [`text::html_attribute_encode`] escape character
+//! data and quoted attribute values without parsing or rendering HTML.
+//! [`text::HtmlWriter`] builds HTML in memory with checked tag/attribute
+//! operations, escaped text, explicit states, and trusted raw markup.
+//! [`text::HtmlTagId`] and [`text::HtmlAttributeId`] recognize canonical names;
+//! [`text::HtmlAttributeCollection`] preserves checked attributes in order,
+//! including duplicate names and valueless attributes.
+//! [`text::HtmlToken`] serializes owned tags, comments, character data, CDATA,
+//! script data, and checked doctypes without providing an HTML tokenizer.
+//! [`text::html_decode`] decodes named and numeric character references using
+//! MimeKit's permissive character-data rules without stripping markup.
+//! [`text::html_attribute_decode`] preserves ambiguous legacy references in
+//! attribute contents, while [`text::HtmlEntityDecoder`] accepts one character
+//! at a time with bounded state and context-sensitive value retrieval.
+//! [`text::html_decode_with_options`] and
+//! [`text::html_attribute_decode_with_options`] add reference diagnostics with
+//! original UTF-8 byte offsets and optional per-violation reporting limits.
+//! [`text::TextToHtml`] renders decoded plain text with line breaks, quote blocks,
+//! automatic links, and optional text or trusted-HTML headers and footers.
+//! [`text::FlowedToHtml`] joins flowed lines into HTML paragraphs with the same
+//! links and decorations, preserving quote-depth boundaries and `delsp` behavior.
 //! [`io::BoundedStream`] exposes a seekable source range without copying it,
 //! suitable for storing a MIME body's subrange in [`MimeContent`].
 //! [`io::ChainedStream`] joins seekable sources into one logical stream with

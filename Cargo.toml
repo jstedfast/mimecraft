@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 encoding_rs = "0.8"
 idna = "1.1"
+unicode-general-category = "1.1"
 
 [features]
 default = ["simd"]
