@@ -111,7 +111,7 @@ impl MessageFeedbackReport {
     /// to encode fields. Bytes after the old body's first block are discarded.
     ///
     /// Outer headers remain unchanged, including requested transfer encoding
-    /// and any stale Content-Length. Stored encoding becomes `Default`, source
+    /// and any stale Content-Length. Stored encoding becomes `Unspecified`, source
     /// position is zero, and the newline hint is cleared. No old source I/O occurs.
     ///
     /// # Errors

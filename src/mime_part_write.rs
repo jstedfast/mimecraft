@@ -79,7 +79,7 @@ impl MimePartWriteOptions {
 impl<R: Read + Seek> MimePart<R> {
     /// Writes headers, a blank separator, and the body using default options.
     ///
-    /// Uses the first Content-Transfer-Encoding header, or `Default` if absent.
+    /// Uses the first Content-Transfer-Encoding header, or `Unspecified` if absent.
     /// Stored content with a different encoding is decoded and re-encoded
     /// incrementally; matching encodings avoid that conversion. Binary output
     /// preserves bytes, while other output uses the selected newline format.
@@ -133,7 +133,7 @@ impl<R: Read + Seek> MimePart<R> {
     /// let mut output = Vec::new();
     /// part.write_to(&mut output)?;
     /// assert!(output.ends_with(b"\r\n\r\naGVsbG8=\r\n"));
-    /// assert_eq!(part.content().encoding(), ContentEncoding::Default);
+    /// assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
     /// # Ok::<(), std::io::Error>(())
     /// ```
     pub fn write_to_with_options<W: Write + ?Sized>(

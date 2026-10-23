@@ -115,7 +115,11 @@ fn copy(content: &mut MimeContent<Source>, sink: &mut dyn Write, decode: bool) -
 }
 
 const CASES: &[(ContentEncoding, &[u8], &[u8])] = &[
-    (ContentEncoding::Default, b"raw\r\n\xff\0", b"raw\r\n\xff\0"),
+    (
+        ContentEncoding::Unspecified,
+        b"raw\r\n\xff\0",
+        b"raw\r\n\xff\0",
+    ),
     (ContentEncoding::SevenBit, b"raw\n\x80", b"raw\n\x80"),
     (ContentEncoding::EightBit, b"x\xff", b"x\xff"),
     (ContentEncoding::Binary, b"\0\xff\r\n", b"\0\xff\r\n"),
@@ -137,7 +141,7 @@ fn construction_is_lazy_and_raw_copy_matches_mimekit() {
     let mut source = Source::new(&[1, 2, 3], usize::MAX);
     source.cursor.set_position(2);
     let mut content = MimeContent::new(source);
-    assert_eq!(content.encoding(), ContentEncoding::Default);
+    assert_eq!(content.encoding(), ContentEncoding::Unspecified);
     assert_eq!(content.new_line_format(), None);
     assert_eq!(content.get_ref().cursor.position(), 2);
     assert_eq!(content.get_ref().reads, 0);

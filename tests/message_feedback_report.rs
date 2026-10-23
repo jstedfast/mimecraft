@@ -37,8 +37,11 @@ fn part<R: Read + Seek>(source: R, encoding: ContentEncoding) -> MimePart<R> {
 }
 
 fn feedback(bytes: &[u8]) -> MessageFeedbackReport {
-    MessageFeedbackReport::from_part(part(Cursor::new(bytes.to_vec()), ContentEncoding::Default))
-        .unwrap()
+    MessageFeedbackReport::from_part(part(
+        Cursor::new(bytes.to_vec()),
+        ContentEncoding::Unspecified,
+    ))
+    .unwrap()
 }
 
 fn io_error(error: FeedbackReportError, kind: io::ErrorKind) {
@@ -55,7 +58,10 @@ fn constructor_creates_only_content_type_and_empty_unencoded_body() {
     );
     assert!(report.part().content().get_ref().get_ref().is_empty());
     assert!(report.fields().unwrap().is_empty());
-    assert_eq!(report.part().content().encoding(), ContentEncoding::Default);
+    assert_eq!(
+        report.part().content().encoding(),
+        ContentEncoding::Unspecified
+    );
     assert_eq!(report.part().content().new_line_format(), None);
     let mut report = MessageFeedbackReport::new();
     let expected = b"Feedback-Type: abuse\nUser-Agent: SomeGenerator/1.0\nVersion: 1\n";
@@ -91,7 +97,7 @@ fn wrapping_checks_first_type_and_does_not_accept_invented_global_subtype() {
         Some("message/global-feedback-report"),
         Some("text/feedback-report"),
     ] {
-        let mut part = part(Cursor::new(Vec::new()), ContentEncoding::Default);
+        let mut part = part(Cursor::new(Vec::new()), ContentEncoding::Unspecified);
         part.headers_mut().remove_all("Content-Type");
         if let Some(value) = value {
             part.headers_mut()
@@ -311,7 +317,10 @@ fn edits_replace_entire_body_atomically_without_rewriting_outer_headers() {
         .unwrap();
     assert_eq!(report.part().content().get_ref().get_ref(), b"X: new\n\n");
     assert_eq!(report.part().content().get_ref().position(), 0);
-    assert_eq!(report.part().content().encoding(), ContentEncoding::Default);
+    assert_eq!(
+        report.part().content().encoding(),
+        ContentEncoding::Unspecified
+    );
     assert_eq!(report.part().content().new_line_format(), None);
     assert_eq!(report.part().headers(), &headers);
     report.set_fields(&HeaderList::new()).unwrap();
@@ -432,7 +441,8 @@ fn borrowed_fragmented_sources_rewind_and_all_io_failures_propagate() {
     let mut source = Source::new();
     {
         let mut report =
-            MessageFeedbackReport::from_part(part(&mut source, ContentEncoding::Default)).unwrap();
+            MessageFeedbackReport::from_part(part(&mut source, ContentEncoding::Unspecified))
+                .unwrap();
         assert_eq!(report.fields().unwrap(), fields(b"X: a\r\n"));
         let MimeEntity::Part(_) = MimeEntity::from(report) else {
             panic!()
@@ -452,7 +462,8 @@ fn borrowed_fragmented_sources_rewind_and_all_io_failures_propagate() {
             ..Source::new()
         };
         let mut report =
-            MessageFeedbackReport::from_part(part(&mut source, ContentEncoding::Default)).unwrap();
+            MessageFeedbackReport::from_part(part(&mut source, ContentEncoding::Unspecified))
+                .unwrap();
         io_error(report.fields().unwrap_err(), io::ErrorKind::Other);
     }
 }
@@ -462,7 +473,8 @@ fn invalid_limits_and_raw_media_edits_fail_without_io_or_partial_changes() {
     let mut source = Source::new();
     {
         let mut report =
-            MessageFeedbackReport::from_part(part(&mut source, ContentEncoding::Default)).unwrap();
+            MessageFeedbackReport::from_part(part(&mut source, ContentEncoding::Unspecified))
+                .unwrap();
         for options in [
             FeedbackReportParseOptions {
                 max_decoded_bytes: 0,

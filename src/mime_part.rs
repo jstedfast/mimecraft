@@ -42,7 +42,7 @@ use crate::{
 /// )?;
 /// part.set_content_transfer_encoding(ContentEncoding::Base64);
 /// assert_eq!(part.content_transfer_encoding()?, ContentEncoding::Base64);
-/// assert_eq!(part.content().encoding(), ContentEncoding::Default);
+/// assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
 /// let mut decoded = Vec::new();
 /// part.content_mut().decode_to(&mut decoded)?;
 /// assert_eq!(decoded, b"hello");
@@ -256,7 +256,7 @@ impl<R: Read + Seek> MimePart<R> {
         Ok(())
     }
 
-    /// Reads the requested transfer encoding, or `Default` if its header is absent.
+    /// Reads the requested transfer encoding, or `Unspecified` if its header is absent.
     ///
     /// Matches MimeKit by applying [`Header::decode_value`] to the first
     /// matching header before [`ContentEncoding::parse`]. Charset-recovery
@@ -273,7 +273,7 @@ impl<R: Read + Seek> MimePart<R> {
 
     /// Sets the requested transfer-encoding header without transcoding the body.
     ///
-    /// `Default` removes all occurrences. Other encodings replace duplicates
+    /// `Unspecified` removes all occurrences. Other encodings replace duplicates
     /// with one canonical token and a CRLF-terminated record at the first slot,
     /// or append if absent. No I/O or automatic encoding analysis occurs.
     pub fn set_content_transfer_encoding(&mut self, encoding: ContentEncoding) {
@@ -298,6 +298,6 @@ pub(crate) fn transfer_encoding(
 ) -> Result<ContentEncoding, UnknownContentEncoding> {
     match headers.get("Content-Transfer-Encoding") {
         Some(header) => ContentEncoding::parse(&header.decode_value().text),
-        None => Ok(ContentEncoding::Default),
+        None => Ok(ContentEncoding::Unspecified),
     }
 }

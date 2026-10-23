@@ -189,13 +189,13 @@ and `reset`.
 
 ### Common codec interfaces and pass-through
 
-`mimecraft::ContentEncoding` mirrors MimeKit's `Default`, `SevenBit`, `EightBit`,
+`mimecraft::ContentEncoding` mirrors MimeKit's `Unspecified`, `SevenBit`, `EightBit`,
 `Binary`, `Base64`, `QuotedPrintable`, and `UuEncode` variants. It is metadata,
 not an encoder factory or content validator. Its `parse` method recognizes
 Content-Transfer-Encoding values; it does not parse an entire header line.
 
 `PassThroughEncoder::new(encoding)` and `PassThroughDecoder::new(encoding)`
-append input bytes unchanged. Their `default()` selects `ContentEncoding::Default`.
+append input bytes unchanged. Their `default()` selects `ContentEncoding::Unspecified`.
 The configured encoding is only a label: even `SevenBit` does not reject
 non-ASCII bytes, and selecting `Base64` does not perform Base64 encoding.
 Neither codec normalizes line endings; the encoder's `finish` emits nothing.
@@ -234,7 +234,7 @@ existing inherent methods, so existing callers need not import the traits.
 Boxed codecs also implement the traits, allowing generic adapters to own
 `Box<dyn MimeEncoder>` or `Box<dyn MimeDecoder>`.
 All incremental codecs implement the appropriate trait, including `Rfc2231Decoder`.
-As in MimeKit, yEnc codecs and `Rfc2231Decoder` report `ContentEncoding::Default`;
+As in MimeKit, yEnc codecs and `Rfc2231Decoder` report `ContentEncoding::Unspecified`;
 there are no dedicated enum variants for those formats.
 
 Output buffers grow as needed, replacing MimeKit's output-size estimates.
@@ -351,7 +351,7 @@ copies its state when the underlying codec implements `Clone`.
 
 `encoder_filter(encoding)` and `decoder_filter(encoding)` return
 `Box<dyn MimeFilter>`. Base64, quoted-printable, and UU select their codecs;
-`Default`, `SevenBit`, `EightBit`, and `Binary` pass through without validation
+`Unspecified`, `SevenBit`, `EightBit`, and `Binary` pass through without validation
 or newline conversion. The UU decoder factory scans for a `begin ` header;
 use `DecoderFilter::new(UuDecoder::for_payload())` for bare encoder output.
 These factories take `ContentEncoding`, not header strings.
@@ -533,7 +533,7 @@ inner writer so the ensured final newline is included in the encoded content.
 ### MIME content streams
 
 `MimeContent<R>` wraps a `Read + Seek` source and the transfer encoding of its
-stored bytes. `new(source)` labels unencoded content as `ContentEncoding::Default`;
+stored bytes. `new(source)` labels unencoded content as `ContentEncoding::Unspecified`;
 `with_encoding(source, encoding)` labels already-encoded content. Neither
 constructor performs I/O, validates the body, or encodes it.
 
@@ -615,7 +615,7 @@ part.set_content_disposition(Some(&disposition)).unwrap();
 part.set_content_transfer_encoding(ContentEncoding::Base64);
 
 // This requests Base64 for transmission; it does not change the stored bytes.
-assert_eq!(part.content().encoding(), ContentEncoding::Default);
+assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
 assert_eq!(part.content_transfer_encoding().unwrap(), ContentEncoding::Base64);
 let mut decoded = Vec::new();
 part.content_mut().decode_to(&mut decoded).unwrap();
@@ -634,8 +634,8 @@ remove later duplicates, and preserve unrelated records byte-for-byte.
 Formatting failure leaves headers and content unchanged. Setting disposition
 to `None` removes all occurrences without checking formatting options.
 Transfer-encoding lookup follows MimeKit's decoded-header-value semantics:
-missing means `Default`, but empty or unknown values return explicit errors.
-Setting `Default` removes all transfer-encoding headers; other encodings write
+missing means `Unspecified`, but empty or unknown values return explicit errors.
+Setting `Unspecified` removes all transfer-encoding headers; other encodings write
 one canonical token with CRLF termination.
 
 The stored encoding belongs to `MimeContent`, independently of the requested
@@ -654,7 +654,7 @@ Encoded message-wrapper interpretation and truncated-entity recovery remain defe
 
 `MimePart::write_to(&mut output)` writes normalized headers, one blank
 separator, and the body using CRLF and the first Content-Transfer-Encoding
-header (or `Default` when absent). It does not change headers or stored bytes.
+header (or `Unspecified` when absent). It does not change headers or stored bytes.
 Use `write_to_with_options` for explicit `MimePartWriteOptions`:
 
 ```rust
@@ -671,7 +671,7 @@ let options = MimePartWriteOptions {
 let mut output = Vec::new();
 part.write_to_with_options(&mut output, &options).unwrap();
 assert!(output.ends_with(b"\n\naGVsbG8=\n"));
-assert_eq!(part.content().encoding(), ContentEncoding::Default);
+assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
 ```
 
 Different stored/requested encodings trigger incremental decoding and encoding.
@@ -908,7 +908,7 @@ The first Content-Type selects multipart, attached message, or leaf; a missing
 type remains absent and normally selects an opaque leaf. Immediate
 multipart/digest children instead default to message/rfc822. Invalid present
 Content-Type and unknown transfer encodings are explicit errors. Stored encoding is initialized from
-the first Content-Transfer-Encoding header, or `Default` when absent. Bodies
+the first Content-Transfer-Encoding header, or `Unspecified` when absent. Bodies
 are neither decoded nor normalized and start at position zero. Newline hints
 describe their stored LF/CRLF sequences, excluding boundary framing.
 
@@ -1376,7 +1376,7 @@ remainder, later groups are re-encoded accordingly, including UU wrappers,
 so their metadata remains consistent on rereading. Outer headers remain
 unchanged, including requested transfer encoding and any stale Content-Length;
 callers must update descriptive fields themselves. Stored content becomes
-`Default` encoding at position zero. C# caches, change events, async parsing,
+`Unspecified` encoding at position zero. C# caches, change events, async parsing,
 and typed delivery-status field models remain deferred.
 
 ### Disposition-notification fields
@@ -1421,7 +1421,7 @@ notification. The setter serializes completely before replacing content;
 `set_fields_with_new_line_format` selects CRLF or LF and rejects Mixed.
 Each record is terminated and one blank separator is appended, even for an
 empty list. Replacement discards the entire old body, including any trailing
-non-field bytes. Stored encoding becomes `Default`, position is zero, and
+non-field bytes. Stored encoding becomes `Unspecified`, position is zero, and
 the newline hint is cleared. Outer headers, including requested transfer
 encoding and any stale Content-Length, remain untouched. Other metadata and
 serialization stay available through `part`/`part_mut`; later field operations
@@ -1470,7 +1470,7 @@ Detached edits take effect only after `set_fields` on an owned in-memory
 report. `set_fields_with_new_line_format` selects CRLF or LF; Mixed is rejected.
 Serialization terminates every record and appends a blank separator, even
 for empty fields. Replacement is atomic and discards the entire old body,
-including any trailing data. Stored encoding becomes `Default`, position is
+including any trailing data. Stored encoding becomes `Unspecified`, position is
 zero, and the newline hint is cleared. Outer headers, including requested
 transfer encoding and any stale Content-Length, remain unchanged.
 Use `part`/`part_mut` for metadata and serialization or `into_part` to recover
@@ -2340,8 +2340,8 @@ MimeKit's workaround for Google Docs appending a semicolon.
 The accepted tokens are `7bit`, `8bit`, `binary`, `base64`, `quoted-printable`,
 `x-uuencode`, `uuencode`, and `x-uue`. The last three all select `UuEncode`.
 `ContentEncoding::as_str()` returns the canonical token, using `x-uuencode`
-for UU, or `None` for `Default`. Empty or unrecognized input returns
-`UnknownContentEncoding`, never a success-shaped `Default`.
+for UU, or `None` for `Unspecified`. Empty or unrecognized input returns
+`UnknownContentEncoding`, never a success-shaped `Unspecified`.
 
 This is not strict validation: `base64; junk` and `base64 other text` are
 accepted, while `(comment) base64` and `base64(comment)` are rejected. It does

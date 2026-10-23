@@ -95,7 +95,7 @@ impl<F: MimeFilter + ?Sized> MimeFilter for &mut F {
 /// Creates an encoding filter using CRLF and MimeKit's default width of 78.
 ///
 /// Base64 and quoted-printable cap that width at 76. UU uses its fixed line
-/// width; `Default`, `SevenBit`, `EightBit`, and `Binary` pass through unchanged.
+/// width; `Unspecified`, `SevenBit`, `EightBit`, and `Binary` pass through unchanged.
 /// UU output contains payload and a zero-length terminator, not `begin`/`end`
 /// wrappers.
 pub fn encoder_filter(encoding: ContentEncoding) -> Box<dyn MimeFilter> {
@@ -135,7 +135,7 @@ pub fn encoder_filter_with_options(
         ContentEncoding::UuEncode => Box::new(EncoderFilter::new(UuEncoder::with_new_line_format(
             new_line_format,
         )?)),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
         | ContentEncoding::SevenBit
         | ContentEncoding::EightBit
         | ContentEncoding::Binary => Box::new(PassThroughFilter::new()),
@@ -159,7 +159,7 @@ pub fn decoder_filter(encoding: ContentEncoding) -> Box<dyn MimeFilter> {
             Box::new(DecoderFilter::new(QuotedPrintableDecoder::new()))
         }
         ContentEncoding::UuEncode => Box::new(DecoderFilter::new(UuDecoder::new())),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
         | ContentEncoding::SevenBit
         | ContentEncoding::EightBit
         | ContentEncoding::Binary => Box::new(PassThroughFilter::new()),

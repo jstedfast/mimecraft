@@ -20,7 +20,7 @@ fn raw_part<R: Read + Seek>(source: R, encoding: ContentEncoding) -> MimePart<R>
 fn status(bytes: &[u8]) -> MessageDeliveryStatus {
     MessageDeliveryStatus::from_part(raw_part(
         Cursor::new(bytes.to_vec()),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap()
 }
@@ -46,7 +46,7 @@ fn new_empty_and_checked_media_types() {
         "message/delivery-status",
         "MESSAGE/GLOBAL-DELIVERY-STATUS; charset=utf-8",
     ] {
-        let mut part = raw_part(Cursor::new(Vec::new()), ContentEncoding::Default);
+        let mut part = raw_part(Cursor::new(Vec::new()), ContentEncoding::Unspecified);
         part.headers_mut()
             .replace_all(Header::parse(format!("Content-Type: {value}").as_bytes()).unwrap())
             .unwrap();
@@ -262,7 +262,7 @@ fn detached_edits_replace_atomically_and_preserve_outer_headers() {
     );
     assert_eq!(
         delivery.part().content().encoding(),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     );
     assert_eq!(delivery.part().content().get_ref().position(), 0);
     assert_eq!(delivery.part().headers(), &headers);
@@ -473,7 +473,7 @@ fn fragmented_borrowed_sources_retry_interruptions_and_rewind() {
     };
     {
         let mut delivery =
-            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Default))
+            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
                 .unwrap();
         assert_eq!(delivery.status_groups().unwrap().len(), 2);
         assert_eq!(delivery.status_groups().unwrap().len(), 2);
@@ -491,7 +491,7 @@ fn source_failures_are_propagated_including_final_rewind() {
             ..Source::new()
         };
         let mut delivery =
-            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Default))
+            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
                 .unwrap();
         io_error(delivery.status_groups().unwrap_err(), io::ErrorKind::Other);
     }
@@ -502,7 +502,7 @@ fn invalid_options_and_raw_media_edits_fail_before_source_io() {
     let mut source = Source::new();
     {
         let mut delivery =
-            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Default))
+            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
                 .unwrap();
         for options in [
             DeliveryStatusParseOptions {

@@ -41,7 +41,7 @@ use crate::ContentEncoding;
 pub trait MimeEncoder {
     /// Returns the encoding metadata, matching MimeKit.
     ///
-    /// yEnc reports [`ContentEncoding::Default`]. Pass-through encoders report
+    /// yEnc reports [`ContentEncoding::Unspecified`]. Pass-through encoders report
     /// their configured label without transforming or validating the bytes.
     fn encoding(&self) -> ContentEncoding;
 
@@ -87,7 +87,7 @@ pub trait MimeEncoder {
 pub trait MimeDecoder {
     /// Returns the encoding metadata, matching MimeKit.
     ///
-    /// [`YDecoder`] and [`Rfc2231Decoder`] report [`ContentEncoding::Default`].
+    /// [`YDecoder`] and [`Rfc2231Decoder`] report [`ContentEncoding::Unspecified`].
     /// Pass-through decoders return their configured label without interpreting it.
     fn encoding(&self) -> ContentEncoding;
 
@@ -188,7 +188,7 @@ impl MimeEncoder for UuEncoder {
 
 impl MimeEncoder for YEncoder {
     fn encoding(&self) -> ContentEncoding {
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     }
 
     fn encode(&mut self, input: &[u8], output: &mut Vec<u8>) {
@@ -266,7 +266,7 @@ impl MimeDecoder for UuDecoder {
 
 impl MimeDecoder for YDecoder {
     fn encoding(&self) -> ContentEncoding {
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     }
 
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
@@ -280,7 +280,7 @@ impl MimeDecoder for YDecoder {
 
 impl MimeDecoder for Rfc2231Decoder {
     fn encoding(&self) -> ContentEncoding {
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     }
 
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {

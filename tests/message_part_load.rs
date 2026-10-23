@@ -93,7 +93,7 @@ fn recognized_subtypes_and_transparent_encodings_build_structured_messages() {
             assert!(message.body().unwrap().headers().is_empty());
             let leaf = message.leaf_parts().next().unwrap();
             assert_eq!(leaf.content().get_ref().get_ref(), b"body");
-            assert_eq!(leaf.content().encoding(), ContentEncoding::Default);
+            assert_eq!(leaf.content().encoding(), ContentEncoding::Unspecified);
             assert_eq!(leaf.content().get_ref().position(), 0);
         }
     }

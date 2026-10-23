@@ -98,7 +98,7 @@ impl MimeEntity {
     /// constant-memory, zero-copy, persistent-source, or event-based parser.
     /// The resulting source type is [`Cursor<Vec<u8>>`], positioned at zero.
     /// Body encoding comes from the first Content-Transfer-Encoding header;
-    /// missing means `Default`. Body bytes are not decoded or newline-normalized.
+    /// missing means `Unspecified`. Body bytes are not decoded or newline-normalized.
     /// Newline hints describe stored LF/CRLF occurrences, excluding framing.
     ///
     /// Raw headers retain spelling, folds, duplicates, and malformed records
@@ -301,7 +301,7 @@ fn consume_line(
                         && message_type
                         && matches!(
                             encoding,
-                            ContentEncoding::Default
+                            ContentEncoding::Unspecified
                                 | ContentEncoding::SevenBit
                                 | ContentEncoding::EightBit
                                 | ContentEncoding::Binary

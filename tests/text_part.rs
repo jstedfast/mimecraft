@@ -38,10 +38,13 @@ fn utf8_construction_preserves_text_and_sets_only_content_type() {
         let content_type = text.part().content_type().unwrap().unwrap();
         assert_eq!(content_type.media_subtype(), subtype);
         assert_eq!(content_type.charset(), Some("utf-8"));
-        assert_eq!(text.part().content().encoding(), ContentEncoding::Default);
+        assert_eq!(
+            text.part().content().encoding(),
+            ContentEncoding::Unspecified
+        );
         assert_eq!(
             text.part().content_transfer_encoding().unwrap(),
-            ContentEncoding::Default
+            ContentEncoding::Unspecified
         );
         assert_eq!(text.part().content().get_ref().get_ref(), input.as_bytes());
         assert_eq!(text.text().unwrap(), input);
@@ -92,14 +95,14 @@ fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
     let mut text = TextPart::from_part(raw_part(
         "text/plain",
         b"\xef\xbb\xbfhello\n",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap();
     assert_eq!(text.text().unwrap(), "\u{feff}hello\n");
     let mut text = TextPart::from_part(raw_part(
         "text/plain",
         b"Ren\xe9e",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap();
     assert!(matches!(
@@ -116,7 +119,7 @@ fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
     let mut text = TextPart::from_part(raw_part(
         "text/html",
         b"\xff\xfeH\0i\0",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap();
     assert!(text.text().is_err());
@@ -128,7 +131,7 @@ fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
     let mut text = TextPart::from_part(raw_part(
         "text/html",
         b"<meta charset=iso-8859-1>Ren\xe9e",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap();
     assert!(text.text().is_err());
@@ -139,7 +142,7 @@ fn declared_charset_wins_and_explicit_override_does_not_edit_headers() {
     let mut text = TextPart::from_part(raw_part(
         "text/plain; charset=iso-8859-1",
         b"\xc3\xa9",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap();
     assert_eq!(text.text().unwrap(), "\u{c3}\u{a9}");
@@ -265,7 +268,10 @@ fn text_update_preserves_other_parameters_and_headers_but_replaces_stored_encodi
         text.part().headers().get("Content-Transfer-Encoding"),
         Some(&transfer)
     );
-    assert_eq!(text.part().content().encoding(), ContentEncoding::Default);
+    assert_eq!(
+        text.part().content().encoding(),
+        ContentEncoding::Unspecified
+    );
     assert_eq!(text.part().content().new_line_format(), None);
     assert_eq!(text.part().content().get_ref().position(), 0);
     assert_eq!(text.part().content().get_ref().get_ref(), b"caf\xe9\n");

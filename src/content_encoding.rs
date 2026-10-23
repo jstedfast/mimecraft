@@ -7,12 +7,16 @@ use std::{error::Error, fmt, str::FromStr};
 ///
 /// This identifies an encoding; it does not encode, decode, or validate bytes.
 /// yEnc and parameter percent escaping have no separate variants, matching
-/// MimeKit. Their incremental codecs report [`Default`](Self::Default).
+/// MimeKit. Their incremental codecs report [`Unspecified`](Self::Unspecified).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ContentEncoding {
-    /// Unspecified encoding, normally meaning no transformation.
+    /// No content transfer encoding is specified.
+    ///
+    /// Setting this on a MIME part removes its Content-Transfer-Encoding
+    /// headers. For stored content, this means the bytes have not been
+    /// transfer-encoded. Encoder and decoder filters pass them through unchanged.
     #[default]
-    Default,
+    Unspecified,
     /// Unencoded text restricted to the US-ASCII range.
     SevenBit,
     /// Unencoded text containing non-ASCII bytes, requiring a suitable transport.
@@ -42,7 +46,7 @@ impl ContentEncoding {
     /// # Errors
     ///
     /// Returns [`UnknownContentEncoding`] for empty or unknown tokens.
-    /// [`Default`](Self::Default) is never returned as a successful parse.
+    /// [`Unspecified`](Self::Unspecified) is never returned as a successful parse.
     ///
     /// ```
     /// use mimecraft::ContentEncoding;
@@ -81,7 +85,7 @@ impl ContentEncoding {
     /// tokens are `7bit`, `8bit`, `binary`, `base64`, and `quoted-printable`.
     pub const fn as_str(self) -> Option<&'static str> {
         match self {
-            Self::Default => None,
+            Self::Unspecified => None,
             Self::SevenBit => Some("7bit"),
             Self::EightBit => Some("8bit"),
             Self::Binary => Some("binary"),

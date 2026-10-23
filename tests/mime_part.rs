@@ -42,7 +42,7 @@ fn default_part_owns_content_without_inferring_its_transfer_encoding() {
     assert_eq!(part.content_disposition().unwrap(), None);
     assert_eq!(
         part.content_transfer_encoding().unwrap(),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     );
     assert_eq!(part.content().encoding(), ContentEncoding::Base64);
     assert_eq!(part.content().new_line_format(), Some(NewLineFormat::Dos));
@@ -88,7 +88,7 @@ fn from_parts_preserves_missing_duplicate_and_malformed_headers() {
     assert_eq!(missing.content_disposition().unwrap(), None);
     assert_eq!(
         missing.content_transfer_encoding().unwrap(),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     );
 }
 
@@ -269,7 +269,7 @@ fn metadata_format_failures_leave_the_entire_part_unchanged() {
     assert_eq!(part.headers(), &before);
     assert_eq!(part.headers().index_of("Content-Disposition"), Some(2));
     assert_eq!(part.headers().last_index_of("Content-Type"), Some(1));
-    assert_eq!(part.content().encoding(), ContentEncoding::Default);
+    assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
     assert_eq!(part.content().get_ref().position(), 4);
     assert_eq!(part.content().get_ref().get_ref(), b"body bytes");
 }
@@ -291,7 +291,7 @@ fn transfer_encoding_reads_decoded_first_value_with_explicit_unknown_errors() {
         part.headers_mut()
             .add(Header::parse(format!("Content-Transfer-Encoding: {value}").as_bytes()).unwrap());
         assert_eq!(part.content_transfer_encoding().unwrap(), encoding);
-        assert_eq!(part.content().encoding(), ContentEncoding::Default);
+        assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
         assert_eq!(part.content().get_ref().position(), 4);
     }
     for value in ["", "unknown", "(comment) base64"] {
@@ -337,10 +337,10 @@ fn transfer_encoding_updates_do_not_relabel_or_transcode_stored_content() {
         assert_eq!(part.content().encoding(), ContentEncoding::Base64);
         assert_eq!(part.content().get_ref().position(), 5);
     }
-    part.set_content_transfer_encoding(ContentEncoding::Default);
+    part.set_content_transfer_encoding(ContentEncoding::Unspecified);
     assert_eq!(
         part.content_transfer_encoding().unwrap(),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     );
     assert_eq!(part.headers().as_slice(), &raw.as_slice()[1..2]);
     part.set_content_transfer_encoding(ContentEncoding::QuotedPrintable);
@@ -369,7 +369,7 @@ fn replacing_and_extracting_content_preserves_ownership_positions_and_hints() {
     replacement.get_mut().set_position(2);
     replacement.set_new_line_format(Some(NewLineFormat::Mixed));
     let previous = part.set_content(replacement);
-    assert_eq!(previous.encoding(), ContentEncoding::Default);
+    assert_eq!(previous.encoding(), ContentEncoding::Unspecified);
     assert_eq!(previous.get_ref().position(), 4);
     assert_eq!(part.headers(), &before);
     assert_eq!(

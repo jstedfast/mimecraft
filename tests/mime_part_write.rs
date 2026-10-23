@@ -10,7 +10,7 @@ use mimecraft::{
 };
 
 const ENCODINGS: [ContentEncoding; 7] = [
-    ContentEncoding::Default,
+    ContentEncoding::Unspecified,
     ContentEncoding::SevenBit,
     ContentEncoding::EightBit,
     ContentEncoding::Binary,
@@ -142,7 +142,7 @@ fn newline_conversion_and_ensure_newline_do_not_change_binary_or_base64_input() 
             ..Default::default()
         };
         for encoding in [
-            ContentEncoding::Default,
+            ContentEncoding::Unspecified,
             ContentEncoding::SevenBit,
             ContentEncoding::EightBit,
         ] {
@@ -159,7 +159,7 @@ fn newline_conversion_and_ensure_newline_do_not_change_binary_or_base64_input() 
         assert_eq!(decoded, b"a\nb\r\nc\rd");
 
         for ending in [&b"x"[..], b"x\r", b"x\n", b"x\r\n"] {
-            let output = serialize(ending, ContentEncoding::Default, &options);
+            let output = serialize(ending, ContentEncoding::Unspecified, &options);
             assert_eq!(
                 body(&output, format),
                 if format == NewLineFormat::Dos {
@@ -438,7 +438,7 @@ fn requested_encoder_widths_and_chunked_streaming_work_for_large_bodies() {
 #[test]
 fn io_failures_propagate_and_retry_restarts_the_whole_part() {
     for encoding in [
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         ContentEncoding::Binary,
         ContentEncoding::Base64,
         ContentEncoding::UuEncode,

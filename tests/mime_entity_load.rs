@@ -89,7 +89,10 @@ fn opaque_option_preserves_message_leaves_without_synthesized_headers() {
         )
         .unwrap();
         assert_eq!(bytes(&entity), b"From: someone@example.com\r\n\r\nbody");
-        assert_eq!(part(&entity).content().encoding(), ContentEncoding::Default);
+        assert_eq!(
+            part(&entity).content().encoding(),
+            ContentEncoding::Unspecified
+        );
         if !header.starts_with("Content-Type") {
             assert!(entity.headers().get("content-type").is_none());
         }
@@ -475,7 +478,7 @@ fn invalid_options_do_no_io_and_source_failures_never_return_partial_trees() {
 #[test]
 fn stored_transfer_encodings_can_be_read_edited_and_rewritten() {
     for encoding in [
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         ContentEncoding::SevenBit,
         ContentEncoding::EightBit,
         ContentEncoding::Binary,

@@ -31,7 +31,7 @@ fn entity(content_type: Option<&str>, bytes: &[u8], encoding: ContentEncoding) -
 fn absent_and_empty_bodies_remain_distinct_and_attached_messages_are_not_read() {
     let mut message: MimeMessage = MimeMessage::new();
     assert_eq!(message.text_body(TextFormat::Plain).unwrap(), None);
-    message.set_body(Some(entity(None, b"", ContentEncoding::Default)));
+    message.set_body(Some(entity(None, b"", ContentEncoding::Unspecified)));
     assert_eq!(
         message.text_body(TextFormat::Plain).unwrap().as_deref(),
         Some("")
@@ -63,7 +63,11 @@ fn decoded_plain_and_html_preserve_newlines_boms_and_markup() {
             "{\\rtf1 hello}\r\n",
         ),
     ] {
-        let mut body = entity(Some(media_type), text.as_bytes(), ContentEncoding::Default);
+        let mut body = entity(
+            Some(media_type),
+            text.as_bytes(),
+            ContentEncoding::Unspecified,
+        );
         let before = body.headers().clone();
         assert_eq!(body.text_body(format).unwrap().as_deref(), Some(text));
         assert_eq!(body.headers(), &before);
@@ -125,7 +129,7 @@ fn text_part_text_keeps_flowed_formatting_and_other_formats_do_not_reflow() {
     let mut text = TextPart::from_part(raw_part(
         Some("text/plain; format=flowed; delsp=yes"),
         Cursor::new(b"soft \nbreak"),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap();
     assert_eq!(text.text().unwrap(), "soft \nbreak");
@@ -137,7 +141,7 @@ fn text_part_text_keeps_flowed_formatting_and_other_formats_do_not_reflow() {
     let mut html = entity(
         Some("text/html; format=flowed; delsp=yes"),
         b"hello \nworld",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     );
     assert_eq!(
         html.text_body(TextFormat::Html).unwrap().as_deref(),
@@ -150,7 +154,7 @@ fn unknown_charsets_fail_before_io_and_invalid_bytes_fail_after_rewind() {
     let mut body = entity(
         Some("text/plain; charset=x-unknown"),
         b"data",
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     );
     let part = body.text_body_part_mut(TextFormat::Plain).unwrap().unwrap();
     part.content_mut().get_mut().set_position(2);
@@ -163,7 +167,7 @@ fn unknown_charsets_fail_before_io_and_invalid_bytes_fail_after_rewind() {
     let part = body.text_body_part(TextFormat::Plain).unwrap().unwrap();
     assert_eq!(part.content().get_ref().position(), 2);
     for content_type in [None, Some("text/plain"), Some("text/plain; charset=utf-8")] {
-        let mut body = entity(content_type, b"Ren\xe9e", ContentEncoding::Default);
+        let mut body = entity(content_type, b"Ren\xe9e", ContentEncoding::Unspecified);
         body.text_body_part_mut(TextFormat::Plain)
             .unwrap()
             .unwrap()
@@ -196,8 +200,8 @@ fn unknown_charsets_fail_before_io_and_invalid_bytes_fail_after_rewind() {
 fn decoding_failure_does_not_fall_back_to_an_earlier_alternative() {
     let mut alternative = Multipart::new("alternative", "alt").unwrap();
     alternative.children_mut().extend([
-        entity(Some("text/plain"), b"valid", ContentEncoding::Default),
-        entity(Some("text/plain"), b"\xff", ContentEncoding::Default),
+        entity(Some("text/plain"), b"valid", ContentEncoding::Unspecified),
+        entity(Some("text/plain"), b"\xff", ContentEncoding::Unspecified),
     ]);
     let mut message = MimeMessage::with_body(alternative.into());
     assert!(matches!(
@@ -260,7 +264,12 @@ fn initial_seek_read_and_final_rewind_failures_are_not_hidden() {
         };
         {
             let mut message = MimeMessage::with_body(
-                raw_part(Some("text/plain"), &mut source, ContentEncoding::Default).into(),
+                raw_part(
+                    Some("text/plain"),
+                    &mut source,
+                    ContentEncoding::Unspecified,
+                )
+                .into(),
             );
             let error = message.text_body(TextFormat::Plain).unwrap_err();
             assert!(
@@ -282,8 +291,12 @@ fn metadata_failures_and_nonmatching_bodies_never_touch_the_source() {
     ] {
         let mut source = Source::new();
         {
-            let mut body: MimeEntity<_> =
-                raw_part(Some(content_type), &mut source, ContentEncoding::Default).into();
+            let mut body: MimeEntity<_> = raw_part(
+                Some(content_type),
+                &mut source,
+                ContentEncoding::Unspecified,
+            )
+            .into();
             let result = body.text_body(TextFormat::Plain);
             if fails {
                 assert!(result.is_err());

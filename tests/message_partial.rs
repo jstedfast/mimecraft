@@ -85,7 +85,7 @@ fn constructors_preserve_id_and_only_generate_content_type() {
         assert_eq!(partial.part().headers().len(), 1);
         assert_eq!(
             partial.part().content().encoding(),
-            ContentEncoding::Default
+            ContentEncoding::Unspecified
         );
         assert_eq!(partial.part().content().new_line_format(), None);
         assert!(partial.part().content().get_ref().get_ref().is_empty());

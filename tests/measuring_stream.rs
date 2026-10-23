@@ -245,7 +245,7 @@ fn finalizing_filters_counts_padding_and_terminators_exactly_once() {
 fn transfer_encoding_measurements_match_real_output_for_varied_chunks() {
     let data: Vec<u8> = (0..8195).map(|i| (i * 31 + i / 251) as u8).collect();
     for encoding in [
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         ContentEncoding::SevenBit,
         ContentEncoding::EightBit,
         ContentEncoding::Binary,

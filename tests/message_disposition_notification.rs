@@ -21,7 +21,7 @@ fn part<R: Read + Seek>(source: R, encoding: ContentEncoding) -> MimePart<R> {
 fn notification(bytes: &[u8]) -> MessageDispositionNotification {
     MessageDispositionNotification::from_part(part(
         Cursor::new(bytes.to_vec()),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
     ))
     .unwrap()
 }
@@ -186,7 +186,10 @@ fn detached_edits_are_atomic_and_keep_outer_metadata() {
     mdn.set_fields_with_new_line_format(&parsed, NewLineFormat::Unix)
         .unwrap();
     assert_eq!(mdn.part().content().get_ref().get_ref(), b"X: edited\n\n");
-    assert_eq!(mdn.part().content().encoding(), ContentEncoding::Default);
+    assert_eq!(
+        mdn.part().content().encoding(),
+        ContentEncoding::Unspecified
+    );
     assert_eq!(mdn.part().content().get_ref().position(), 0);
     assert_eq!(mdn.part().content().new_line_format(), None);
     assert_eq!(mdn.part().headers(), &headers);
@@ -370,9 +373,11 @@ fn borrowed_fragmented_source_retries_interruptions_and_rewinds() {
         ..Source::new()
     };
     {
-        let mut mdn =
-            MessageDispositionNotification::from_part(part(&mut source, ContentEncoding::Default))
-                .unwrap();
+        let mut mdn = MessageDispositionNotification::from_part(part(
+            &mut source,
+            ContentEncoding::Unspecified,
+        ))
+        .unwrap();
         assert_eq!(mdn.fields().unwrap(), fields(b"X: a\r\n"));
     }
     assert_eq!(source.bytes.position(), 0);
@@ -392,9 +397,11 @@ fn read_initial_seek_final_rewind_and_trailing_read_failures_propagate() {
             fail_seek,
             ..Source::new()
         };
-        let mut mdn =
-            MessageDispositionNotification::from_part(part(&mut source, ContentEncoding::Default))
-                .unwrap();
+        let mut mdn = MessageDispositionNotification::from_part(part(
+            &mut source,
+            ContentEncoding::Unspecified,
+        ))
+        .unwrap();
         io_error(mdn.fields().unwrap_err(), io::ErrorKind::Other);
     }
 }
@@ -403,9 +410,11 @@ fn read_initial_seek_final_rewind_and_trailing_read_failures_propagate() {
 fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
     let mut source = Source::new();
     {
-        let mut mdn =
-            MessageDispositionNotification::from_part(part(&mut source, ContentEncoding::Default))
-                .unwrap();
+        let mut mdn = MessageDispositionNotification::from_part(part(
+            &mut source,
+            ContentEncoding::Unspecified,
+        ))
+        .unwrap();
         for options in [
             DispositionNotificationParseOptions {
                 max_decoded_bytes: 0,

@@ -15,7 +15,7 @@ use mimecraft::{
 fn pass_through_preserves_every_byte_and_encoding_label() {
     let input: Vec<u8> = (0..=255).cycle().take(1024).collect();
     let encodings = [
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         ContentEncoding::SevenBit,
         ContentEncoding::EightBit,
         ContentEncoding::Binary,
@@ -24,14 +24,14 @@ fn pass_through_preserves_every_byte_and_encoding_label() {
         ContentEncoding::UuEncode,
     ];
 
-    assert_eq!(ContentEncoding::default(), ContentEncoding::Default);
+    assert_eq!(ContentEncoding::default(), ContentEncoding::Unspecified);
     assert_eq!(
         PassThroughEncoder::default().encoding(),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     );
     assert_eq!(
         PassThroughDecoder::default().encoding(),
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
     );
 
     for encoding in encodings {
@@ -139,7 +139,11 @@ fn encoders_support_generic_and_dynamic_dispatch_with_clone_and_reset() {
         ContentEncoding::UuEncode,
         b"#0V%T\r\n`\r\n",
     );
-    assert_encoder(YEncoder::new(), ContentEncoding::Default, b"m\x8b\x9e\r\n");
+    assert_encoder(
+        YEncoder::new(),
+        ContentEncoding::Unspecified,
+        b"m\x8b\x9e\r\n",
+    );
     assert_encoder(
         PassThroughEncoder::new(ContentEncoding::Binary),
         ContentEncoding::Binary,
@@ -166,7 +170,7 @@ fn encoder_traits_preserve_configuration_across_clone_and_reset() {
     );
     assert_encoder(
         YEncoder::with_options(60, NewLineFormat::Unix).unwrap(),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         b"m\x8b\x9e\n",
     );
 }
@@ -244,19 +248,19 @@ fn decoders_support_generic_and_dynamic_dispatch_with_clone_and_reset() {
     );
     assert_decoder(
         YDecoder::new(),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         b"=ybegin line=128 size=3 name=cat.txt\r\nm\x8b\x9e\r\n=yend size=3\r\n",
         b"Cat",
     );
     assert_decoder(
         YDecoder::for_payload(),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         b"m\x8b\x9e\r\n=yend\r\nignored",
         b"Cat",
     );
     assert_decoder(
         Rfc2231Decoder::new(),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         b"%43%61%74",
         b"Cat",
     );
@@ -290,7 +294,7 @@ fn decoder_traits_preserve_tolerance_and_encoded_word_mode() {
     );
     assert_decoder(
         Rfc2231Decoder::new(),
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         b"x%~y%4Gz%4",
         b"x%~y%4Gz",
     );

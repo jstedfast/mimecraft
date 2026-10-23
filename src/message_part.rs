@@ -220,7 +220,7 @@ pub(crate) fn check_message_part<R>(part: &MessagePart<R>, digest_child: bool) -
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if !matches!(
         encoding,
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
             | ContentEncoding::SevenBit
             | ContentEncoding::EightBit
             | ContentEncoding::Binary

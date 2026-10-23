@@ -108,7 +108,7 @@ impl MessageDeliveryStatus {
     ///
     /// Outer headers remain byte-for-byte unchanged, including Content-Length
     /// and the requested Content-Transfer-Encoding; callers must update stale
-    /// descriptive fields themselves. New stored encoding is `Default`, with
+    /// descriptive fields themselves. New stored encoding is `Unspecified`, with
     /// position zero and no newline hint. No old source I/O occurs.
     ///
     /// # Errors

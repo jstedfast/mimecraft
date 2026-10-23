@@ -111,7 +111,7 @@ impl MessageDispositionNotification {
     /// Replaces the entire old body, including any bytes after its first header
     /// block. Outer headers remain unchanged, including requested transfer
     /// encoding and any stale Content-Length. Callers must update descriptive
-    /// metadata themselves. Stored encoding becomes `Default`, position is zero,
+    /// metadata themselves. Stored encoding becomes `Unspecified`, position is zero,
     /// and the newline hint is cleared. No old source I/O occurs.
     ///
     /// # Errors

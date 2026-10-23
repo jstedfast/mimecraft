@@ -287,7 +287,7 @@ pub(crate) fn checked_boundary<R>(multipart: &Multipart<R>) -> io::Result<String
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if !matches!(
         encoding,
-        ContentEncoding::Default
+        ContentEncoding::Unspecified
             | ContentEncoding::SevenBit
             | ContentEncoding::EightBit
             | ContentEncoding::Binary

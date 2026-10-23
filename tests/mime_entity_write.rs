@@ -236,7 +236,7 @@ fn unix_delimiter_guard_handles_short_writes_and_nested_epilogues() {
 #[test]
 fn leaf_serialization_is_reused_for_every_transfer_encoding() {
     for encoding in [
-        ContentEncoding::Default,
+        ContentEncoding::Unspecified,
         ContentEncoding::SevenBit,
         ContentEncoding::EightBit,
         ContentEncoding::Binary,

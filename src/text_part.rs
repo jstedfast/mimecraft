@@ -118,7 +118,7 @@ impl TextPart<Cursor<Vec<u8>>> {
     /// Encodes and formats before committing either change. Other parameters
     /// survive; Content-Type duplicates collapse at the first slot. Other
     /// headers, including Content-Transfer-Encoding, remain byte-for-byte intact.
-    /// The new body has stored encoding `Default`, position zero, and no newline
+    /// The new body has stored encoding `Unspecified`, position zero, and no newline
     /// hint. No old source I/O occurs and the old body is dropped only on success.
     ///
     /// # Errors

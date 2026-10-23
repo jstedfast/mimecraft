@@ -28,7 +28,7 @@ impl PassThroughEncoder {
     /// Creates a pass-through encoder with the specified encoding metadata.
     ///
     /// Any variant is accepted, but none changes the byte-copying behavior.
-    /// [`Default::default()`] selects [`ContentEncoding::Default`].
+    /// [`Default::default()`] selects [`ContentEncoding::Unspecified`].
     pub fn new(encoding: ContentEncoding) -> Self {
         Self { encoding }
     }
@@ -63,7 +63,7 @@ impl PassThroughDecoder {
     /// Creates a pass-through decoder with the specified encoding metadata.
     ///
     /// Any variant is accepted, but none changes the byte-copying behavior.
-    /// [`Default::default()`] selects [`ContentEncoding::Default`].
+    /// [`Default::default()`] selects [`ContentEncoding::Unspecified`].
     pub fn new(encoding: ContentEncoding) -> Self {
         Self { encoding }
     }

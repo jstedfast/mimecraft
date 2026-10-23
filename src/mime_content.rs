@@ -65,11 +65,11 @@ pub struct MimeContent<R> {
 }
 
 impl<R: Read + Seek> MimeContent<R> {
-    /// Wraps unencoded content with [`ContentEncoding::Default`].
+    /// Wraps unencoded content with [`ContentEncoding::Unspecified`].
     ///
     /// Performs no I/O and does not change the source's current position.
     pub fn new(inner: R) -> Self {
-        Self::with_encoding(inner, ContentEncoding::Default)
+        Self::with_encoding(inner, ContentEncoding::Unspecified)
     }
 
     /// Wraps bytes already stored in the specified transfer encoding.

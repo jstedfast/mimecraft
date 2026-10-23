@@ -48,7 +48,7 @@ fn canonical_encoding_tokens_follow_mimepart() {
         (ContentEncoding::QuotedPrintable, "quoted-printable"),
         (ContentEncoding::UuEncode, "x-uuencode"),
     ];
-    const UNSPECIFIED: Option<&str> = ContentEncoding::Default.as_str();
+    const UNSPECIFIED: Option<&str> = ContentEncoding::Unspecified.as_str();
     assert_eq!(UNSPECIFIED, None);
     for (encoding, token) in cases {
         assert_eq!(encoding.as_str(), Some(token));
@@ -72,12 +72,13 @@ fn transfer_encoding_uses_unicode_whitespace_like_mimekit() {
 }
 
 #[test]
-fn unrecognized_encodings_are_errors_not_default() {
+fn unrecognized_encodings_are_errors_not_unspecified() {
     for value in [
         "",
         " \t\r\n",
         ";base64",
         "default",
+        "unspecified",
         "yenc",
         "uue",
         "x-base64",

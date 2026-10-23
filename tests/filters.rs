@@ -286,7 +286,7 @@ fn encoder_adapter_tracks_only_its_own_output_and_preserves_state() {
 #[test]
 fn decoder_finish_retains_incomplete_input_and_into_inner_retains_state() {
     let mut filter = DecoderFilter::new(Rfc2231Decoder::new());
-    assert_eq!(filter.encoding(), ContentEncoding::Default);
+    assert_eq!(filter.encoding(), ContentEncoding::Unspecified);
     let mut output = Vec::new();
     filter.filter(b"%4", &mut output);
     filter.finish(&mut output);
@@ -313,7 +313,7 @@ fn decoder_finish_delegates_empty_input_to_custom_decoders() {
     struct EmptyInputDecoder(usize);
     impl MimeDecoder for EmptyInputDecoder {
         fn encoding(&self) -> ContentEncoding {
-            ContentEncoding::Default
+            ContentEncoding::Unspecified
         }
         fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
             if input.is_empty() {
@@ -357,7 +357,7 @@ fn adapter_finish_keeps_uu_terminators_and_yenc_checksum_lifetime() {
     assert!(tail.is_empty());
     assert!(!output.is_empty());
     assert_eq!(yenc.encoder().checksum(), checksum);
-    assert_eq!(yenc.encoding(), ContentEncoding::Default);
+    assert_eq!(yenc.encoding(), ContentEncoding::Unspecified);
     yenc.reset();
     assert_eq!(yenc.encoder().checksum(), u32::MAX);
     assert!(!yenc.has_output());
@@ -386,7 +386,7 @@ fn boxed_codecs_and_boxed_filters_support_generic_dispatch() {
 }
 
 const ENCODINGS: [ContentEncoding; 7] = [
-    ContentEncoding::Default,
+    ContentEncoding::Unspecified,
     ContentEncoding::SevenBit,
     ContentEncoding::EightBit,
     ContentEncoding::Binary,
@@ -401,7 +401,7 @@ fn mimekit_encoder_factory_vectors_and_newline_options() {
         (ContentEncoding::Base64, b"YWJj\r\n"),
         (ContentEncoding::QuotedPrintable, b"abc=\r\n"),
         (ContentEncoding::UuEncode, b"#86)C\r\n`\r\n"),
-        (ContentEncoding::Default, b"abc"),
+        (ContentEncoding::Unspecified, b"abc"),
         (ContentEncoding::SevenBit, b"abc"),
         (ContentEncoding::EightBit, b"abc"),
         (ContentEncoding::Binary, b"abc"),
