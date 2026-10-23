@@ -1,11 +1,7 @@
 // Adapted from MimeKit's Text/FlowedToText.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-//! Whole-string text-format conversion, separate from charset/transfer decoding.
-//!
-//! Currently provides MimeKit-compatible flowed-text unwrapping. HTML rendering,
-//! rich-text conversion, flowed-text encoding, and streaming converters are deferred.
-
+use super::{next_line, output_newline};
 use crate::encodings::{EncoderOptionsError, NewLineFormat};
 
 /// Unwraps flowed text using MimeKit's paragraph and quote-depth rules.
@@ -77,29 +73,12 @@ impl FlowedToText {
 
     /// Unwraps a complete Unicode string without changing the converter.
     pub fn convert(&self, text: &str) -> String {
-        let newline = match self.new_line_format {
-            NewLineFormat::Dos => "\r\n",
-            NewLineFormat::Unix => "\n",
-            NewLineFormat::Mixed => unreachable!("constructors reject mixed output newlines"),
-        };
+        let newline = output_newline(self.new_line_format);
         let mut output = String::new();
         let mut paragraph = String::new();
         let mut paragraph_depth = None;
         let mut remaining = text;
-        while !remaining.is_empty() {
-            let line;
-            if let Some(index) = remaining.find(['\r', '\n']) {
-                line = &remaining[..index];
-                let length = if remaining[index..].starts_with("\r\n") {
-                    2
-                } else {
-                    1
-                };
-                remaining = &remaining[index + length..];
-            } else {
-                line = remaining;
-                remaining = "";
-            }
+        while let Some(line) = next_line(&mut remaining) {
             let depth = line.bytes().take_while(|&byte| byte == b'>').count();
             let unquoted = &line[depth..];
             // A leading space after the quote markers is stuffing, not text.

@@ -72,6 +72,8 @@
 //! Selection performs no stream I/O, decoding, or text-format conversion.
 //! [`MimeMessage::text_body`] separately reads the selected content with strict
 //! charset decoding and [`text::FlowedToText`] paragraph unwrapping when declared.
+//! [`text::TextToFlowed`] wraps plain text with space stuffing and UTF-8-safe
+//! soft breaks for caller-authored `format=flowed; delsp=yes` text parts.
 //! [`io::BoundedStream`] exposes a seekable source range without copying it,
 //! suitable for storing a MIME body's subrange in [`MimeContent`].
 //! [`io::ChainedStream`] joins seekable sources into one logical stream with

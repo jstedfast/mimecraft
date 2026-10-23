@@ -50,6 +50,8 @@ MimeKit. The crate is not configured for publication.
   wrappers, header/body separation, and configurable newline handling.
 - Text parts with strict charset-aware reading, borrowed or owned source
   streams, and atomic in-memory text/charset replacement.
+- Whole-string flowed-text wrapping and unwrapping, with quote-depth handling,
+  space stuffing, UTF-8-safe wrapping, and explicit CRLF/LF output.
 - Delivery-status parts with bounded raw header-group parsing, encoded-remainder
   compatibility, and atomic edits that preserve outer metadata.
 - Disposition-notification parts with bounded raw field access, global-subtype
@@ -1234,8 +1236,47 @@ or a different conversion policy.
 
 These convenience operations materialize decoded bytes, Unicode text, and
 any converted text in memory. They do not change raw headers or stored bytes.
-Streaming text converters, flowed-text generation, and automatic HTML/RTF
-conversion remain deferred.
+Streaming text converters and automatic HTML/RTF conversion remain deferred.
+
+### Generating flowed text
+
+`text::TextToFlowed` wraps a complete Unicode string for use as
+`text/plain; format=flowed; delsp=yes`. It prefers word boundaries, repeats
+normalized quote prefixes, and space-stuffs lines starting with space,
+`From `, or `>` after any quote markers. Soft breaks add a trailing space;
+original separator spaces remain, so decoding must enable `delsp=yes`.
+The converter does not set MIME headers or change existing parts.
+
+```rust
+use mimecraft::{TextPart, text::TextToFlowed};
+
+let flowed = TextToFlowed::new().convert("From someone\n> quoted text");
+assert_eq!(flowed, " From someone\r\n> quoted text\r\n");
+let mut part = TextPart::new("plain", &flowed).unwrap();
+let mut content_type = part.part().content_type().unwrap().unwrap();
+content_type.parameters_mut().set("format", "flowed").unwrap();
+content_type.parameters_mut().set("delsp", "yes").unwrap();
+part.part_mut().set_content_type(&content_type).unwrap();
+```
+
+Lines target 78 UTF-8 bytes including quote markers, stuffing, and soft-break
+spaces, but not the newline. Words can exceed that target up to 998 bytes
+before splitting; splits never divide a UTF-8 character, but may divide a
+grapheme cluster. Both limits expand to at least twice the quote/stuffing prefix
+length for deeply quoted input, preserving MimeKit's protection against output
+growth proportional to quote depth times word count. Unlike MimeKit's UTF-16
+character counts, these are UTF-8 byte lengths before transfer encoding, not
+universal wire limits for other charsets or deeply quoted messages.
+
+Input CRLF, LF, and bare CR are accepted. `new()`/`default()` emit CRLF;
+`with_new_line_format(Unix)` emits LF and `Mixed` is rejected. Every input line
+gets an output newline, including an unterminated final line; empty input stays
+empty. Leading quote markers may have one space between them and are normalized
+to consecutive `>` characters followed by one space. All trailing ASCII spaces
+are trimmed before wrapping, including the space in `-- ` signature separators.
+Quote-only lines retain a trailing stuffing space as in MimeKit. This is not a
+lossless transformation or strict RFC validation. No stream I/O, charset
+conversion, or header/footer insertion occurs.
 
 ### Delivery-status groups
 
@@ -3718,6 +3759,14 @@ quote-depth, delsp, and final-soft-line rules. Deterministic CRLF/LF options
 replace platform-dependent writer newlines; whole-string conversion omits
 the C# converter hierarchy, stream adapters, and header/footer decoration.
 The source's signature-separator handling is preserved and documented.
+Flowed-text generation follows `Text/TextToFlowed.cs` and
+`UnitTests/Text/TextToFlowedTests.cs`, retaining word-boundary preference,
+space-stuffing, deep-quote limits, and the source's explanatory inline comments.
+UTF-8 byte counts and character-safe splitting replace UTF-16 slicing; a cached
+word boundary avoids repeatedly scanning long unbroken words. Both flowed
+converters share logical-line scanning and deterministic CRLF/LF output.
+Trailing-space trimming, signature handling, quote normalization, and the
+absence of stream adapters and header/footer decoration are explicit.
 Delivery-status groups adapt `MessageDeliveryStatus.cs`,
 `MimeParser.ParseStatusGroup`, `MimeReader.SkipBlankLines`, and
 `UnitTests/MessageDeliveryStatusTests.cs`; `ParserOptions.cs` supplies the
