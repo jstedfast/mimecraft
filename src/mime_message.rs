@@ -4,8 +4,9 @@
 use std::io::{self, BufRead, Cursor, Read, Seek, Write};
 
 use crate::{
-    Attachments, BodyParts, HeaderList, LeafParts, MimeEntity, MimeEntityParseOptions, MimePart,
-    MimePartWriteOptions, TextBodyError, TextFormat,
+    Attachments, BodyParts, Header, HeaderList, LeafParts, MessageImportance, MessagePriority,
+    MessagePriorityParseError, MimeEntity, MimeEntityParseOptions, MimePart, MimePartWriteOptions,
+    TextBodyError, TextFormat, XMessagePriority,
 };
 
 /// An owned message with raw message headers and an optional MIME body tree.
@@ -21,6 +22,8 @@ use crate::{
 /// Supply required metadata explicitly. It has no mutable parsed-value caches
 /// or change events: use existing typed header parsers and factories through
 /// [`Self::headers`] and [`Self::headers_mut`].
+/// Importance and priority conveniences read those raw headers on every call;
+/// missing fields mean Normal, while invalid present values return errors.
 ///
 /// The body and every descendant share source type `R`. Ownership replaces
 /// disposal and parent tracking. Body removal returns the old tree without
@@ -78,6 +81,111 @@ impl<R> MimeMessage<R> {
     /// Edits message headers without moving fields to or from the body.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Reads the first Importance header, or Normal if absent.
+    ///
+    /// Decodes using [`Header::decode_value`] before [`MessageImportance::parse`],
+    /// matching MimeKit's decoded-value access. Charset-recovery diagnostics are
+    /// available by decoding that header directly. Raw edits are visible
+    /// immediately; duplicate headers and the body are not inspected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagePriorityParseError::Importance`] for invalid first values,
+    /// rather than MimeKit's Normal fallback, even if a later duplicate is valid.
+    pub fn importance(&self) -> Result<MessageImportance, MessagePriorityParseError> {
+        match self.headers.get("Importance") {
+            Some(header) => MessageImportance::parse(&header.decode_value().text),
+            None => Ok(MessageImportance::Normal),
+        }
+    }
+
+    /// Sets Importance without changing either priority header or the body.
+    ///
+    /// An equal parsed value is a no-op, preserving bytes and duplicates;
+    /// setting an absent field to Normal does not add it. Otherwise writes a
+    /// canonical CRLF record at the first slot and removes later duplicates,
+    /// appending if absent. Invalid existing values are replaced, not defaulted.
+    /// No source I/O occurs. Remove all raw occurrences to restore absence.
+    pub fn set_importance(&mut self, value: MessageImportance) {
+        // As in MimeKit, setting an absent field to Normal changes nothing.
+        // Compare freshly parsed metadata rather than a potentially stale cache.
+        if self.importance() != Ok(value) {
+            self.replace_formatted(value.to_header());
+        }
+    }
+
+    /// Reads the first Priority header, or Normal if absent.
+    ///
+    /// Uses [`Header::decode_value`] then [`MessagePriority::parse`]. Decoding
+    /// diagnostics remain available on the raw header. Does not derive priority
+    /// from Importance or X-Priority, inspect the body, or cache results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagePriorityParseError::Priority`] for an invalid first value,
+    /// even if a later duplicate is valid.
+    pub fn priority(&self) -> Result<MessagePriority, MessagePriorityParseError> {
+        match self.headers.get("Priority") {
+            Some(header) => MessagePriority::parse(&header.decode_value().text),
+            None => Ok(MessagePriority::Normal),
+        }
+    }
+
+    /// Sets Priority independently, with [`Self::set_importance`]'s no-op,
+    /// duplicate-replacement, invalid-value repair, and CRLF formatting rules.
+    ///
+    /// ```
+    /// use mimecraft::{MessageImportance, MessagePriority, MimeMessage, XMessagePriority};
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// message.set_priority(MessagePriority::Normal);
+    /// assert!(message.headers().is_empty());
+    /// message.set_importance(MessageImportance::High);
+    /// message.set_priority(MessagePriority::Urgent);
+    /// message.set_x_priority(XMessagePriority::High);
+    /// assert_eq!(message.priority()?, MessagePriority::Urgent);
+    /// assert_eq!(message.x_priority()?.number(), 2);
+    /// # Ok::<(), mimecraft::MessagePriorityParseError>(())
+    /// ```
+    pub fn set_priority(&mut self, value: MessagePriority) {
+        if self.priority() != Ok(value) {
+            self.replace_formatted(value.to_header());
+        }
+    }
+
+    /// Reads the first X-Priority header, or Normal if absent.
+    ///
+    /// Uses [`XMessagePriority::parse`] on raw bytes, not decoded text. Numeric
+    /// prefixes are clamped to 1 through 5 after checked 32-bit parsing, and
+    /// trailing bytes are ignored. No cache, source I/O, or other fields are used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessagePriorityParseError::XPriority`] for missing digits or
+    /// integer overflow in a present first header, rather than defaulting.
+    pub fn x_priority(&self) -> Result<XMessagePriority, MessagePriorityParseError> {
+        match self.headers.get("X-Priority") {
+            Some(header) => XMessagePriority::parse(header.raw_value()),
+            None => Ok(XMessagePriority::Normal),
+        }
+    }
+
+    /// Sets X-Priority independently, with [`Self::set_importance`]'s edit rules.
+    ///
+    /// New records include the numeric value and a comment, e.g. `2 (High)`.
+    /// An equal clamped value is a no-op: setting `0` to Highest preserves `0`.
+    pub fn set_x_priority(&mut self, value: XMessagePriority) {
+        if self.x_priority() != Ok(value) {
+            self.replace_formatted(value.to_header());
+        }
+    }
+
+    fn replace_formatted(&mut self, header: Header) {
+        self.headers
+            .replace_all(header)
+            .expect("typed formatters always produce a header with a parsed field name");
     }
 
     /// Returns the body tree, if present.

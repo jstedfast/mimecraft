@@ -68,6 +68,8 @@ MimeKit. The crate is not configured for publication.
   with raw headers, stored transfer encodings, and input/header/depth limits.
 - Message ownership, buffered loading, and synchronous writing, with separate
   message/body headers, optional bodies, and no generated metadata.
+- Typed importance and priority headers with independent raw-header access,
+  checked numeric-prefix parsing, and canonical setters that preserve no-ops.
 - Structured attached-message ownership and iterative writing, with nested
   message traversal and boundary checks across message wrappers.
 - Returned-header containers for text/rfc822-headers and message/global-headers,
@@ -987,9 +989,53 @@ body copying rewinds sources. Headers and stored bytes are not mutated.
 
 No Date, Message-Id, From, Subject, or MIME-Version is generated. This is not
 transport preparation: **Bcc and Resent-Bcc are written as supplied**.
-Message-specific typed convenience setters, safe complete unstructured-header
+Other message-specific typed convenience setters, safe complete unstructured-header
 authoring, offset-based header merging, and automatic
 transport preparation remain deferred.
+
+### Message importance and priority
+
+`MessageImportance`, `MessagePriority`, and `XMessagePriority` model the
+independent Importance, Priority, and X-Priority headers. Each provides `parse`,
+`FromStr`, `as_str`, `Display`, and a canonical CRLF `to_header`. Their default
+is Normal; X-Priority also provides `number()` from 1 (Highest) to 5 (Lowest).
+
+```rust
+use mimecraft::{MessageImportance, MessagePriority, MimeMessage, XMessagePriority};
+
+let mut message: MimeMessage = MimeMessage::new();
+message.set_priority(MessagePriority::Normal);
+assert!(message.headers().is_empty());
+message.set_importance(MessageImportance::High);
+message.set_priority(MessagePriority::Urgent);
+message.set_x_priority(XMessagePriority::High);
+assert_eq!(message.priority().unwrap(), MessagePriority::Urgent);
+assert_eq!(message.x_priority().unwrap().number(), 2);
+```
+
+`importance()`, `priority()`, and `x_priority()` read only the first matching
+message header on every call. Missing fields yield Normal, while invalid
+present values return `MessagePriorityParseError` rather than MimeKit's Normal
+fallback. Importance and Priority use `Header::decode_value`, then trim Unicode
+whitespace and compare complete tokens ignoring ASCII case. Supported tokens
+are `low`/`normal`/`high` and `non-urgent`/`normal`/`urgent`, respectively.
+Comments and unknown tokens are errors. Decode the raw header directly for
+charset-recovery diagnostics; standalone enum parsing does not decode words.
+
+X-Priority reads raw bytes instead: skip space/tab/CR/LF, parse an unsigned
+ASCII decimal prefix in `0..=i32::MAX`, then clamp to 1 through 5. Remaining
+bytes are ignored, even malformed comments or non-UTF-8; leading signs,
+comments, encoded words, missing digits, and numeric overflow are errors.
+
+Setters compare the freshly parsed value, not a cached field. Equal values
+leave all raw bytes and duplicates untouched, including Normal on an absent
+header and Highest on a raw `0`. Changed or invalid values are replaced at the
+first slot, later duplicates removed, and missing non-Normal values appended.
+New X-Priority values include comments such as `2 (High)`. To materialize an
+explicit Normal field even when absent, use the enum's `to_header` with
+`HeaderList::replace_all`; remove raw occurrences to restore absence.
+No setter synchronizes another priority header, examines body metadata, or
+accesses content streams. These conveniences require no `Read`/`Seek` bounds.
 
 ### Body parts and attachments
 
@@ -3602,8 +3648,18 @@ case-insensitive Content-* classification. Existing entity I/O is reused
 without copying payloads during header partitioning. Explicit constructors
 replace clock/random-ID defaults, and serialization does not insert
 MIME-Version or hide Bcc. Header offsets are not stored, so grouped output
-replaces the source's original-order merge. Cached typed properties, change
+replaces the source's original-order merge. Other typed conveniences, change
 events and automatic preparation are deferred.
+Message importance and priority adapt `MessageImportance.cs`,
+`MessagePriority.cs`, `XMessagePriority.cs`, the corresponding `MimeMessage.cs`
+properties, and `UnitTests/MimeMessageTests.cs`. `Utils/ParseUtils.cs` supplies
+X-Priority's checked 32-bit numeric-prefix rules; the shared MIME whitespace
+helper is reused. Overflow and absent-Normal no-op comments are preserved or
+adapted inline. Raw-authoritative getters replace lazy caches and change events.
+Canonical setters compare newly parsed values instead of stale cached defaults;
+equal values preserve raw records, and explicit edits repair invalid metadata.
+Missing headers still mean Normal, but present invalid values return errors
+rather than silently selecting Normal. Priority fields remain independent.
 Attached-message ownership adapts `MessagePart.cs` with optional owned messages
 and an internal box instead of inheritance and disposal tracking.
 `MimeWriter.cs`'s iterative descent into message bodies is integrated with the

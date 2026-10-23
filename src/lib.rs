@@ -55,6 +55,8 @@
 //! partitions root Content-* headers onto the body, preserving raw records;
 //! writing groups message headers before body headers without generating fields.
 //! Original header interleaving and automatic transport preparation are deferred.
+//! [`MessageImportance`], [`MessagePriority`], and [`XMessagePriority`] add
+//! independent typed header access with checked parsing and canonical setters.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for
@@ -194,6 +196,7 @@ mod message_feedback_report;
 mod message_id;
 mod message_part;
 mod message_partial;
+mod message_priority;
 mod mime_content;
 mod mime_entity;
 mod mime_entity_load;
@@ -255,6 +258,9 @@ pub use message_feedback_report::{
 pub use message_id::{MessageId, MessageIdParseError, MessageIdParseErrorKind, References};
 pub use message_part::{MessagePart, MessagePartError};
 pub use message_partial::{MessagePartial, MessagePartialError};
+pub use message_priority::{
+    MessageImportance, MessagePriority, MessagePriorityParseError, XMessagePriority,
+};
 pub use mime_content::MimeContent;
 pub use mime_entity::{Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_load::MimeEntityParseOptions;
