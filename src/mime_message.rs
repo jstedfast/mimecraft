@@ -1,0 +1,353 @@
+// Adapted from MimeKit's MimeMessage.cs.
+// Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
+
+use std::io::{self, BufRead, Cursor, Read, Seek, Write};
+
+use crate::{
+    Attachments, BodyParts, HeaderList, LeafParts, MimeEntity, MimeEntityParseOptions, MimePart,
+    MimePartWriteOptions, TextBodyError, TextFormat,
+};
+
+/// An owned message with raw message headers and an optional MIME body tree.
+///
+/// Message headers normally contain From, To, Subject, Date, MIME-Version, and
+/// other non-Content fields. Top-level `Content-*` headers belong to the body.
+/// [`Self::load`] partitions them using [`crate::Header::is_content_header`];
+/// raw constructors and edits preserve supplied placement without filtering,
+/// validation, synchronization, or duplicate removal.
+///
+/// Unlike MimeKit's default constructor and writer, this model never supplies
+/// the current date, generated Message-Id, empty From/Subject, or MIME-Version.
+/// Supply required metadata explicitly. It has no mutable parsed-value caches
+/// or change events: use existing typed header parsers and factories through
+/// [`Self::headers`] and [`Self::headers_mut`].
+///
+/// The body and every descendant share source type `R`. Ownership replaces
+/// disposal and parent tracking. Body removal returns the old tree without
+/// closing or repositioning sources. An absent body is distinct in this model
+/// from a leaf with empty content, but loading does not retain that distinction.
+/// [`crate::MessagePart`] wraps attached messages, constructed explicitly or
+/// parsed by the entity loader. Mbox markers and SMTP envelopes remain deferred.
+///
+/// ```
+/// use mimecraft::{AddressList, Header, MimeMessage, TextPart};
+///
+/// let mut message = MimeMessage::with_body(TextPart::new("plain", "hello")?.into());
+/// message.headers_mut().add(
+///     AddressList::parse(b"Alice <alice@example.com>")?.to_header("From")?,
+/// );
+/// message.headers_mut().add(Header::parse(b"Subject: greeting")?);
+/// message.headers_mut().add(Header::parse(b"MIME-Version: 1.0")?);
+/// assert_eq!(message.leaf_parts().count(), 1);
+/// let mut output = Vec::new();
+/// message.write_to(&mut output)?;
+/// assert!(output.ends_with(b"\r\n\r\nhello"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug)]
+pub struct MimeMessage<R = Cursor<Vec<u8>>> {
+    headers: HeaderList,
+    body: Option<MimeEntity<R>>,
+}
+
+impl<R> MimeMessage<R> {
+    /// Creates an empty message with no headers or body, without I/O.
+    pub fn new() -> Self {
+        Self::from_parts(HeaderList::new(), None)
+    }
+
+    /// Takes a body tree, leaving message headers empty and sources untouched.
+    ///
+    /// Headers already on the body are not promoted to the message header list.
+    pub fn with_body(body: MimeEntity<R>) -> Self {
+        Self::from_parts(HeaderList::new(), Some(body))
+    }
+
+    /// Takes raw headers and an optional body without validation or copying.
+    ///
+    /// Missing, duplicate, malformed, or misplaced headers remain unchanged.
+    pub fn from_parts(headers: HeaderList, body: Option<MimeEntity<R>>) -> Self {
+        Self { headers, body }
+    }
+
+    /// Returns message headers, without including headers from the body.
+    pub fn headers(&self) -> &HeaderList {
+        &self.headers
+    }
+
+    /// Edits message headers without moving fields to or from the body.
+    pub fn headers_mut(&mut self) -> &mut HeaderList {
+        &mut self.headers
+    }
+
+    /// Returns the body tree, if present.
+    pub fn body(&self) -> Option<&MimeEntity<R>> {
+        self.body.as_ref()
+    }
+
+    /// Edits the body tree without synchronizing message headers.
+    pub fn body_mut(&mut self) -> Option<&mut MimeEntity<R>> {
+        self.body.as_mut()
+    }
+
+    /// Replaces or removes the body, returning the old tree without source I/O.
+    pub fn set_body(&mut self, body: Option<MimeEntity<R>>) -> Option<MimeEntity<R>> {
+        std::mem::replace(&mut self.body, body)
+    }
+
+    /// Extracts headers and the body without copying or closing sources.
+    pub fn into_parts(self) -> (HeaderList, Option<MimeEntity<R>>) {
+        (self.headers, self.body)
+    }
+
+    /// Visits non-multipart body parts without entering attached messages.
+    ///
+    /// Returns leaves and attached-message wrappers in depth-first child order.
+    /// Multipart nodes are skipped, but their children are visited. An absent
+    /// body yields nothing. No metadata parsing or source I/O occurs.
+    pub fn body_parts(&self) -> BodyParts<'_, R> {
+        BodyParts::new(self.body.as_slice())
+    }
+
+    /// Visits body parts whose own Content-Disposition specifies `attachment`.
+    ///
+    /// Filters [`Self::body_parts`], including attached-message wrappers but not
+    /// their contents or multipart nodes themselves. Filenames alone do not
+    /// imply attachments, and no source I/O occurs.
+    ///
+    /// # Errors
+    ///
+    /// Malformed dispositions yield parse errors. Iteration may continue at the
+    /// next part; collect into `Result<Vec<_>, _>` for fail-fast processing.
+    ///
+    /// ```
+    /// use mimecraft::{Header, MessagePart, MimeMessage, TextPart};
+    ///
+    /// let inner = MimeMessage::with_body(TextPart::new("plain", "attached")?.into());
+    /// let mut part = MessagePart::new(inner);
+    /// part.headers_mut().add(Header::parse(b"Content-Disposition: attachment")?);
+    /// let message = MimeMessage::with_body(part.into());
+    /// let attachments = message.attachments().collect::<Result<Vec<_>, _>>()?;
+    /// assert_eq!(attachments.len(), 1);
+    /// assert_eq!(message.body_parts().count(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn attachments(&self) -> Attachments<'_, R> {
+        Attachments::new(self.body_parts())
+    }
+
+    /// Borrows the body in a requested format, or returns `None` if absent.
+    ///
+    /// Uses [`MimeEntity::text_body_part`]'s alternative, related, and mixed
+    /// selection rules. Does not read sources or enter attached messages.
+    /// Message-level headers do not participate in selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors for invalid metadata needed by the search.
+    ///
+    /// ```
+    /// use mimecraft::{MimeMessage, Multipart, TextFormat, TextPart};
+    ///
+    /// let mut alternative = Multipart::new("alternative", "boundary")?;
+    /// alternative.children_mut().push(TextPart::new("plain", "hello")?.into());
+    /// alternative.children_mut().push(TextPart::new("html", "<b>hello</b>")?.into());
+    /// let mut message = MimeMessage::with_body(alternative.into());
+    /// assert!(message.text_body_part(TextFormat::Plain)?.is_some());
+    /// let html = message.text_body_part_mut(TextFormat::Html)?.unwrap();
+    /// let mut decoded = Vec::new();
+    /// html.content_mut().decode_to(&mut decoded)?;
+    /// assert_eq!(decoded, b"<b>hello</b>");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn text_body_part(
+        &self,
+        format: TextFormat,
+    ) -> Result<Option<&MimePart<R>>, TextBodyError> {
+        match self.body.as_ref() {
+            Some(body) => body.text_body_part(format),
+            None => Ok(None),
+        }
+    }
+
+    /// Mutably borrows the body selected by [`Self::text_body_part`].
+    ///
+    /// Does not read streams, rewrite metadata, or change source positions.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same metadata errors as [`Self::text_body_part`].
+    pub fn text_body_part_mut(
+        &mut self,
+        format: TextFormat,
+    ) -> Result<Option<&mut MimePart<R>>, TextBodyError> {
+        match self.body.as_mut() {
+            Some(body) => body.text_body_part_mut(format),
+            None => Ok(None),
+        }
+    }
+
+    /// Visits body leaves depth-first, including those inside attached messages.
+    ///
+    /// Does no source I/O or metadata parsing. An absent body or empty multipart
+    /// yields no leaves. Traversal is iterative; ordinary model drop and derived
+    /// debugging still recurse.
+    pub fn leaf_parts(&self) -> LeafParts<'_, R> {
+        LeafParts::new(self.body.as_slice())
+    }
+}
+
+impl<R> Default for MimeMessage<R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MimeMessage {
+    /// Loads one complete message through EOF into owned in-memory body streams.
+    ///
+    /// Uses default [`MimeEntityParseOptions`]. See [`Self::load_with_options`]
+    /// for header partitioning and limitations.
+    ///
+    /// # Errors
+    ///
+    /// Returns the entity loader's structure, metadata, resource-limit, and I/O
+    /// errors, without a partial message or source-position rollback.
+    pub fn load<R: BufRead + ?Sized>(reader: &mut R) -> io::Result<Self> {
+        Self::load_with_options(reader, &MimeEntityParseOptions::default())
+    }
+
+    /// Loads a complete message using the entity loader's explicit limits.
+    ///
+    /// [`MimeEntity::load_with_options`] reads the entire message, including its
+    /// headers in the input-byte limit. Depth counts the body root as one, not
+    /// the message wrapper. All parsed root `Content-*` records move to the
+    /// body; everything else, including MIME-Version and malformed records,
+    /// moves to the message headers. Embedded message roots are partitioned
+    /// separately; ordinary descendant entity headers are not repartitioned.
+    /// Records retain their bytes and relative order within each list, but
+    /// original interleaving between the lists is not tracked.
+    ///
+    /// The body is always `Some`, even for empty content. Sources start at zero
+    /// and retain encoded bytes and their stored encodings. Input must contain
+    /// a header/body separator and complete multipart structure. This is not
+    /// message-field validation: required From/Date fields are not enforced,
+    /// and non-content metadata is not parsed or repaired.
+    ///
+    /// Buffering, resource limits, and recovery rules are those of the entity
+    /// loader, including optional structured attached-message parsing and shared
+    /// limits across their bodies. No seeking/closing, mbox processing, zero-copy
+    /// persistence, or async I/O is performed.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`MimeEntity::load_with_options`] errors unchanged, including
+    /// `InvalidInput` before I/O for zero limits. On failure, no partial message
+    /// is returned and restarting requires a fresh or repositioned source.
+    ///
+    /// ```
+    /// use mimecraft::MimeMessage;
+    ///
+    /// let mut input = &b"Subject: hi\r\nContent-Type: text/plain\r\n\r\nbody"[..];
+    /// let message = MimeMessage::load(&mut input)?;
+    /// assert!(message.headers().contains("Subject"));
+    /// assert!(!message.headers().contains("Content-Type"));
+    /// assert!(message.body().unwrap().headers().contains("Content-Type"));
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn load_with_options<R: BufRead + ?Sized>(
+        reader: &mut R,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<Self> {
+        Ok(Self::from_loaded_entity(MimeEntity::load_with_options(
+            reader, options,
+        )?))
+    }
+
+    pub(crate) fn from_loaded_entity(mut body: MimeEntity) -> Self {
+        let mut headers = HeaderList::new();
+        let mut content_headers = HeaderList::new();
+        // Only a message root splits Content-* fields into its body.
+        // Ordinary descendant entities retain all of their headers.
+        for header in std::mem::take(body.headers_mut()) {
+            if header.is_content_header() {
+                content_headers.add(header);
+            } else {
+                headers.add(header);
+            }
+        }
+        *body.headers_mut() = content_headers;
+        Self::from_parts(headers, Some(body))
+    }
+}
+
+impl<R: Read + Seek> MimeMessage<R> {
+    /// Reads the body in a requested format, or returns `None` when absent.
+    ///
+    /// Uses [`MimeEntity::text_body`] for selection, stored transfer decoding,
+    /// strict charset decoding, and flowed-text unwrapping. Only the selected
+    /// source is read. Other formats retain decoded text/markup and newlines.
+    /// This materializes the body in memory and does not sanitize HTML.
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata, charset, and I/O errors without trying another body.
+    /// A successful byte copy rewinds its source before charset decoding.
+    ///
+    /// ```
+    /// use mimecraft::{MimeMessage, TextFormat};
+    ///
+    /// let mut input = &b"Content-Type: text/plain; format=flowed\r\n\r\nhello \r\nworld"[..];
+    /// let mut message = MimeMessage::load(&mut input)?;
+    /// assert_eq!(message.text_body(TextFormat::Plain)?.as_deref(), Some("hello world\r\n"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn text_body(&mut self, format: TextFormat) -> Result<Option<String>, TextBodyError> {
+        match self.body.as_mut() {
+            Some(body) => body.text_body(format),
+            None => Ok(None),
+        }
+    }
+
+    /// Writes the message using default CRLF and body-encoding options.
+    ///
+    /// See [`Self::write_to_with_options`] for header order and failure behavior.
+    ///
+    /// # Errors
+    ///
+    /// Propagates body metadata and I/O errors, possibly after partial output.
+    pub fn write_to<W: Write + ?Sized>(&mut self, output: &mut W) -> io::Result<()> {
+        self.write_to_with_options(output, &MimePartWriteOptions::default())
+    }
+
+    /// Writes message headers, body headers, one separator, and body content.
+    ///
+    /// Message headers precede all body headers; original interleaving is not
+    /// reconstructed. The existing header writer normalizes newlines and
+    /// terminates truncated records without changing stored bytes. With a body,
+    /// its entity writer supplies body headers and the separator; without one,
+    /// this method supplies the separator. An empty message writes one newline.
+    ///
+    /// Body encodings, framing, and rewind rules follow [`MimeEntity::write_to_with_options`].
+    /// No headers are generated, removed, or repartitioned. In particular,
+    /// **Bcc and Resent-Bcc are written unchanged**; this is not SMTP transport
+    /// preparation. Raw edits can introduce conflicting Content-* fields in
+    /// message headers; callers are responsible for correct placement.
+    ///
+    /// Sources and the destination remain owned by their callers. The sink is
+    /// flushed, never closed; nested encoding sinks need their own finalization.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options fail with `InvalidInput` before source I/O or output.
+    /// Body metadata is validated by its writer after message headers have
+    /// been written. I/O errors propagate, possibly after partial output;
+    /// nothing is rolled back, and retrying repeats the whole message.
+    pub fn write_to_with_options<W: Write + ?Sized>(
+        &mut self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+    ) -> io::Result<()> {
+        crate::mime_entity_write::write_message(self, output, options)
+    }
+}

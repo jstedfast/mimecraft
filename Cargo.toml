@@ -1,0 +1,19 @@
+[package]
+name = "mimecraft"
+version = "0.1.0"
+edition = "2024"
+description = "An idiomatic Rust port of MimeKit's core MIME library"
+license = "MIT"
+publish = false
+
+[dependencies]
+encoding_rs = "0.8"
+idna = "1.1"
+
+[features]
+default = ["simd"]
+simd = []
+
+[[bench]]
+name = "base64"
+harness = false

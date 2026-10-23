@@ -1,0 +1,413 @@
+// Adapted from MimeKit's MimeEntity.cs, Multipart.cs, and MimeMessage.cs.
+// Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
+
+use std::{
+    io::{Cursor, Read, Seek},
+    iter::FusedIterator,
+    slice,
+};
+
+use crate::{
+    ContentHeaderParseError, HeaderList, MessageDeliveryStatus, MessageDispositionNotification,
+    MessageFeedbackReport, MessagePart, MessagePartial, MimePart, Multipart, MultipartRelated,
+    MultipartReport, TextBodyError, TextFormat, TextPart, TextRfc822Headers,
+};
+
+/// An owned MIME tree node: a body stream, multipart container, or attached message.
+///
+/// Text parts convert to ordinary leaf parts without copying their headers or
+/// content. Their Content-Type retains the text subtype and charset; use
+/// [`TextPart::from_part`] after extracting a leaf to regain text-specific APIs.
+///
+/// All leaves in a tree use the same source type `R`, defaulting to in-memory
+/// cursors. Sources can also be borrowed. There are no parent pointers, shared
+/// children, change events, or automatically inferred container variants:
+/// editing a Content-Type header does not change an enum variant.
+///
+/// Synchronous writing supports complete trees; [`Self::load`] reads complete
+/// entities into owned in-memory sources with explicit resource limits.
+/// Attached messages can be constructed explicitly using [`MessagePart`].
+/// Loading recognizes transparent message wrappers by default; encoded wrappers
+/// and unrecognized message subtypes remain opaque leaves.
+/// Programmatic nesting is unrestricted; callers must bound tree depth.
+/// Leaf iteration, loading, and writing are iterative; debugging and drop recurse.
+#[derive(Debug)]
+pub enum MimeEntity<R = Cursor<Vec<u8>>> {
+    /// A leaf with one body stream, including text parts.
+    Part(MimePart<R>),
+    /// A container with ordered child entities.
+    Multipart(Multipart<R>),
+    /// A wrapper around an optional structured message.
+    Message(MessagePart<R>),
+}
+
+impl<R> MimeEntity<R> {
+    /// Returns this node's raw headers, without descending into children.
+    pub fn headers(&self) -> &HeaderList {
+        match self {
+            Self::Part(part) => part.headers(),
+            Self::Multipart(multipart) => multipart.headers(),
+            Self::Message(part) => part.headers(),
+        }
+    }
+
+    /// Edits this node's raw headers without changing its variant or children.
+    pub fn headers_mut(&mut self) -> &mut HeaderList {
+        match self {
+            Self::Part(part) => part.headers_mut(),
+            Self::Multipart(multipart) => multipart.headers_mut(),
+            Self::Message(part) => part.headers_mut(),
+        }
+    }
+
+    /// Returns whether the first Content-Disposition specifies `attachment`.
+    ///
+    /// Missing disposition returns false. Filenames, media types, and child
+    /// dispositions do not imply attachment status. No source I/O occurs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first matching header's parse error; later duplicates do not
+    /// override it. Raw header edits are observed without a metadata cache.
+    pub fn is_attachment(&self) -> Result<bool, ContentHeaderParseError> {
+        match self.headers().get("Content-Disposition") {
+            Some(header) => Ok(header.parse_content_disposition()?.is_attachment()),
+            None => Ok(false),
+        }
+    }
+
+    /// Visits non-multipart nodes in depth-first child order, including this root.
+    ///
+    /// Attached-message wrappers are returned without descending into their
+    /// messages. Multipart nodes are skipped, even when marked as attachments,
+    /// but their children are visited. No metadata parsing or source I/O occurs.
+    /// Use [`Self::leaf_parts`] to descend into attached messages instead.
+    pub fn body_parts(&self) -> BodyParts<'_, R> {
+        BodyParts::new(slice::from_ref(self))
+    }
+
+    /// Filters [`Self::body_parts`] by their own Content-Disposition headers.
+    ///
+    /// Yields attached-message wrappers, not their contents. Multipart nodes
+    /// themselves are excluded. No source I/O or filename-based inference occurs.
+    ///
+    /// # Errors
+    ///
+    /// Each invalid disposition yields its parse error. Iteration may continue
+    /// at the next part; collecting into `Result<Vec<_>, _>` stops at the first.
+    pub fn attachments(&self) -> Attachments<'_, R> {
+        Attachments::new(self.body_parts())
+    }
+
+    /// Selects a text body without reading streams or entering attached messages.
+    ///
+    /// Alternatives are searched last-to-first. Related containers search only
+    /// their root: `start` matches normalized, case-sensitive Content-Ids; when
+    /// absent, `type` matches a child's media type ignoring case. No match falls
+    /// back to the first child (not to `type` when `start` was supplied).
+    ///
+    /// Other multiparts stop at their first multipart or non-attachment text
+    /// child, even if it has no body in the requested format. Root text leaves
+    /// exclude attachments. As in MimeKit, alternative children and related
+    /// roots are not filtered by disposition; multipart dispositions are ignored.
+    ///
+    /// A leaf without Content-Type is treated as text/plain, except immediately
+    /// inside a digest where it defaults to message/rfc822. No header is inserted.
+    /// Selection observes raw edits and first duplicates, uses an
+    /// iterative depth-proportional stack, and requires no I/O trait bounds.
+    /// Returned parts retain encoded content; no charset decoding, flowed-text
+    /// conversion, HTML rendering, URI resolution, or sanitization is performed.
+    ///
+    /// # Errors
+    ///
+    /// Malformed metadata needed by the search is an explicit error, not a
+    /// reason to try another candidate. Multipart nodes require a valid
+    /// multipart Content-Type, but boundaries and transfer encodings are not
+    /// inspected. Unvisited fields and attached-message contents are ignored.
+    pub fn text_body_part(
+        &self,
+        format: TextFormat,
+    ) -> Result<Option<&MimePart<R>>, TextBodyError> {
+        let Some(path) = crate::text_body::select(self, format)? else {
+            return Ok(None);
+        };
+        let mut entity = self;
+        for index in path.into_iter().skip(1) {
+            let Self::Multipart(part) = entity else {
+                unreachable!("body selection paths traverse only multipart nodes");
+            };
+            entity = &part.children()[index];
+        }
+        let Self::Part(part) = entity else {
+            unreachable!("body selection paths end at leaf parts");
+        };
+        Ok(Some(part))
+    }
+
+    /// Mutably borrows the same body selected by [`Self::text_body_part`].
+    ///
+    /// Selection finishes before granting access and never changes headers or
+    /// source positions. Callers may edit the selected part or read its content.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same metadata errors as [`Self::text_body_part`], without
+    /// changing the tree.
+    pub fn text_body_part_mut(
+        &mut self,
+        format: TextFormat,
+    ) -> Result<Option<&mut MimePart<R>>, TextBodyError> {
+        let Some(path) = crate::text_body::select(self, format)? else {
+            return Ok(None);
+        };
+        let mut entity = self;
+        for index in path.into_iter().skip(1) {
+            let Self::Multipart(part) = entity else {
+                unreachable!("body selection paths traverse only multipart nodes");
+            };
+            entity = &mut part.children_mut()[index];
+        }
+        let Self::Part(part) = entity else {
+            unreachable!("body selection paths end at leaf parts");
+        };
+        Ok(Some(part))
+    }
+
+    /// Visits leaf parts in depth-first child order, including a leaf root.
+    ///
+    /// Descends into attached messages. Empty containers and absent messages or
+    /// bodies contribute no leaves. Traversal does not parse headers,
+    /// read sources, or recurse on the call stack.
+    pub fn leaf_parts(&self) -> LeafParts<'_, R> {
+        LeafParts::new(slice::from_ref(self))
+    }
+}
+
+impl<R: Read + Seek> MimeEntity<R> {
+    /// Reads the selected text body, unwrapping flowed text when declared.
+    ///
+    /// Uses [`Self::text_body_part`]'s selection rules. `None` means no matching
+    /// body; an empty matching body returns `Some(String::new())`. Decoding uses
+    /// the stored transfer encoding, then the declared charset or strict UTF-8
+    /// when absent. There is no BOM/HTML sniffing, replacement, or fallback.
+    ///
+    /// For text/plain with `format=flowed`, [`crate::text::FlowedToText`] unwraps
+    /// paragraphs, using `delsp=yes` (ASCII-insensitive, without trimming) to
+    /// remove soft-break spaces. Both Plain and Flowed requests unwrap such a
+    /// part. Converted paragraph endings are CRLF on every platform. Other
+    /// formats retain decoded newlines and markup unchanged; no rendering or
+    /// sanitization occurs. Read the selected part directly to retain flowed
+    /// formatting or to choose a different conversion policy.
+    ///
+    /// Materializes transfer-decoded bytes, decoded text, and (for flowed text)
+    /// converted text in memory. No raw headers or stored bytes are changed.
+    ///
+    /// # Errors
+    ///
+    /// Selection and charset-label errors precede I/O. Read/seek errors retain
+    /// [`crate::MimeContent::decode_to`]'s source-position behavior; a successful
+    /// byte copy rewinds the source even if charset decoding subsequently fails.
+    /// Errors never cause selection of an earlier alternative.
+    pub fn text_body(&mut self, format: TextFormat) -> Result<Option<String>, TextBodyError> {
+        let Some(part) = self.text_body_part_mut(format)? else {
+            return Ok(None);
+        };
+        let content_type = part.content_type().map_err(TextBodyError::ContentType)?;
+        let charset = content_type
+            .as_ref()
+            .map(|value| value.charset_encoding())
+            .transpose()
+            .map_err(|error| TextBodyError::Text(crate::TextPartError::Charset(error)))?
+            .flatten()
+            .unwrap_or(crate::charsets::Charset::UTF8);
+        let text = crate::text_part::decode_text(part, charset).map_err(TextBodyError::Text)?;
+        if let Some(content_type) = content_type
+            && TextFormat::Flowed.matches(&content_type)
+        {
+            let mut converter = crate::text::FlowedToText::new();
+            converter.delete_space = content_type
+                .parameters()
+                .get("delsp")
+                .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+            Ok(Some(converter.convert(&text)))
+        } else {
+            Ok(Some(text))
+        }
+    }
+}
+
+impl<R> From<MimePart<R>> for MimeEntity<R> {
+    fn from(part: MimePart<R>) -> Self {
+        Self::Part(part)
+    }
+}
+
+impl<R> From<Multipart<R>> for MimeEntity<R> {
+    fn from(multipart: Multipart<R>) -> Self {
+        Self::Multipart(multipart)
+    }
+}
+
+impl<R> From<MultipartReport<R>> for MimeEntity<R> {
+    fn from(report: MultipartReport<R>) -> Self {
+        Self::Multipart(report.into_multipart())
+    }
+}
+
+impl<R> From<MultipartRelated<R>> for MimeEntity<R> {
+    fn from(related: MultipartRelated<R>) -> Self {
+        Self::Multipart(related.into_multipart())
+    }
+}
+
+impl<R> From<MessagePart<R>> for MimeEntity<R> {
+    fn from(part: MessagePart<R>) -> Self {
+        Self::Message(part)
+    }
+}
+
+impl<R> From<TextRfc822Headers<R>> for MimeEntity<R> {
+    fn from(headers: TextRfc822Headers<R>) -> Self {
+        Self::Message(headers.into_message_part())
+    }
+}
+
+impl<R: Read + Seek> From<TextPart<R>> for MimeEntity<R> {
+    fn from(text: TextPart<R>) -> Self {
+        Self::Part(text.into_part())
+    }
+}
+
+impl<R: Read + Seek> From<MessageDeliveryStatus<R>> for MimeEntity<R> {
+    fn from(status: MessageDeliveryStatus<R>) -> Self {
+        Self::Part(status.into_part())
+    }
+}
+
+impl<R: Read + Seek> From<MessageDispositionNotification<R>> for MimeEntity<R> {
+    fn from(notification: MessageDispositionNotification<R>) -> Self {
+        Self::Part(notification.into_part())
+    }
+}
+
+impl<R: Read + Seek> From<MessageFeedbackReport<R>> for MimeEntity<R> {
+    fn from(report: MessageFeedbackReport<R>) -> Self {
+        Self::Part(report.into_part())
+    }
+}
+
+impl<R: Read + Seek> From<MessagePartial<R>> for MimeEntity<R> {
+    fn from(partial: MessagePartial<R>) -> Self {
+        Self::Part(partial.into_part())
+    }
+}
+
+/// A lazy, depth-first iterator over non-multipart nodes of a MIME tree.
+///
+/// Multipart containers are traversed but not returned. Attached-message
+/// wrappers are returned without descending into their messages, including
+/// wrappers with no message. Uses storage proportional to multipart depth,
+/// with no metadata parsing, source I/O, or recursive traversal.
+pub struct BodyParts<'a, R> {
+    stack: Vec<slice::Iter<'a, MimeEntity<R>>>,
+}
+
+impl<'a, R> BodyParts<'a, R> {
+    pub(crate) fn new(entities: &'a [MimeEntity<R>]) -> Self {
+        Self {
+            stack: vec![entities.iter()],
+        }
+    }
+}
+
+impl<'a, R> Iterator for BodyParts<'a, R> {
+    type Item = &'a MimeEntity<R>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(entities) = self.stack.last_mut() {
+            match entities.next() {
+                Some(MimeEntity::Multipart(multipart)) => {
+                    self.stack.push(multipart.children().iter());
+                }
+                // Attached messages are body parts themselves; do not descend
+                // into the contained message when enumerating this body.
+                Some(entity) => return Some(entity),
+                None => {
+                    self.stack.pop();
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<R> FusedIterator for BodyParts<'_, R> {}
+
+/// A lazy attachment filter over [`BodyParts`].
+///
+/// Only non-multipart nodes whose first Content-Disposition parses as
+/// `attachment` are returned. Malformed dispositions yield errors; the next
+/// call resumes at the next body part. No body streams or attached-message
+/// contents are read or traversed. Collect into a `Result` to stop on error.
+pub struct Attachments<'a, R> {
+    parts: BodyParts<'a, R>,
+}
+
+impl<'a, R> Attachments<'a, R> {
+    pub(crate) fn new(parts: BodyParts<'a, R>) -> Self {
+        Self { parts }
+    }
+}
+
+impl<'a, R> Iterator for Attachments<'a, R> {
+    type Item = Result<&'a MimeEntity<R>, ContentHeaderParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for part in self.parts.by_ref() {
+            match part.is_attachment() {
+                Ok(true) => return Some(Ok(part)),
+                Ok(false) => {}
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        None
+    }
+}
+
+impl<R> FusedIterator for Attachments<'_, R> {}
+
+/// A lazy, depth-first iterator over the leaf parts of a MIME tree.
+///
+/// Descends through multipart containers and attached message bodies. Uses
+/// storage proportional to nesting depth; empty containers/messages are skipped.
+pub struct LeafParts<'a, R> {
+    parts: BodyParts<'a, R>,
+}
+
+impl<'a, R> LeafParts<'a, R> {
+    pub(crate) fn new(entities: &'a [MimeEntity<R>]) -> Self {
+        Self {
+            parts: BodyParts::new(entities),
+        }
+    }
+}
+
+impl<'a, R> Iterator for LeafParts<'a, R> {
+    type Item = &'a MimePart<R>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.parts.next()? {
+                MimeEntity::Part(part) => return Some(part),
+                MimeEntity::Message(part) => {
+                    if let Some(body) = part.message().and_then(|message| message.body()) {
+                        self.parts.stack.push(slice::from_ref(body).iter());
+                    }
+                }
+                MimeEntity::Multipart(_) => unreachable!("body-part iteration skips containers"),
+            }
+        }
+    }
+}
+
+impl<R> FusedIterator for LeafParts<'_, R> {}
