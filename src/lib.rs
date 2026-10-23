@@ -74,6 +74,8 @@
 //! charset decoding and [`text::FlowedToText`] paragraph unwrapping when declared.
 //! [`text::TextToFlowed`] wraps plain text with space stuffing and UTF-8-safe
 //! soft breaks for caller-authored `format=flowed; delsp=yes` text parts.
+//! [`text::TextToText`] copies decoded text verbatim with optional text headers
+//! and footers, without inserting separators or normalizing line endings.
 //! [`text::PlainTextPreviewer`] produces length-limited, whitespace-normalized
 //! previews of decoded plain text without selecting or reading MIME bodies.
 //! [`io::BoundedStream`] exposes a seekable source range without copying it,

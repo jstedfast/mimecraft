@@ -1240,6 +1240,30 @@ These convenience operations materialize decoded bytes, Unicode text, and
 any converted text in memory. They do not change raw headers or stored bytes.
 Streaming text converters and automatic HTML/RTF conversion remain deferred.
 
+### Copying and decorating plain text
+
+`text::TextToText` copies a complete Unicode string verbatim, optionally
+prepending its `header` and appending its `footer`. Both fields are
+`Option<String>` and default to `None`. Empty decorations behave like absent
+ones; nonempty decorations are emitted even for an empty input.
+
+```rust
+use mimecraft::text::TextToText;
+
+let converter = TextToText {
+    header: Some("Header\r\n".into()),
+    footer: Some("\r\nFooter".into()),
+};
+assert_eq!(converter.convert("body"), "Header\r\nbody\r\nFooter");
+assert_eq!(TextToText::new().convert("body"), "body");
+```
+
+No separators, final newline, escaping, or whitespace normalization are added.
+CRLF, LF, bare CR, Unicode scalars, controls, and markup remain unchanged in
+all three pieces. Headers and footers here are plain text, not MIME metadata.
+Conversion leaves the input and converter unchanged; it does not select MIME
+bodies, decode charsets, or provide streaming adapters.
+
 ### Generating flowed text
 
 `text::TextToFlowed` wraps a complete Unicode string for use as
@@ -3801,6 +3825,11 @@ quote-depth, delsp, and final-soft-line rules. Deterministic CRLF/LF options
 replace platform-dependent writer newlines; whole-string conversion omits
 the C# converter hierarchy, stream adapters, and header/footer decoration.
 The source's signature-separator handling is preserved and documented.
+Verbatim plain-text conversion follows `Text/TextToText.cs` and
+`UnitTests/Text/TextToTextTests.cs`. Optional owned headers and footers replace
+nullable C# properties; copying whole strings retains all characters and
+decoration boundaries without the source's buffered reader/writer loop.
+This standalone converter does not add decoration to the flowed converters.
 Flowed-text generation follows `Text/TextToFlowed.cs` and
 `UnitTests/Text/TextToFlowedTests.cs`, retaining word-boundary preference,
 space-stuffing, deep-quote limits, and the source's explanatory inline comments.
