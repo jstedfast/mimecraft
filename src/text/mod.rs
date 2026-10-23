@@ -3,15 +3,17 @@
 
 //! Whole-string text-format conversion, separate from charset/transfer decoding.
 //!
-//! Provides flowed-text wrapping and unwrapping. HTML rendering, rich-text
-//! conversion, and streaming converters are deferred.
+//! Provides flowed-text wrapping and unwrapping and plain-text previews.
+//! HTML rendering, rich-text conversion, and streaming converters are deferred.
 
 mod flowed_to_text;
+mod plain_text_previewer;
 mod text_to_flowed;
 
 use crate::encodings::NewLineFormat;
 
 pub use flowed_to_text::FlowedToText;
+pub use plain_text_previewer::{InvalidPreviewLength, PlainTextPreviewer};
 pub use text_to_flowed::TextToFlowed;
 
 fn output_newline(format: NewLineFormat) -> &'static str {

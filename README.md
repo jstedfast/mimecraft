@@ -52,6 +52,8 @@ MimeKit. The crate is not configured for publication.
   streams, and atomic in-memory text/charset replacement.
 - Whole-string flowed-text wrapping and unwrapping, with quote-depth handling,
   space stuffing, UTF-8-safe wrapping, and explicit CRLF/LF output.
+- Plain-text previews with Unicode whitespace normalization, checked length
+  limits, and character-safe ellipsis truncation.
 - Delivery-status parts with bounded raw header-group parsing, encoded-remainder
   compatibility, and atomic edits that preserve outer metadata.
 - Disposition-notification parts with bounded raw field access, global-subtype
@@ -1277,6 +1279,46 @@ are trimmed before wrapping, including the space in `-- ` signature separators.
 Quote-only lines retain a trailing stuffing space as in MimeKit. This is not a
 lossless transformation or strict RFC validation. No stream I/O, charset
 conversion, or header/footer insertion occurs.
+
+### Plain-text previews
+
+`text::PlainTextPreviewer` generates a short preview of already-decoded plain
+text. It collapses Unicode whitespace plus U+200B through U+200D into single
+ASCII spaces and removes leading and trailing spaces. `new()`/`default()` use
+a maximum length of 230; `with_maximum_preview_length` accepts 1 through 1024
+and returns `text::InvalidPreviewLength` outside that range.
+
+```rust
+use mimecraft::text::PlainTextPreviewer;
+
+let previewer = PlainTextPreviewer::with_maximum_preview_length(12).unwrap();
+assert_eq!(
+    previewer.preview(" \tHello\r\nworld!  More"),
+    "Hello world\u{2026}"
+);
+assert_eq!(previewer.preview("  short  "), "short");
+```
+
+If input remains when the normalized output reaches the limit, the final
+retained character is replaced with U+2026 (ellipsis). As in MimeKit's string
+overload, trailing-space removal happens first: a truncated preview can be
+shorter than the limit, and unread whitespace alone still triggers an ellipsis.
+For example, a limit of 3 converts `"ab cd"` to `"a\u{2026}"`, not `"ab\u{2026}"`.
+Truncation does not prefer word boundaries.
+
+The limit counts Unicode scalar values, not UTF-8 bytes or MimeKit's UTF-16
+code units, so supplementary characters remain intact. Grapheme clusters can
+still be split, and the inherited treatment of zero-width joiners as whitespace
+also applies inside emoji sequences. The output is bounded by the configured
+limit without first normalizing the entire input; long whitespace runs may
+still need to be scanned.
+
+The previewer performs no HTML rendering or escaping, flowed-text unwrapping,
+charset decoding, MIME body selection, or stream I/O. Use
+`MimeMessage::text_body(TextFormat::Plain)` for explicit decoded body selection
+and flowed conversion before previewing, or pass an already-decoded string.
+MimeKit's stream overloads and automatic TextPart preview generation remain
+deferred.
 
 ### Delivery-status groups
 
@@ -3767,6 +3809,12 @@ word boundary avoids repeatedly scanning long unbroken words. Both flowed
 converters share logical-line scanning and deterministic CRLF/LF output.
 Trailing-space trimming, signature handling, quote normalization, and the
 absence of stream adapters and header/footer decoration are explicit.
+Plain-text previews adapt the string overload in `Text/PlainTextPreviewer.cs`,
+the default and checked length range in `Text/TextPreviewer.cs`, and
+`UnitTests/Text/PlainTextPreviewerTests.cs`. Whitespace classification and the
+trim-before-ellipsis ordering are retained; Unicode scalar counts replace
+UTF-16 code-unit counts. Stream overloads, automatic body previews, and
+charset-recovery behavior are not ported.
 Delivery-status groups adapt `MessageDeliveryStatus.cs`,
 `MimeParser.ParseStatusGroup`, `MimeReader.SkipBlankLines`, and
 `UnitTests/MessageDeliveryStatusTests.cs`; `ParserOptions.cs` supplies the
