@@ -28,6 +28,8 @@
 //! raw copying, and decoded copying using the existing transfer codecs.
 //! [`MimePart`] combines a body stream with authoritative raw headers, detached
 //! typed metadata, and checked setters without source I/O or automatic transcoding.
+//! Content descriptions use tolerant header decoding and checked unstructured
+//! authoring; content durations expose whole seconds with explicit value errors.
 //! Its synchronous writer serializes complete single parts with streaming
 //! transfer conversion, UU wrappers, and [`MimePartWriteOptions`] newline settings.
 //! [`TextPart`] adds strict charset-aware text reads and atomic in-memory text
@@ -332,7 +334,7 @@ pub use mime_entity::{Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_load::MimeEntityParseOptions;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
 pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};
-pub use mime_part::MimePart;
+pub use mime_part::{InvalidContentDuration, MimePart};
 pub use mime_part_write::MimePartWriteOptions;
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};
 pub use mime_version::{MimeVersion, MimeVersionParseError, MimeVersionParseErrorKind};

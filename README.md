@@ -671,6 +671,36 @@ missing means `Unspecified`, but empty or unknown values return explicit errors.
 Setting `Unspecified` removes all transfer-encoding headers; other encodings write
 one canonical token with CRLF termination.
 
+`content_description()` returns the first Content-Description as an owned
+`Option<rfc2047::DecodedHeader>`, retaining tolerant decoding diagnostics.
+Its `_with_options` variant accepts explicit decoding settings. Missing and
+present-empty descriptions are distinct; decoded text is unfolded and trimmed,
+not sanitized for display.
+
+`set_content_description(Some(text))` uses the same checked unstructured-header
+formatter as Subject. Its `_with_options` variant accepts
+`UnstructuredHeaderFormatOptions`. Assignment trims and unfolds text, encodes
+controls and literal encoded-word lookalikes, and replaces duplicates at the
+first slot. `None` removes every occurrence without checking formatting options;
+empty text leaves one empty header. Formatting errors leave all records intact.
+
+`content_duration()` returns `Result<Option<i32>, InvalidContentDuration>` in
+whole seconds. It follows MimeKit by decoding and unfolding the first header,
+then accepting ASCII decimal digits through `i32::MAX`, including leading
+zeros. The decoded value is Unicode-trimmed; trailing NULs, optionally preceded
+by ASCII whitespace, are accepted as in the upstream integer parser. Signs,
+comments, fractions, internal spaces, and overflow produce an accessor error,
+not a message-loading failure or a fallback to later duplicate headers.
+Charset diagnostics remain available through the raw header's decoder.
+
+`set_content_duration(Some(seconds))` rejects negatives before editing and
+writes a canonical CRLF-terminated value; `None` removes every occurrence.
+Both metadata setters always canonicalize assigned values and collapse
+duplicates, even when the decoded value is equal, rather than reproducing
+MimeKit's cache-dependent no-op. Both accessors observe raw edits immediately
+and need no source I/O trait bounds. Text parts expose them through
+`part()`/`part_mut()`; no media inspection or duration inference is performed.
+
 The stored encoding belongs to `MimeContent`, independently of the requested
 transfer-encoding header. Metadata edits do no I/O or transcoding, do not move
 the source cursor, and do not validate body structure or transport suitability.
@@ -5042,6 +5072,12 @@ stored/requested encodings. Raw headers and detached typed values replace
 change events and mutable caches. Checked setters reuse header formatting and
 duplicate-collapsing replacement; missing content metadata stays absent and
 invalid values return errors rather than silently selecting defaults.
+Content-Description and Content-Duration follow the same source's nullable
+properties: tolerant decoded descriptions and nonnegative integer seconds,
+with explicit errors replacing the duration getter's implicit null fallback.
+Unstructured formatting is shared with Subject; the numeric parser retains
+the source runtime's trailing-NUL compatibility behavior. Cache-dependent
+setter no-ops are replaced by deterministic canonical header replacement.
 Single-part writing follows `MimePart.WriteContent` and `MimeWriter.cs`, reusing
 the existing transfer codecs, newline filters, and normalized header writer.
 Stored/requested encoding comparisons, binary pass-through, UU wrappers, and

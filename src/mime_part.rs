@@ -1,7 +1,11 @@
 // Adapted from MimeKit's MimePart.cs and MimeEntity.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{Read, Seek};
+use std::{
+    error::Error,
+    fmt,
+    io::{Read, Seek},
+};
 
 use crate::{
     ContentDisposition, ContentEncoding, ContentHeaderParseError, ContentType, Header,
@@ -54,6 +58,22 @@ pub struct MimePart<R> {
     content: MimeContent<R>,
 }
 
+/// A Content-Duration value is not a nonnegative integer fitting in `i32`.
+///
+/// Returned for invalid decoded header text or a negative setter argument.
+/// Missing headers are not errors. Parsing does not report a raw byte offset
+/// because the value is decoded and unfolded before interpreting the number.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidContentDuration;
+
+impl fmt::Display for InvalidContentDuration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("content duration must be an integer from 0 through 2147483647 seconds")
+    }
+}
+
+impl Error for InvalidContentDuration {}
+
 impl<R: Read + Seek> MimePart<R> {
     /// Creates a part with `Content-Type: application/octet-stream`.
     ///
@@ -105,6 +125,160 @@ impl<R> MimePart<R> {
     /// fields. No cached typed value or invariant is silently repaired.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Decodes the first Content-Description header, or returns `None` if absent.
+    ///
+    /// Uses tolerant RFC 2047 decoding followed by unfolding and Unicode
+    /// trimming, as in MimeKit. An empty header returns present empty text.
+    /// The detached result retains charset-recovery diagnostics; their offsets
+    /// refer to the original raw value. Does not read content or mutate headers.
+    pub fn content_description(&self) -> Option<crate::rfc2047::DecodedHeader> {
+        self.content_description_with_options(&crate::rfc2047::DecodeOptions::default())
+    }
+
+    /// Decodes Content-Description with explicit charset and compliance options.
+    ///
+    /// See [`Self::content_description`] and [`Header::decode_value_with_options`].
+    /// Later duplicate values do not override the first matching record.
+    pub fn content_description_with_options(
+        &self,
+        options: &crate::rfc2047::DecodeOptions,
+    ) -> Option<crate::rfc2047::DecodedHeader> {
+        self.headers
+            .get("Content-Description")
+            .map(|header| header.decode_value_with_options(options))
+    }
+
+    /// Assigns Content-Description, or removes every occurrence for `None`.
+    ///
+    /// Uses default unstructured-header formatting. See
+    /// [`Self::set_content_description_with_options`] for replacement rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing headers or content.
+    pub fn set_content_description(
+        &mut self,
+        value: Option<&str>,
+    ) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        self.set_content_description_with_options(
+            value,
+            &crate::UnstructuredHeaderFormatOptions::default(),
+        )
+    }
+
+    /// Assigns Content-Description using checked unstructured-header formatting.
+    ///
+    /// Trims Unicode whitespace and removes CR/LF before encoding. Other
+    /// controls and literal encoded-word lookalikes are encoded, not discarded
+    /// or interpreted. See [`Header::from_unstructured_with_options`].
+    ///
+    /// Replaces duplicates at the first matching slot with a canonical
+    /// `Content-Description` record, or appends when absent. Like other raw-header
+    /// part setters, always reformats even for equal decoded text, rather than
+    /// reproducing MimeKit's cache-dependent no-op. Empty text leaves an empty
+    /// header; `None` removes all occurrences without validating options.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options or encoding failures leave all headers and content
+    /// unchanged. Formatting succeeds before any original records are removed.
+    pub fn set_content_description_with_options(
+        &mut self,
+        value: Option<&str>,
+        options: &crate::UnstructuredHeaderFormatOptions,
+    ) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        if let Some(value) = value {
+            let header =
+                Header::from_unstructured_with_options("Content-Description", value, options)?;
+            self.replace_formatted(header);
+        } else {
+            self.headers.remove_all("Content-Description");
+        }
+        Ok(())
+    }
+
+    /// Reads the first Content-Duration as nonnegative whole seconds.
+    ///
+    /// Decodes and unfolds the header first, as MimeKit does. Accepts ASCII
+    /// decimal digits (including leading zeros) through `i32::MAX`. Surrounding
+    /// Unicode whitespace is trimmed by header decoding; numeric parsing also
+    /// accepts trailing NULs, optionally preceded by ASCII whitespace, matching
+    /// the source's integer parser. Signs, fractions, comments, interior spaces,
+    /// non-ASCII digits, and larger numbers are invalid.
+    ///
+    /// Does not inspect the media, cache a value, or change raw headers. Charset
+    /// diagnostics remain available by decoding the raw header directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidContentDuration`] for an invalid first header, rather
+    /// than treating it as absent or using a later valid duplicate. This does
+    /// not prevent tolerant entity/message loading; only this accessor checks
+    /// the duration. Absence returns `Ok(None)`.
+    pub fn content_duration(&self) -> Result<Option<i32>, InvalidContentDuration> {
+        let Some(header) = self.headers.get("Content-Duration") else {
+            return Ok(None);
+        };
+        let decoded = header.decode_value();
+        // MimeKit uses integer parsing with only leading/trailing whitespace
+        // enabled: a leading '+' is not allowed. Its runtime also permits NUL
+        // terminators after the number and any trailing numeric whitespace.
+        let value = decoded
+            .text
+            .trim_end_matches('\0')
+            .trim_end_matches([' ', '\t', '\r', '\n', '\x0b', '\x0c']);
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(InvalidContentDuration);
+        }
+        value.parse().map(Some).map_err(|_| InvalidContentDuration)
+    }
+
+    /// Assigns a duration in whole seconds, or removes all occurrences for `None`.
+    ///
+    /// Writes canonical ASCII decimal with CRLF, replacing duplicates at the
+    /// first matching slot or appending when absent. Zero is valid. Like other
+    /// raw-header part setters, equal values are reformatted. Does not derive
+    /// a duration from the body, access sources, or change other metadata.
+    ///
+    /// # Errors
+    ///
+    /// Negative values return [`InvalidContentDuration`] before changing headers.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContent, MimePart};
+    ///
+    /// let mut part = MimePart::new(MimeContent::new(Cursor::new(Vec::<u8>::new())));
+    /// part.set_content_description(Some("A short recording"))?;
+    /// part.set_content_duration(Some(30))?;
+    /// assert_eq!(part.content_duration()?, Some(30));
+    /// part.set_content_duration(None)?;
+    /// assert_eq!(part.content_duration()?, None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_content_duration(
+        &mut self,
+        value: Option<i32>,
+    ) -> Result<(), InvalidContentDuration> {
+        if let Some(value) = value {
+            if value < 0 {
+                return Err(InvalidContentDuration);
+            }
+            self.replace_formatted(Header::from_formatted(format!(
+                "Content-Duration: {value}\r\n"
+            )));
+        } else {
+            self.headers.remove_all("Content-Duration");
+        }
+        Ok(())
+    }
+
+    fn replace_formatted(&mut self, header: Header) {
+        self.headers
+            .replace_all(header)
+            .expect("typed formatters always produce a header with a parsed field name");
     }
 }
 
@@ -284,12 +458,6 @@ impl<R: Read + Seek> MimePart<R> {
         } else {
             self.headers.remove_all("Content-Transfer-Encoding");
         }
-    }
-
-    fn replace_formatted(&mut self, header: Header) {
-        self.headers
-            .replace_all(header)
-            .expect("typed formatters always produce a header with a parsed field name");
     }
 }
 
