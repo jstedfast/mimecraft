@@ -23,6 +23,8 @@
 //! [`anonymize`] masks raw address, unstructured, content-header, and Received
 //! values while retaining syntax for inspection, including potential encoded-word
 //! labels, escapes, parameters, trace keywords, and recognized date suffixes.
+//! [`anonymize::header`] applies default field rules to complete stored records,
+//! preserves selected metadata verbatim, and byte-masks malformed records.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

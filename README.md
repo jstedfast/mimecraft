@@ -40,6 +40,8 @@ MimeKit. The crate is not configured for publication.
   use in filtering pipelines rather than automatic message anonymization.
 - Raw address, unstructured, content-header, and Received masking with preserved
   syntax, parameters, trace keywords, and recognized date suffixes for inspection.
+- Field-aware masking of complete raw header records, including byte masking of
+  malformed records and default preservation of selected metadata fields.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -431,7 +433,7 @@ filters; otherwise buffered bytes or an ensured final newline can be lost.
 Reset before an independent stream. For read-side I/O, nested `FilteredReader`
 adapters handle the finalization order automatically.
 
-### Raw header-value masking
+### Raw header masking
 
 `anonymize::address_header_value(&[u8])` and
 `anonymize::unstructured_header_value(&[u8])` port MimeKit's raw-value masking
@@ -507,15 +509,48 @@ data. Rejected suffixes resume masking. This reuses the tolerant date parser,
 not strict date validation, and never reformats the date. Keyword and date
 lookahead mean a masked prefix can differ from that prefix of a complete result.
 
+`anonymize::header(&Header)` applies MimeKit's default field dispatch to a complete
+stored record. It preserves the original field spelling, blanks before the colon,
+and colon, then uses the relevant value helper. Standard From/Sender/To/Cc/Bcc/
+Reply-To fields, their Resent counterparts, and Disposition-Notification-To use
+address masking. Content-Id, Message-Id, Original-Message-Id, Resent-Message-Id,
+References, and In-Reply-To also use address masking. Received, Content-Type,
+and Content-Disposition use their respective helpers.
+
+Date, MIME-Version, and Content-Transfer-Encoding pass through verbatim,
+even with invalid values. All other fields use unstructured masking, including
+authentication/signature fields, unknown or empty names, and unlisted
+address/date-like fields such as Return-Path and Resent-Date. No value validation,
+signature verification, or inferred field grammar is performed.
+
+Malformed records have no usable field/value boundary, so their entire raw
+contents are processed with `AnonymizeFilter`, preserving only MIME whitespace.
+A valid empty field name still retains its colon. The result is a new byte
+buffer exactly as long as `Header::raw()`, not a reparsed or modified header.
+No newline or body separator is added, and line endings are not normalized;
+Received-comment escape rules can still mask individual newline bytes.
+
+```rust
+use mimecraft::{Header, anonymize};
+
+let record = Header::parse(b"tO \t: Alice <alice@example.com>\n")?;
+assert_eq!(
+    anonymize::header(&record),
+    b"tO \t: xxxxx <xxxxx@xxxxxxx.xxx>\n",
+);
+# Ok::<(), mimecraft::HeaderParseError>(())
+```
+
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header
 text, parameter names, selected values, and accepted date suffixes remain visible,
-even when malformed or containing unrelated private data.
+even when malformed or containing unrelated private data. Complete-record masking
+also retains valid field names and the three pass-through fields in their entirety.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Header-type dispatch, configurable preservation settings, and complete
-message/entity anonymization remain deferred.
+Configurable preservation settings, output formatting, and complete message/entity
+anonymization remain deferred.
 
 ### Incremental charset conversion
 

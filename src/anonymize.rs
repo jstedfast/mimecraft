@@ -1,11 +1,13 @@
 // Adapted from MimeKit's MimeAnonymizer.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-//! Byte-level masking of raw MIME header values for inspecting syntax and layout.
+//! Byte-level masking of MIME headers for inspecting syntax and layout.
 //!
-//! These whole-value helpers return a new buffer of exactly the input length.
-//! They do not decode, validate, repair, fold, or mutate headers. Each call starts
-//! fresh state; do not split one value across calls.
+//! [`header`] masks a complete stored record using MimeKit's default field rules.
+//! The value helpers let callers select a grammar explicitly. All return a new
+//! buffer of exactly the input length without decoding, validating, repairing,
+//! folding, or mutating headers. Each call starts fresh state; do not split one
+//! value across calls.
 //!
 //! This is not guaranteed removal of sensitive information. Lengths, selected
 //! syntax, and potential encoded-word charset/encoding labels remain visible;
@@ -14,20 +16,125 @@
 //! disposition, parameter names, and selected parameter values, even if malformed.
 //! Received masking preserves an entire suffix if the date parser accepts it,
 //! including any unrelated text ignored by that parser.
+//! Complete-record masking preserves valid field names and copies Date,
+//! MIME-Version, and Content-Transfer-Encoding records verbatim, even when their
+//! values contain private or malformed data.
 //! Output may contain non-ASCII bytes, controls, or invalid UTF-8 and is not
 //! necessarily valid MIME or safe display text.
 //!
-//! Pass values such as [`crate::Header::raw_value`], not complete header records.
-//! Header dispatch, configurable preservation policies, and
-//! full-message anonymization are not implemented here. Review output before
+//! Pass a [`Header`] to [`header`], or [`Header::raw_value`] to the value helpers.
+//! Configurable preservation policies, output formatting, and full-message
+//! anonymization are not implemented here. Review output before
 //! sharing it. Use [`crate::filters::AnonymizeFilter`] for simpler byte masking
 //! that preserves only SPACE, TAB, CR, and LF.
 
-use crate::{DateTimeOffset, parse_utils::is_whitespace};
+use crate::{
+    DateTimeOffset, Header, HeaderId, filters::AnonymizeFilter, parse_utils::is_whitespace,
+};
 
 const ADDRESS_SPECIALS: &[u8] = b" \t\r\n()<>[]:;@,.";
 const RECEIVED_SPECIALS: &[u8] = b"<>[]:@,.";
 const WHITESPACE: &[u8] = b" \t\r\n";
+
+/// Masks a complete stored header using MimeKit's default field-specific rules.
+///
+/// Preserves the field's spelling, blanks before its colon, and the colon.
+/// Chooses a value helper using [`Header::id`], so field matching is
+/// ASCII-case-insensitive and does not validate value syntax.
+///
+/// | Fields | Value handling |
+/// | --- | --- |
+/// | From, Sender, To, Cc, Bcc, Reply-To, their Resent counterparts, Disposition-Notification-To | [`address_header_value`] |
+/// | Content-Id, Message-Id, Original-Message-Id, Resent-Message-Id, References, In-Reply-To | [`address_header_value`] |
+/// | Received | [`received_header_value`] |
+/// | Content-Type | [`content_type_value`] |
+/// | Content-Disposition | [`content_disposition_value`] |
+/// | Date, MIME-Version, Content-Transfer-Encoding | Copied verbatim, even invalid values |
+/// | All other fields, including unknown and empty names | [`unstructured_header_value`] |
+///
+/// Unlisted address/date-like fields, including Return-Path and Resent-Date,
+/// use unstructured masking, not inferred grammar. Authentication and signature
+/// fields also use unstructured masking; no verification is performed.
+///
+/// If [`Header::is_invalid`] is true, masks the **entire record**, including
+/// colons and apparent field text, with [`AnonymizeFilter`]. Only SPACE, TAB, CR,
+/// and LF survive. A syntactically valid empty field name is not an invalid
+/// record: its colon is retained and its value uses unstructured masking.
+///
+/// Returns exactly as many bytes as [`Header::raw`], leaving the header unchanged.
+/// Unlike MimeKit's formatted stream writer, adds no newline or body separator
+/// and performs no newline conversion. Individual value rules can still mask
+/// escaped newlines in Received comments. This is a byte buffer, not a reparsed
+/// header, and does not provide configurable preservation or full-message
+/// anonymization. See the [module documentation](self) before sharing output.
+///
+/// ```
+/// use mimecraft::{Header, anonymize};
+///
+/// let record = Header::parse(b"tO \t: Alice <alice@example.com>\n")?;
+/// assert_eq!(
+///     anonymize::header(&record),
+///     b"tO \t: xxxxx <xxxxx@xxxxxxx.xxx>\n",
+/// );
+/// # Ok::<(), mimecraft::HeaderParseError>(())
+/// ```
+pub fn header(record: &Header) -> Vec<u8> {
+    if record.is_invalid() {
+        // Invalid records have no usable field/value boundary: mask raw bytes
+        // instead of dispatching on an apparent field or dropping the record.
+        let mut output = Vec::with_capacity(record.raw().len());
+        AnonymizeFilter::new().filter(record.raw(), &mut output);
+        return output;
+    }
+
+    let raw_value = record.raw_value();
+    let value = match record.id() {
+        HeaderId::DispositionNotificationTo
+        | HeaderId::ResentReplyTo
+        | HeaderId::ResentSender
+        | HeaderId::ResentFrom
+        | HeaderId::ResentBcc
+        | HeaderId::ResentCc
+        | HeaderId::ResentTo
+        | HeaderId::ReplyTo
+        | HeaderId::Sender
+        | HeaderId::From
+        | HeaderId::Bcc
+        | HeaderId::Cc
+        | HeaderId::To => address_header_value(raw_value),
+        HeaderId::Received => received_header_value(raw_value),
+        HeaderId::OriginalMessageId
+        | HeaderId::ResentMessageId
+        | HeaderId::References
+        | HeaderId::InReplyTo
+        | HeaderId::MessageId
+        | HeaderId::ContentId => {
+            // Treat these identifiers like address headers for now, as MimeKit does.
+            address_header_value(raw_value)
+        }
+        HeaderId::ContentDisposition => content_disposition_value(raw_value),
+        HeaderId::ContentType => content_type_value(raw_value),
+        HeaderId::ArcAuthenticationResults
+        | HeaderId::AuthenticationResults
+        | HeaderId::ArcMessageSignature
+        | HeaderId::ArcSeal
+        | HeaderId::DkimSignature => {
+            // TODO: consider dedicated authentication/signature masking.
+            unstructured_header_value(raw_value)
+        }
+        HeaderId::ContentTransferEncoding | HeaderId::MimeVersion | HeaderId::Date => {
+            // Don't mask these headers, even if their values are malformed.
+            return record.raw().to_vec();
+        }
+        _ => unstructured_header_value(raw_value),
+    };
+
+    let mut output = Vec::with_capacity(record.raw().len());
+    output.extend_from_slice(record.raw_field());
+    output.push(b':');
+    output.extend_from_slice(&value);
+    output
+}
 
 /// Masks an unstructured raw header value, retaining potential encoded-word syntax.
 ///
