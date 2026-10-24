@@ -41,7 +41,8 @@ MimeKit. The crate is not configured for publication.
 - Raw address, unstructured, content-header, and Received masking with preserved
   syntax, parameters, trace keywords, and recognized date suffixes for inspection.
 - Field-aware masking of complete raw header records, including byte masking of
-  malformed records and default preservation of selected metadata fields.
+  malformed records, default metadata preservation, and configurable preserved
+  fields.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -541,16 +542,41 @@ assert_eq!(
 # Ok::<(), mimecraft::HeaderParseError>(())
 ```
 
+`anonymize::header_with_options(&Header, &anonymize::HeaderOptions)` additionally
+preserves fields listed in `preserve_headers: Vec<String>`. Matching uses the
+complete field name, ignoring ASCII case. Entries are not trimmed, validated,
+or canonicalized; wildcards, prefixes, and Unicode case folding are not used.
+Order and duplicates do not affect matching. An empty name matches a valid
+empty field, but malformed records are still byte-masked.
+
+Preservation bypasses the value helper and copies the entire record, including
+invalid or sensitive values. Defaults preserve no additional fields; Date,
+MIME-Version, and Content-Transfer-Encoding still pass through regardless.
+The list is checked afresh for every call without mutating it or the record.
+Options do not affect raw-value helpers or automatically traverse header lists,
+MIME trees, or status-report bodies; callers explicitly select records.
+
+```rust
+use mimecraft::{Header, anonymize::{self, HeaderOptions}};
+
+let record = Header::parse(b"Subject: keep this exact value\n")?;
+let options = HeaderOptions {
+    preserve_headers: vec!["sUbJeCt".into()],
+};
+assert_eq!(anonymize::header_with_options(&record, &options), record.raw());
+# Ok::<(), mimecraft::HeaderParseError>(())
+```
+
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header
 text, parameter names, selected values, and accepted date suffixes remain visible,
 even when malformed or containing unrelated private data. Complete-record masking
-also retains valid field names and the three pass-through fields in their entirety.
+also retains valid field names, the three built-in pass-through fields, and
+configured preserved fields in their entirety.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Configurable preservation settings, output formatting, and complete message/entity
-anonymization remain deferred.
+Output formatting and complete message/entity anonymization remain deferred.
 
 ### Incremental charset conversion
 

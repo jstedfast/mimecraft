@@ -1,7 +1,10 @@
 // Field-dispatch cases adapted from MimeKit's MimeAnonymizer.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use mimecraft::{Header, HeaderId, HeaderList, anonymize};
+use mimecraft::{
+    Header, HeaderId, HeaderList,
+    anonymize::{self, HeaderOptions},
+};
 
 fn assert_dispatch(fields: &[&str], value: &[u8], expected_value: &[u8]) {
     for field in fields {
@@ -16,6 +19,11 @@ fn assert_dispatch(fields: &[&str], value: &[u8], expected_value: &[u8]) {
             let before = record.clone();
             let expected = [prefix.as_bytes(), expected_value].concat();
             assert_eq!(anonymize::header(&record), expected, "field {spelling}");
+            assert_eq!(
+                anonymize::header_with_options(&record, &HeaderOptions::default()),
+                expected,
+                "default options, field {spelling}",
+            );
             assert_eq!(expected.len(), record.raw().len());
             assert_eq!(record, before);
             assert_eq!(record.raw(), raw);
@@ -251,4 +259,260 @@ fn masking_records_preserves_order_duplicates_and_leaves_the_body_alone() {
     assert_eq!(headers, before);
     assert_eq!(headers.get_all("To").count(), 2);
     assert!(headers.get("MIME-Version").is_none());
+}
+
+#[test]
+fn configured_fields_bypass_every_value_dispatch_class_without_validation() {
+    for field in [
+        "To",
+        "References",
+        "Content-Id",
+        "Received",
+        "Content-Type",
+        "Content-Disposition",
+        "Subject",
+        "DKIM-Signature",
+        "Authentication-Results",
+        "X-Private",
+        "",
+    ] {
+        let mut raw = format!("{field} \t:").into_bytes();
+        raw.extend_from_slice(b" PRIVATE <name@example.com>; name=\"A B\"\0\xff\r\n\tmore\n");
+        let record = Header::parse(&raw).unwrap();
+        let before = record.clone();
+        assert_ne!(anonymize::header(&record), raw, "field {field}");
+        for spelling in [field.to_ascii_lowercase(), field.to_ascii_uppercase()] {
+            let options = HeaderOptions {
+                preserve_headers: vec![spelling],
+            };
+            let options_before = options.clone();
+            assert_eq!(anonymize::header_with_options(&record, &options), raw);
+            assert_eq!(options, options_before);
+            assert_eq!(record, before);
+        }
+    }
+}
+
+#[test]
+fn preservation_matches_exact_ascii_names_without_trimming_or_wildcards() {
+    let record = Header::parse(b"sUbJeCt \t: private\n").unwrap();
+    for name in [
+        "Sub",
+        "Subject:",
+        " Subject",
+        "Subject ",
+        "Subject\t",
+        "Subject\0",
+        "*",
+        "Subject*",
+        "X-Subject",
+        "\u{17f}ubject",
+        "",
+    ] {
+        let options = HeaderOptions {
+            preserve_headers: vec![name.into()],
+        };
+        assert_eq!(
+            anonymize::header_with_options(&record, &options),
+            anonymize::header(&record),
+            "name {name:?}",
+        );
+        assert_eq!(options.preserve_headers, [name]);
+    }
+    let options = HeaderOptions {
+        preserve_headers: vec!["SUBJECT".into()],
+    };
+    assert_eq!(
+        anonymize::header_with_options(&record, &options),
+        record.raw()
+    );
+
+    // A '*' can occur in a literal field name, but has no wildcard semantics.
+    let literal = Header::parse(b"X-*: private\n").unwrap();
+    let other = Header::parse(b"X-Other: private\n").unwrap();
+    let options = HeaderOptions {
+        preserve_headers: vec!["x-*".into()],
+    };
+    assert_eq!(
+        anonymize::header_with_options(&literal, &options),
+        literal.raw()
+    );
+    assert_eq!(
+        anonymize::header_with_options(&other, &options),
+        anonymize::header(&other)
+    );
+
+    // Extension fields share HeaderId::Unknown but not their preservation rule.
+    let options = HeaderOptions {
+        preserve_headers: vec!["Unknown".into()],
+    };
+    let unknown = Header::parse(b"Unknown: private\n").unwrap();
+    let empty = Header::parse(b": private\n").unwrap();
+    assert_eq!(unknown.id(), HeaderId::Unknown);
+    assert_eq!(other.id(), HeaderId::Unknown);
+    assert_eq!(
+        anonymize::header_with_options(&unknown, &options),
+        unknown.raw()
+    );
+    assert_eq!(
+        anonymize::header_with_options(&other, &options),
+        anonymize::header(&other)
+    );
+    assert_eq!(
+        anonymize::header_with_options(&empty, &options),
+        anonymize::header(&empty)
+    );
+}
+
+#[test]
+fn preserved_names_never_exempt_malformed_records() {
+    let options = HeaderOptions {
+        preserve_headers: vec![
+            "".into(),
+            "Date".into(),
+            "Bad Name".into(),
+            "Bad Name: secret\n".into(),
+            "\u{e9}".into(),
+            "Unknown".into(),
+            "Broken".into(),
+        ],
+    };
+    for raw in [
+        b"Date\0: secret\n".as_slice(),
+        b"Bad Name: secret\n",
+        b"\xc3\xa9: secret\n",
+        b"Broken",
+        b" \torphan\n continuation\n",
+    ] {
+        let records = HeaderList::load(&mut &raw[..]).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records.as_slice()[0];
+        assert!(record.is_invalid());
+        let expected: Vec<_> = raw
+            .iter()
+            .map(|&byte| {
+                if b" \t\r\n".contains(&byte) {
+                    byte
+                } else {
+                    b'x'
+                }
+            })
+            .collect();
+        assert_eq!(anonymize::header_with_options(record, &options), expected);
+        assert_eq!(record.raw(), raw);
+    }
+}
+
+#[test]
+fn preservation_lists_are_owned_and_edits_apply_on_the_next_call() {
+    let subject = Header::parse(b"Subject: private\n").unwrap();
+    let to = Header::parse(b"To: <private@example.com>\n").unwrap();
+    let mut options = HeaderOptions::default();
+    assert!(options.preserve_headers.is_empty());
+    assert_eq!(
+        anonymize::header_with_options(&subject, &options),
+        anonymize::header(&subject)
+    );
+    options.preserve_headers.push("sUbJeCt".into());
+    assert_eq!(
+        anonymize::header_with_options(&subject, &options),
+        subject.raw()
+    );
+    assert_eq!(
+        anonymize::header_with_options(&to, &options),
+        anonymize::header(&to)
+    );
+
+    options
+        .preserve_headers
+        .extend(["SUBJECT".into(), "To".into()]);
+    assert_eq!(
+        anonymize::header_with_options(&subject, &options),
+        subject.raw()
+    );
+    assert_eq!(anonymize::header_with_options(&to, &options), to.raw());
+    options.preserve_headers.reverse();
+    assert_eq!(
+        anonymize::header_with_options(&subject, &options),
+        subject.raw()
+    );
+    assert_eq!(anonymize::header_with_options(&to, &options), to.raw());
+
+    options
+        .preserve_headers
+        .retain(|name| !name.eq_ignore_ascii_case("subject"));
+    assert_eq!(
+        anonymize::header_with_options(&subject, &options),
+        anonymize::header(&subject)
+    );
+    let mut copy = options.clone();
+    copy.preserve_headers.clear();
+    assert_eq!(
+        anonymize::header_with_options(&to, &copy),
+        anonymize::header(&to)
+    );
+    assert_eq!(anonymize::header_with_options(&to, &options), to.raw());
+    options.preserve_headers.clear();
+    assert_eq!(options, HeaderOptions::default());
+}
+
+#[test]
+fn preservation_copies_opaque_values_and_does_not_change_raw_value_helpers() {
+    let mut raw = b"Subject:\r\nX-Private: ".to_vec();
+    raw.extend(0..=255u8);
+    raw.extend_from_slice(b"\r\n\r\nprivate body-like bytes\r\n");
+    let record = Header::parse(&raw).unwrap();
+    let options = HeaderOptions {
+        preserve_headers: vec!["Subject".into()],
+    };
+    assert_eq!(anonymize::header_with_options(&record, &options), raw);
+    assert_eq!(record.raw(), raw);
+    let default_output = [
+        b"Subject:".as_slice(),
+        &anonymize::unstructured_header_value(record.raw_value()),
+    ]
+    .concat();
+    assert_eq!(anonymize::header(&record), default_output);
+    assert_ne!(default_output, raw);
+}
+
+#[test]
+fn additional_preservation_does_not_disable_builtin_pass_through() {
+    for field in ["Date", "MIME-Version", "Content-Transfer-Encoding"] {
+        let raw = format!("{field}: invalid private data\n");
+        let record = Header::parse(raw.as_bytes()).unwrap();
+        for fields in [vec![], vec!["Subject".into()], vec![field.into()]] {
+            let options = HeaderOptions {
+                preserve_headers: fields,
+            };
+            assert_eq!(
+                anonymize::header_with_options(&record, &options),
+                record.raw()
+            );
+        }
+    }
+}
+
+#[test]
+fn preservation_applies_to_each_explicit_record_without_traversing_the_body() {
+    let raw =
+        b"Subject: first\nTo: Alice <a@b.c>\nSubject: second\nX-Private: keep\n\nprivate body";
+    let mut reader = &raw[..];
+    let headers = HeaderList::load(&mut reader).unwrap();
+    let before = headers.clone();
+    let options = HeaderOptions {
+        preserve_headers: vec!["subject".into(), "X-PRIVATE".into()],
+    };
+    let options_before = options.clone();
+    let output: Vec<_> = headers
+        .iter()
+        .flat_map(|record| anonymize::header_with_options(record, &options))
+        .collect();
+    assert_eq!(
+        output,
+        b"Subject: first\nTo: xxxxx <x@x.x>\nSubject: second\nX-Private: keep\n",
+    );
+    assert_eq!(headers, before);
+    assert_eq!(options, options_before);
+    assert_eq!(reader, b"private body");
 }

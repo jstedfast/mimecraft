@@ -25,6 +25,8 @@
 //! labels, escapes, parameters, trace keywords, and recognized date suffixes.
 //! [`anonymize::header`] applies default field rules to complete stored records,
 //! preserves selected metadata verbatim, and byte-masks malformed records.
+//! [`anonymize::header_with_options`] accepts additional fields to preserve
+//! verbatim through [`anonymize::HeaderOptions`].
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

@@ -4,6 +4,7 @@
 //! Byte-level masking of MIME headers for inspecting syntax and layout.
 //!
 //! [`header`] masks a complete stored record using MimeKit's default field rules.
+//! [`header_with_options`] can preserve additional fields using [`HeaderOptions`].
 //! The value helpers let callers select a grammar explicitly. All return a new
 //! buffer of exactly the input length without decoding, validating, repairing,
 //! folding, or mutating headers. Each call starts fresh state; do not split one
@@ -18,15 +19,15 @@
 //! including any unrelated text ignored by that parser.
 //! Complete-record masking preserves valid field names and copies Date,
 //! MIME-Version, and Content-Transfer-Encoding records verbatim, even when their
-//! values contain private or malformed data.
+//! values contain private or malformed data. Configured preserved fields also
+//! pass through in their entirety.
 //! Output may contain non-ASCII bytes, controls, or invalid UTF-8 and is not
 //! necessarily valid MIME or safe display text.
 //!
 //! Pass a [`Header`] to [`header`], or [`Header::raw_value`] to the value helpers.
-//! Configurable preservation policies, output formatting, and full-message
-//! anonymization are not implemented here. Review output before
-//! sharing it. Use [`crate::filters::AnonymizeFilter`] for simpler byte masking
-//! that preserves only SPACE, TAB, CR, and LF.
+//! Output formatting and full-message anonymization are not implemented here.
+//! Review output before sharing it. Use [`crate::filters::AnonymizeFilter`] for
+//! simpler byte masking that preserves only SPACE, TAB, CR, and LF.
 
 use crate::{
     DateTimeOffset, Header, HeaderId, filters::AnonymizeFilter, parse_utils::is_whitespace,
@@ -35,6 +36,38 @@ use crate::{
 const ADDRESS_SPECIALS: &[u8] = b" \t\r\n()<>[]:;@,.";
 const RECEIVED_SPECIALS: &[u8] = b"<>[]:@,.";
 const WHITESPACE: &[u8] = b" \t\r\n";
+
+/// Options for masking complete header records.
+///
+/// Defaults to no additional preserved fields; [`header`] and
+/// [`header_with_options`] then produce identical output. The three built-in
+/// pass-through fields (Date, MIME-Version, Content-Transfer-Encoding) remain
+/// preserved regardless of these options.
+///
+/// Unlike MimeKit's mutable case-insensitive set, this is an owned list using
+/// the repository's ASCII header-name matching. It retains supplied spelling,
+/// ordering, and duplicates, but order and duplicates do not affect masking.
+/// Matching scans the list without allocating a normalized field name.
+///
+/// These options affect only [`header_with_options`], not the raw-value helpers.
+/// They do not traverse a message, MIME tree, or structured report body.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HeaderOptions {
+    /// Additional field names whose complete raw records are copied verbatim.
+    ///
+    /// Uses [`Header::matches_field`]: matches the complete name ignoring ASCII
+    /// case, without trimming, Unicode case folding, wildcards, or prefix matching.
+    /// Entries are stored as supplied rather than validated or canonicalized;
+    /// names with colons, surrounding whitespace, or non-ASCII bytes do not
+    /// match valid fields. `""` matches a syntactically valid empty field name.
+    /// Malformed records never match and are always byte-masked.
+    ///
+    /// Preservation overrides every field-specific value helper, without
+    /// inspecting or validating the value. This can expose private data,
+    /// controls, invalid UTF-8, or embedded header-like lines. Review output
+    /// before sharing it.
+    pub preserve_headers: Vec<String>,
+}
 
 /// Masks a complete stored header using MimeKit's default field-specific rules.
 ///
@@ -65,8 +98,9 @@ const WHITESPACE: &[u8] = b" \t\r\n";
 /// Unlike MimeKit's formatted stream writer, adds no newline or body separator
 /// and performs no newline conversion. Individual value rules can still mask
 /// escaped newlines in Received comments. This is a byte buffer, not a reparsed
-/// header, and does not provide configurable preservation or full-message
-/// anonymization. See the [module documentation](self) before sharing output.
+/// header. Use [`header_with_options`] to preserve additional fields.
+/// Full-message anonymization remains separate. See the
+/// [module documentation](self) before sharing output.
 ///
 /// ```
 /// use mimecraft::{Header, anonymize};
@@ -79,12 +113,54 @@ const WHITESPACE: &[u8] = b" \t\r\n";
 /// # Ok::<(), mimecraft::HeaderParseError>(())
 /// ```
 pub fn header(record: &Header) -> Vec<u8> {
+    header_with_options(record, &HeaderOptions::default())
+}
+
+/// Masks a complete stored header while preserving explicitly selected fields.
+///
+/// Uses [`header`]'s field dispatch, malformed-record handling, and raw-byte
+/// output rules. For a valid record, a match in [`HeaderOptions::preserve_headers`]
+/// copies the entire stored record before applying any value helper. Values are
+/// not validated; field spelling, whitespace, and even malformed value bytes
+/// pass through unchanged. Invalid field/colon syntax is still byte-masked.
+///
+/// Neither input nor options are mutated. Options are checked afresh on each
+/// call, so edits take effect immediately without caching. Every supplied record
+/// is handled independently, including duplicate fields and records from
+/// caller-parsed status groups. No automatic header-list or body traversal occurs.
+///
+/// Returns exactly as many bytes as [`Header::raw`], without newline conversion
+/// or an added separator. Preserved data may be sensitive; see the
+/// [module documentation](self) before sharing output.
+///
+/// ```
+/// use mimecraft::{Header, anonymize::{self, HeaderOptions}};
+///
+/// let record = Header::parse(b"Subject: keep this exact value\n")?;
+/// let options = HeaderOptions {
+///     preserve_headers: vec!["sUbJeCt".into()],
+/// };
+/// assert_eq!(anonymize::header_with_options(&record, &options), record.raw());
+/// assert_eq!(anonymize::header(&record), b"Subject: xxxx xxxx xxxxx xxxxx\n");
+/// # Ok::<(), mimecraft::HeaderParseError>(())
+/// ```
+pub fn header_with_options(record: &Header, options: &HeaderOptions) -> Vec<u8> {
     if record.is_invalid() {
         // Invalid records have no usable field/value boundary: mask raw bytes
         // instead of dispatching on an apparent field or dropping the record.
         let mut output = Vec::with_capacity(record.raw().len());
         AnonymizeFilter::new().filter(record.raw(), &mut output);
         return output;
+    }
+
+    if options
+        .preserve_headers
+        .iter()
+        .any(|field| record.matches_field(field))
+    {
+        // Don't mask a configured field: preservation takes precedence over
+        // the default rules, but never over malformed-record byte masking.
+        return record.raw().to_vec();
     }
 
     let raw_value = record.raw_value();
