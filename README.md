@@ -38,8 +38,8 @@ MimeKit. The crate is not configured for publication.
   removal, including markers and whitespace runs split across input chunks.
 - Byte masking that preserves MIME whitespace and byte counts, for explicit
   use in filtering pipelines rather than automatic message anonymization.
-- Raw address and unstructured-header masking with preserved quoting, escapes,
-  potential encoded-word labels, and byte layout for syntax inspection.
+- Raw address, unstructured, and content-header masking with preserved quoting,
+  escapes, potential encoded-word labels, and parameter structure for inspection.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -463,12 +463,39 @@ assert_eq!(
 # Ok::<(), mimecraft::HeaderParseError>(())
 ```
 
+`anonymize::content_type_value(&[u8])` and
+`anonymize::content_disposition_value(&[u8])` mask raw parameter values with the
+same length-preserving, whole-value contract. Everything through the first
+semicolon is copied without validation, as are parameter names and continuation
+suffixes. Both helpers preserve values whose base names are `boundary`,
+`charset`, `delsp`, or `format`, matched ASCII-case-insensitively before the
+first `*`. Names are not trimmed or decoded; continuation suffixes are not
+validated. Other values, including filenames, sizes, and dates, become `x`.
+
+Whitespace outside quotes survives. Inside quotes, CR/LF, quotes, and
+backslashes survive, but spaces, tabs, and other bytes of masked values do not.
+Unlike address masking, escaping an ordinary byte does not preserve it.
+The raw state machine does not decode RFC 2231 or encoded words, or repair
+missing semicolons and unclosed quotes. An incomplete starred parameter ending
+at `;` retains its accumulated base name for the next parameter, matching
+MimeKit's recovery behavior; this can affect which later values are preserved.
+
+```rust
+use mimecraft::anonymize::content_type_value;
+
+assert_eq!(
+    content_type_value(b"text/plain; charset=utf-8; name=report.txt"),
+    b"text/plain; charset=utf-8; name=xxxxxxxxxx",
+);
+```
+
 These helpers are not guaranteed removal of sensitive information. Lengths,
-syntax, escaped bytes, and even malformed potential charset/encoding labels
-remain visible. Output can retain controls, non-ASCII bytes, or invalid UTF-8;
+syntax, escaped bytes, potential charset/encoding labels, leading content-header
+text, parameter names, and selected values remain visible, even when malformed.
+Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Header-type dispatch, preservation settings, Received/content-header masking,
+Header-type dispatch, configurable preservation settings, Received masking,
 and complete message/entity anonymization remain deferred.
 
 ### Incremental charset conversion

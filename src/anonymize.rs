@@ -10,11 +10,13 @@
 //! This is not guaranteed removal of sensitive information. Lengths, selected
 //! syntax, and potential encoded-word charset/encoding labels remain visible;
 //! address masking also preserves escaped bytes. Even malformed labels can pass
-//! through verbatim. Output may contain non-ASCII bytes, controls, or invalid
-//! UTF-8 and is not necessarily valid MIME or safe display text.
+//! through verbatim. Content-header masking preserves the leading type or
+//! disposition, parameter names, and selected parameter values, even if malformed.
+//! Output may contain non-ASCII bytes, controls, or invalid UTF-8 and is not
+//! necessarily valid MIME or safe display text.
 //!
 //! Pass values such as [`crate::Header::raw_value`], not complete header records.
-//! Header dispatch, preservation policies, Received/content-header masking, and
+//! Header dispatch, configurable preservation policies, Received masking, and
 //! full-message anonymization are not implemented here. Review output before
 //! sharing it. Use [`crate::filters::AnonymizeFilter`] for simpler byte masking
 //! that preserves only SPACE, TAB, CR, and LF.
@@ -112,6 +114,157 @@ pub fn address_header_value(raw_value: &[u8]) -> Vec<u8> {
             _ => word.mask(byte, ADDRESS_SPECIALS),
         };
         output.push(masked);
+    }
+    output
+}
+
+/// Masks parameter values in a raw Content-Type value, preserving MIME structure.
+///
+/// Copies everything through the first semicolon verbatim, without validating
+/// the media type. Parameter names and continuation suffixes also pass through.
+/// Values named `boundary`, `charset`, `delsp`, or `format` are preserved using
+/// ASCII-case-insensitive comparison of the name before its first `*`.
+/// Names are not trimmed or decoded, and continuation suffixes are not validated.
+///
+/// Other value bytes become `x`. Outside quotes, SPACE, TAB, CR, LF, and
+/// separating semicolons survive. Inside quoted values, quotes, backslashes,
+/// and CR/LF survive; all other bytes, including spaces, tabs, and escaped text,
+/// are masked. No RFC 2231 or encoded-word decoding occurs.
+///
+/// Follows MimeKit's permissive parameter states, not [`crate::ParameterList`]
+/// parsing. In particular, an incomplete starred parameter followed by `;`
+/// retains its accumulated base name when reading the next parameter. This can
+/// change which subsequent values are preserved. An unclosed quote keeps later
+/// semicolons inside that value. Missing semicolons do not start new parameters.
+///
+/// Returns a new buffer of exactly the input length, with fresh state per call.
+/// Leading text, names, and preserved values may contain sensitive data or
+/// malformed bytes; see the [module documentation](self) before sharing output.
+///
+/// ```
+/// use mimecraft::anonymize::content_type_value;
+///
+/// assert_eq!(
+///     content_type_value(b" text/plain; charset=utf-8; name=report.txt\r\n"),
+///     b" text/plain; charset=utf-8; name=xxxxxxxxxx\r\n",
+/// );
+/// ```
+pub fn content_type_value(raw_value: &[u8]) -> Vec<u8> {
+    // Don't mask the MIME type; only parameter values are candidates.
+    content_header_value(raw_value)
+}
+
+/// Masks parameter values in a raw Content-Disposition value.
+///
+/// Preserves everything through the first semicolon, including an unrecognized
+/// disposition token. Uses exactly the same parameter rules as
+/// [`content_type_value`], including preservation of `boundary`, `charset`,
+/// `delsp`, and `format` values even on Content-Disposition. Other values,
+/// including filenames, sizes, and dates, are masked rather than decoded.
+///
+/// Returns a new buffer of exactly the input length, with fresh state per call.
+/// This does not validate syntax or guarantee removal of sensitive information;
+/// see the [module documentation](self) for limitations.
+///
+/// ```
+/// use mimecraft::anonymize::content_disposition_value;
+///
+/// assert_eq!(
+///     content_disposition_value(b" attachment; filename=\"my file.txt\"\r\n"),
+///     b" attachment; filename=\"xxxxxxxxxxx\"\r\n",
+/// );
+/// ```
+pub fn content_disposition_value(raw_value: &[u8]) -> Vec<u8> {
+    // Don't mask the "attachment" or "inline" part.
+    content_header_value(raw_value)
+}
+
+#[derive(Clone, Copy)]
+enum ParameterState {
+    Semicolon,
+    Name,
+    NameStar,
+    Value,
+}
+
+fn is_preserved_parameter_name(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"boundary")
+        || name.eq_ignore_ascii_case(b"charset")
+        || name.eq_ignore_ascii_case(b"delsp")
+        || name.eq_ignore_ascii_case(b"format")
+}
+
+fn content_header_value(raw_value: &[u8]) -> Vec<u8> {
+    let mut output = raw_value.to_vec();
+    let Some(start) = raw_value.iter().position(|&byte| byte == b';') else {
+        return output;
+    };
+    let mut state = ParameterState::Semicolon;
+    let mut name = Vec::with_capacity(16);
+    let mut escaped = false;
+    let mut quoted = false;
+    let mut preserve = false;
+
+    for (&byte, masked) in raw_value[start + 1..].iter().zip(&mut output[start + 1..]) {
+        if matches!(state, ParameterState::Semicolon) && byte != b';' && !is_whitespace(byte) {
+            state = ParameterState::Name;
+        }
+        match state {
+            ParameterState::Semicolon => {
+                // Preserve repeated semicolons and intervening whitespace.
+            }
+            ParameterState::Name => match byte {
+                b'=' => {
+                    preserve = is_preserved_parameter_name(&name);
+                    state = ParameterState::Value;
+                }
+                b';' => {
+                    // An incomplete parameter name: recover at the semicolon.
+                    state = ParameterState::Semicolon;
+                    name.clear();
+                }
+                b'*' => state = ParameterState::NameStar,
+                _ => name.push(byte),
+            },
+            ParameterState::NameStar => match byte {
+                b'=' => {
+                    preserve = is_preserved_parameter_name(&name);
+                    state = ParameterState::Value;
+                }
+                b';' => {
+                    // This starred parameter seems incomplete. Like MimeKit,
+                    // resume at the next name without clearing the old base name.
+                    state = ParameterState::Semicolon;
+                }
+                _ => {}
+            },
+            ParameterState::Value => match byte {
+                b'"' => {
+                    if escaped {
+                        escaped = false;
+                    } else {
+                        quoted = !quoted;
+                    }
+                }
+                b'\\' if quoted => escaped = !escaped,
+                b'\r' | b'\n' if quoted => {
+                    // Keep CR/LF for inspecting folding within a quoted value.
+                    escaped = false;
+                }
+                _ if quoted => {
+                    if !preserve {
+                        *masked = b'x';
+                    }
+                    escaped = false;
+                }
+                b';' => {
+                    state = ParameterState::Semicolon;
+                    name.clear();
+                }
+                _ if !preserve && !is_whitespace(byte) => *masked = b'x',
+                _ => {}
+            },
+        }
     }
     output
 }

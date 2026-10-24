@@ -3,7 +3,10 @@
 
 use mimecraft::{
     HeaderList,
-    anonymize::{address_header_value, unstructured_header_value},
+    anonymize::{
+        address_header_value, content_disposition_value, content_type_value,
+        unstructured_header_value,
+    },
 };
 
 fn assert_case(mask: fn(&[u8]) -> Vec<u8>, input: &[u8], expected: &[u8]) {
@@ -20,6 +23,265 @@ fn assert_case(mask: fn(&[u8]) -> Vec<u8>, input: &[u8], expected: &[u8]) {
         );
     }
     assert_eq!(input, original);
+}
+
+fn assert_content_case(input: &[u8], expected: &[u8]) {
+    // MimeKit uses identical parameter rules for both content-header kinds,
+    // without validating the leading media type or disposition.
+    assert_case(content_type_value, input, expected);
+    assert_case(content_disposition_value, input, expected);
+}
+
+#[test]
+fn canonical_content_disposition_values() {
+    for (input, expected) in [
+        (" attachment\r\n", " attachment\r\n"),
+        (" attachment; \r\n", " attachment; \r\n"),
+        (
+            " attachment; filename=winmail.dat\r\n",
+            " attachment; filename=xxxxxxxxxxx\r\n",
+        ),
+        (
+            " attachment; filename=\"escaped \\\"quotes\\\".doc\";;\r\n",
+            " attachment; filename=\"xxxxxxxx\\\"xxxxxx\\\"xxxx\";;\r\n",
+        ),
+        (
+            " attachment;\r\n filename*0*=UTF-8''UnicodeFile;\n filename*1*=name.doc\r\n",
+            " attachment;\r\n filename*0*=xxxxxxxxxxxxxxxxxx;\n filename*1*=xxxxxxxx\r\n",
+        ),
+        (
+            " attachment;\r\n filename*0*=UTF-8''UnicodeFile;\n filename*1=\"name.doc\";\r\n",
+            " attachment;\r\n filename*0*=xxxxxxxxxxxxxxxxxx;\n filename*1=\"xxxxxxxx\";\r\n",
+        ),
+        (
+            " inline; filename; size=32767;\r\n",
+            " inline; filename; size=xxxxx;\r\n",
+        ),
+        (
+            " inline; filename*; filename*0; filename*1*; filename*2*=;\r\n",
+            " inline; filename*; filename*0; filename*1*; filename*2*=;\r\n",
+        ),
+    ] {
+        assert_content_case(input.as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn canonical_content_type_values() {
+    for (input, expected) in [
+        (
+            " application/octet-stream\r\n",
+            " application/octet-stream\r\n",
+        ),
+        (
+            " application/octet-stream; \r\n",
+            " application/octet-stream; \r\n",
+        ),
+        (
+            " text/plain; charset=us-ascii\r\n",
+            " text/plain; charset=us-ascii\r\n",
+        ),
+        (
+            " text/plain; charset=\"us-ascii\"\r\n",
+            " text/plain; charset=\"us-ascii\"\r\n",
+        ),
+        (
+            " text/plain; charset=us-ascii; format=flowed\r\n deslsp=yes; name=anonymize.txt\r\n",
+            " text/plain; charset=us-ascii; format=flowed\r\n deslsp=yes; name=xxxxxxxxxxxxx\r\n",
+        ),
+        (
+            " multipart/mixed;\r\n\tboundary=\"----=_NextPart_000_0031_01D36222.8A648550\"\r\n",
+            " multipart/mixed;\r\n\tboundary=\"----=_NextPart_000_0031_01D36222.8A648550\"\r\n",
+        ),
+        (
+            " multipart/mixed;\r\n\tboundary*=\"----=_NextPart_000_0031_01D36222.8A648550\"\r\n",
+            " multipart/mixed;\r\n\tboundary*=\"----=_NextPart_000_0031_01D36222.8A648550\"\r\n",
+        ),
+        (
+            " multipart/mixed;\r\n\tboundary*0*=US-ASCII''----=3D_NextPart_000_;\r\n\tboundary*1*=0031_01D36222.8A648550;\r\n",
+            " multipart/mixed;\r\n\tboundary*0*=US-ASCII''----=3D_NextPart_000_;\r\n\tboundary*1*=0031_01D36222.8A648550;\r\n",
+        ),
+        (
+            " application/octet-stream;\r\n name*0*=UTF-8''anonymize;\n name*1*=this.doc\r\n",
+            " application/octet-stream;\r\n name*0*=xxxxxxxxxxxxxxxx;\n name*1*=xxxxxxxx\r\n",
+        ),
+        (
+            " application/octet-stream;\r\n name*0*=UTF-8''UnicodeFile;\n name*1=\"name.doc\";\r\n",
+            " application/octet-stream;\r\n name*0*=xxxxxxxxxxxxxxxxxx;\n name*1=\"xxxxxxxx\";\r\n",
+        ),
+        (
+            " application/octet-stream;\r\n name=\"unterminated qstring value;\r\n",
+            " application/octet-stream;\r\n name=\"xxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n",
+        ),
+    ] {
+        assert_content_case(input.as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn preserved_parameter_names_are_ascii_case_insensitive_before_any_star() {
+    for name in ["boundary", "charset", "delsp", "format"] {
+        for spelling in [name.to_owned(), name.to_ascii_uppercase()] {
+            for suffix in ["", "*", "*0", "*12*", "*invalid suffix", "**"] {
+                let input = format!("x; {spelling}{suffix}=\"A B\\C\\\"D\r\n\tE\"");
+                assert_content_case(input.as_bytes(), input.as_bytes());
+            }
+        }
+    }
+    let input = b"x;\tBoUnDaRy=ABC; ChArSeT=UTF-8; DeLsP=yes; FoRmAt=flowed";
+    assert_content_case(input, input);
+    for name in [
+        "charset ",
+        "char\tset",
+        "charsetx",
+        "xcharset",
+        "format\r\n",
+        "name",
+        "filename",
+        "size",
+        "creation-date",
+        "modification-date",
+        "read-date",
+        "x-private",
+        "char\u{17f}et",
+    ] {
+        let input = format!("x; {name}=SECRET");
+        let expected = format!("x; {name}=xxxxxx");
+        assert_content_case(input.as_bytes(), expected.as_bytes());
+    }
+    assert_content_case(b"x; char\xffset=SECRET", b"x; char\xffset=xxxxxx");
+}
+
+#[test]
+fn malformed_parameters_keep_source_name_accumulation_and_recovery() {
+    for (input, expected) in [
+        // A semicolon in NameStar does not clear the base name: char + set
+        // becomes charset. A plain incomplete name does clear it.
+        (
+            "x; char*; set=private; name=secret",
+            "x; char*; set=private; name=xxxxxx",
+        ),
+        ("x; char*;; \tset=private", "x; char*;; \tset=private"),
+        ("x; char; set=private", "x; char; set=xxxxxxx"),
+        (
+            "x; filename*; charset=utf-8; charset=UTF-8",
+            "x; filename*; charset=xxxxx; charset=UTF-8",
+        ),
+        ("x; charset *0*=utf-8", "x; charset *0*=xxxxx"),
+        ("x; charset* ignored =utf-8", "x; charset* ignored =utf-8"),
+        ("x; ;=secret; name=abc", "x; ;=xxxxxx; name=xxx"),
+        (
+            "x; charset=utf-8 filename=SECRET",
+            "x; charset=utf-8 filename=SECRET",
+        ),
+        ("x; name=abc secret=XYZ", "x; name=xxx xxxxxxxxxx"),
+        (
+            "x; name=; charset=; name=END",
+            "x; name=; charset=; name=xxx",
+        ),
+        (
+            "x; filename=\"A; charset=UTF-8",
+            "x; filename=\"xxxxxxxxxxxxxxxx",
+        ),
+        (
+            "not a media type; UNKNOWN=secret",
+            "not a media type; UNKNOWN=xxxxxx",
+        ),
+    ] {
+        assert_content_case(input.as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn content_parameter_quotes_and_escapes_do_not_decode_or_expose_masked_bytes() {
+    for (input, expected) in [
+        (
+            "x; name=\"A\\B\\\"C\"; charset=UTF-8",
+            "x; name=\"x\\x\\\"x\"; charset=UTF-8",
+        ),
+        (
+            "x; name=\"A\\\\B\"; charset=UTF-8",
+            "x; name=\"x\\\\x\"; charset=UTF-8",
+        ),
+        (
+            "x; name=\"A\\\r\n\"; charset=UTF-8",
+            "x; name=\"x\\\r\n\"; charset=UTF-8",
+        ),
+        (
+            "x; name=\"A\r\n B\tC\"; size=123",
+            "x; name=\"x\r\nxxxx\"; size=xxx",
+        ),
+        ("x; name=\\A; charset=UTF-8", "x; name=xx; charset=UTF-8"),
+        (
+            "x; name=abc\\; charset=UTF-8",
+            "x; name=xxxx; charset=UTF-8",
+        ),
+        ("x; name=A\"B C\"D", "x; name=x\"xxx\"x"),
+        ("x; name=\"=?u?q?a?=\"", "x; name=\"xxxxxxxxx\""),
+        ("x; name==?u?q?a?=", "x; name=xxxxxxxxx"),
+        ("x; name=\u{4f0a}\u{a0}", "x; name=xxxxx"),
+    ] {
+        assert_content_case(input.as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn every_byte_in_content_header_names_and_value_contexts() {
+    for byte in 0..=255u8 {
+        for prefix in [
+            b"".as_slice(),
+            b"x; n",
+            b"x; name*",
+            b"x; charset=",
+            b"x; charset=\"",
+        ] {
+            let mut input = prefix.to_vec();
+            input.push(byte);
+            assert_content_case(&input, &input);
+        }
+        for (prefix, preserved) in [
+            (b"x; name=".as_slice(), b" \t\r\n;\"".as_slice()),
+            (b"x; name=\"".as_slice(), b"\r\n\"\\".as_slice()),
+            (b"x; name=\"\\".as_slice(), b"\r\n\"\\".as_slice()),
+        ] {
+            let mut input = prefix.to_vec();
+            input.push(byte);
+            let mut expected = prefix.to_vec();
+            expected.push(if preserved.contains(&byte) {
+                byte
+            } else {
+                b'x'
+            });
+            assert_content_case(&input, &expected);
+        }
+    }
+}
+
+#[test]
+fn content_header_calls_are_independent_and_leave_raw_records_unchanged() {
+    assert_content_case(b"x; charset=", b"x; charset=");
+    assert_content_case(b"x; name=SECRET", b"x; name=xxxxxx");
+    assert_content_case(b"x; name=\"", b"x; name=\"");
+    assert_content_case(b"x; charset=UTF-8", b"x; charset=UTF-8");
+    assert_content_case(b"", b"");
+    assert_content_case(b"\xff\0no parameters", b"\xff\0no parameters");
+
+    let raw = b"Content-Type: text/plain; charset=UTF-8; name=abc\nContent-Disposition: attachment; filename=abc\r\nContent-Type: invalid; name=xyz";
+    let headers = HeaderList::load(&mut raw.as_slice()).unwrap();
+    let before = headers.clone();
+    assert_eq!(
+        content_type_value(headers.get("Content-Type").unwrap().raw_value()),
+        b" text/plain; charset=UTF-8; name=xxx\n",
+    );
+    assert_eq!(
+        content_disposition_value(headers.get("Content-Disposition").unwrap().raw_value()),
+        b" attachment; filename=xxx\r\n",
+    );
+    assert_eq!(
+        content_type_value(headers.iter().last().unwrap().raw_value()),
+        b" invalid; name=xxx",
+    );
+    assert_eq!(headers, before);
 }
 
 #[test]
