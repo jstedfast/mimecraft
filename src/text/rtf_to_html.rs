@@ -27,8 +27,9 @@ use crate::encodings::{EncoderOptionsError, NewLineFormat};
 ///
 /// This is the RTF-rendering path, not an encapsulated-HTML extractor:
 /// `\fromhtml` does not switch modes, `\htmltag` groups are skipped, and
-/// `\htmlrtf` content is rendered. Extraction/filtering of encapsulated HTML
-/// is not implemented. Optional tag callbacks customize generated body tags.
+/// `\htmlrtf` content is rendered. Use [`super::RtfHtmlExtractor`] separately
+/// for raw, unfiltered extraction. Optional tag callbacks customize generated
+/// body tags, not encapsulated markup.
 ///
 /// Input must contain original bytes, not re-encoded Unicode RTF. Code-page
 /// decoding, resource recovery, and source-error behavior match [`super::RtfToText`].
@@ -255,6 +256,7 @@ impl RtfToHtml {
             max_font_table_entries: self.max_font_table_entries,
             max_color_table_entries: Some(self.max_color_table_entries),
             collect_hyperlinks: true,
+            extract_html: false,
             max_issues_per_violation: self.max_issues_per_violation,
         };
         let handler = HtmlHandler::new(self, placeholder, tag_callback);

@@ -161,6 +161,7 @@ impl RtfToText {
             max_font_table_entries: self.max_font_table_entries,
             max_color_table_entries: None,
             collect_hyperlinks: false,
+            extract_html: false,
             max_issues_per_violation: self.max_issues_per_violation,
         };
         let handler = TextHandler {

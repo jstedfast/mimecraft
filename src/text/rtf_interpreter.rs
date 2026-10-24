@@ -33,6 +33,7 @@ pub(super) struct InterpreterOptions {
     pub max_font_table_entries: NonZeroUsize,
     pub max_color_table_entries: Option<NonZeroUsize>,
     pub collect_hyperlinks: bool,
+    pub extract_html: bool,
     pub max_issues_per_violation: usize,
 }
 
@@ -46,6 +47,8 @@ pub(super) enum Content<'a> {
 }
 
 pub(super) trait ContentHandler {
+    fn begin(&mut self, _from_html: bool) {}
+
     fn content(&mut self, state: &GroupState, colors: &[Option<u32>], content: Content<'_>);
 }
 
@@ -71,6 +74,7 @@ pub(super) fn interpret<R: BufRead, F: FnMut(RtfIssue), H: ContentHandler>(
     interpreter.position = validator.source_position();
     interpreter.flush_bytes();
     interpreter.flush_high_surrogate();
+    interpreter.begin();
     Ok(interpreter.handler)
 }
 
@@ -81,6 +85,7 @@ enum Destination {
     FontTable,
     ColorTable,
     FieldInstruction,
+    HtmlTag,
     // {\upr {ansi} {\*\ud {unicode}}}: suppress the ANSI alternative.
     Upr,
 }
@@ -217,6 +222,9 @@ struct Interpreter<F, H> {
     reported_font_limit: bool,
     reported_code_page_limit: bool,
     reported_eight_bit: bool,
+    from_html: bool,
+    recognition_tokens: u8,
+    recognition_window_open: bool,
 }
 
 impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
@@ -265,6 +273,9 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
             reported_font_limit: false,
             reported_code_page_limit: false,
             reported_eight_bit: false,
+            from_html: false,
+            recognition_tokens: 0,
+            recognition_window_open: true,
         }
     }
 
@@ -290,8 +301,33 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
         });
     }
 
+    fn begin(&mut self) {
+        if self.recognition_window_open {
+            self.recognition_window_open = false;
+            self.handler.begin(self.from_html);
+        }
+    }
+
+    fn extracting_html(&self) -> bool {
+        self.options.extract_html && self.from_html
+    }
+
     fn process(&mut self, token: RtfToken) {
         self.position = token.position;
+        if self.recognition_window_open {
+            // The recognition prefix contains at most ten group-start/control-
+            // word tokens. Decide before processing the token that ends it,
+            // including tokens in destinations that will subsequently be skipped.
+            self.recognition_tokens += 1;
+            if self.recognition_tokens > 10
+                || !matches!(
+                    token.kind,
+                    RtfTokenKind::GroupStart | RtfTokenKind::ControlWord(_)
+                )
+            {
+                self.begin();
+            }
+        }
         if !matches!(token.kind, RtfTokenKind::Text(_)) {
             self.reported_eight_bit = false;
         }
@@ -514,6 +550,11 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
     }
 
     fn current_code_page(&self) -> i32 {
+        // HTMLTAG contents always use the document code page, regardless of
+        // the current font ([MS-OXRTFEX] 2.2.3.2).
+        if self.current.destination == Destination::HtmlTag {
+            return self.document_code_page;
+        }
         self.fonts
             .get(&self.current.font)
             .copied()
@@ -601,10 +642,14 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
     }
 
     fn visible(&self) -> bool {
-        self.current.destination == Destination::Normal && self.current.flags & HIDDEN == 0
+        self.current.destination == Destination::Normal
+            && self.current.flags & HIDDEN == 0
+            && !(self.current.flags & HTML_RTF != 0 && self.extracting_html())
     }
 
     fn deliver(&mut self, content: Content<'_>) {
+        // Content-producing control words can end recognition before ten tokens.
+        self.begin();
         self.handler.content(&self.current, &self.colors, content);
     }
 
@@ -612,6 +657,11 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
         self.flush_high_surrogate();
         match self.current.destination {
             Destination::Normal if self.visible() => {
+                self.deliver(Content::Text(text));
+            }
+            Destination::HtmlTag => {
+                // HTMLTAG is original markup, not RTF-only display content.
+                // Like MimeKit, copy it even inside hidden/HTMLRTF state.
                 self.deliver(Content::Text(text));
             }
             Destination::FontTable => {
@@ -675,6 +725,9 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
         self.flush_bytes();
         if self.visible() {
             self.deliver(content);
+        } else if self.current.destination == Destination::HtmlTag {
+            // Both \par and \line in an HTMLTAG destination become CRLF.
+            self.deliver(Content::Text("\r\n"));
         }
     }
 
@@ -753,7 +806,15 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
         }
         match symbol {
             b'~' => self.emit_char('\u{a0}'),
-            b'_' => self.emit_char('\u{2011}'),
+            b'_' => {
+                // Encapsulating writers use \_ for "&shy;" inside HTMLTAG
+                // destinations, rather than the usual nonbreaking hyphen.
+                self.emit_char(if self.current.destination == Destination::HtmlTag {
+                    '\u{ad}'
+                } else {
+                    '\u{2011}'
+                });
+            }
             // Optional hyphens are not rendered; escaped CR/LF are paragraphs.
             b'\n' => self.emit_break(Content::Paragraph),
             b'\t' => self.emit_char('\t'),
@@ -832,9 +893,27 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
                 self.default_font = parameter;
                 self.current.font = parameter;
             }
-            // HTMLRTF state is group-scoped, although plain text renders it.
+            K::Fromhtml => {
+                // Only the recognition prefix may change the document mode.
+                // A bare toggle enables it, just as a nonzero parameter does.
+                if self.recognition_window_open {
+                    self.from_html = toggle;
+                }
+            }
+            // HTMLRTF state is group-scoped. Control words inside it must still
+            // update properties (notably fonts); only their output is suppressed
+            // during extraction. Plain-text and HTML rendering still display it.
             K::Htmlrtf => self.current.set_flag(HTML_RTF, toggle),
-            K::Htmltag | K::SkipDestination => self.skip_current_group(),
+            K::Htmltag => {
+                // Ignore HTMLTagParameter and copy the destination's content.
+                // RTF-rendering modes skip it like any unknown \* destination.
+                if self.extracting_html() {
+                    self.current.destination = Destination::HtmlTag;
+                } else {
+                    self.skip_current_group();
+                }
+            }
+            K::SkipDestination => self.skip_current_group(),
             K::Fonttbl => {
                 self.current.destination = Destination::FontTable;
                 self.pending_font = None;
@@ -863,7 +942,7 @@ impl<F: FnMut(RtfIssue), H: ContentHandler> Interpreter<F, H> {
             }
             // Do not skip this destination: \nestrow lives inside it, and
             // some writers also put visible nested-cell content there.
-            K::Nesttableprops | K::Fromhtml => {}
+            K::Nesttableprops => {}
             K::F => {
                 if !self.reported_font_limit && !self.fonts.contains_key(&parameter) {
                     self.report_at(V::UndefinedFont, 0);
@@ -1035,8 +1114,82 @@ mod tests {
             max_font_table_entries: DEFAULT_LIMIT,
             max_color_table_entries: None,
             collect_hyperlinks: false,
+            extract_html: false,
             max_issues_per_violation: 0,
         }
+    }
+
+    #[test]
+    fn recognition_notifies_once_before_content_or_at_eof() {
+        #[derive(Default)]
+        struct Recording {
+            began: Option<bool>,
+            text: String,
+        }
+
+        impl ContentHandler for Recording {
+            fn begin(&mut self, from_html: bool) {
+                assert_eq!(self.began, None);
+                self.began = Some(from_html);
+            }
+
+            fn content(&mut self, _: &GroupState, _: &[Option<u32>], content: Content<'_>) {
+                assert!(self.began.is_some());
+                if let Content::Text(text) = content {
+                    self.text.push_str(text);
+                }
+            }
+        }
+
+        let mut options = options();
+        options.extract_html = true;
+        for (input, from_html, text) in [
+            ("", false, ""),
+            ("{\\rtf1\\ansi", false, ""),
+            ("{\\rtf1\\fromhtml1", true, ""),
+            ("{\\rtf1\\fromhtml1 x}", true, "x"),
+            ("{\\rtf1\\fromhtml1\\tab\\fromhtml0 x}", true, "\tx"),
+            ("{\\rtf1\\tab\\fromhtml1 x}", false, "\tx"),
+        ] {
+            let handler = interpret(
+                input.as_bytes(),
+                options,
+                None::<fn(RtfIssue)>,
+                Recording::default(),
+            )
+            .unwrap();
+            assert_eq!(handler.began, Some(from_html));
+            assert_eq!(handler.text, text);
+        }
+    }
+
+    #[test]
+    fn html_extraction_retains_bounded_interpreter_state() {
+        let mut options = options();
+        options.extract_html = true;
+        options.max_group_depth = NonZeroUsize::new(2).unwrap();
+        options.max_font_table_entries = NonZeroUsize::new(1).unwrap();
+        let input = format!(
+            "{{\\rtf1\\fromhtml1{{\\*\\htmltag {}x{}}}}}",
+            "{".repeat(100_000),
+            "}".repeat(100_000),
+        );
+        let interpreter = run(&options, input.as_bytes());
+        assert!(interpreter.from_html);
+        assert!(!interpreter.reported_group_limit);
+        assert!(interpreter.stack.is_empty());
+        assert!(interpreter.recognition_tokens <= 11);
+
+        // Neither HTML extraction nor plain-text rendering needs to retain
+        // field instructions or color-table entries.
+        let input = format!(
+            "{{\\rtf1\\fromhtml1{{\\colortbl;\\red1\\green2\\blue3;}}{{\\*\\fldinst {}}}{{\\*\\htmltag {}}}}}",
+            "x".repeat(10_000),
+            "y".repeat(10_000),
+        );
+        let interpreter = run(&options, input.as_bytes());
+        assert!(interpreter.field_instruction.is_empty());
+        assert!(interpreter.colors.is_empty());
     }
 
     type TestInterpreter = Interpreter<fn(RtfIssue), Discard>;

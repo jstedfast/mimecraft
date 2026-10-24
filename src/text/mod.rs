@@ -19,9 +19,11 @@
 //! paragraph alignment, colors, tables, and bounded hyperlink-field collection.
 //! Tag callbacks can customize generated plain-text, flowed-text, and RTF body
 //! tags, replace attributes, request end-tag callbacks, and suppress inner content.
+//! A separate raw RTF HTML extractor recovers unfiltered encapsulated markup
+//! without changing either RTF renderer's behavior.
 //! Decoded RTF hyperlink-field instructions can be parsed without allocating.
-//! HTML tokenization, HTML-input conversion, encapsulated-HTML extraction, and
-//! streaming-output converters are deferred.
+//! HTML tokenization/filtering, HTML-input conversion, and streaming-output
+//! converters are deferred.
 
 mod flowed_to_html;
 mod flowed_to_text;
@@ -36,6 +38,7 @@ mod html_token;
 mod html_utils;
 mod html_writer;
 mod plain_text_previewer;
+mod rtf_html_extractor;
 mod rtf_hyperlink;
 mod rtf_interpreter;
 mod rtf_keyword;
@@ -71,6 +74,7 @@ pub use html_token::{
 pub use html_utils::{HtmlAttributeQuote, html_attribute_encode, html_encode};
 pub use html_writer::{HtmlWriter, HtmlWriterError, HtmlWriterState};
 pub use plain_text_previewer::{InvalidPreviewLength, PlainTextPreviewer};
+pub use rtf_html_extractor::RtfHtmlExtractor;
 pub use rtf_hyperlink::parse_rtf_hyperlink;
 pub use rtf_keyword::RtfKeyword;
 pub use rtf_to_html::RtfToHtml;

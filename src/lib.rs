@@ -109,7 +109,8 @@
 //! [`text::RtfToHtml`] shares that interpreter to render HTML documents or
 //! fragments with character styles, paragraph alignment, colors, and field links.
 //! Its optional tag callbacks use [`text::HtmlTagContext`] to customize generated
-//! tags and suppress content. Encapsulated-HTML extraction is not yet implemented.
+//! tags and suppress content. [`text::RtfHtmlExtractor`] separately recovers raw
+//! encapsulated HTML without sanitization, filtering, or synthesized markup.
 //! [`text::parse_rtf_hyperlink`] extracts borrowed, scheme-filtered targets
 //! from decoded RTF field instructions without tokenizing or rendering RTF.
 //! [`text::TextToHtml`] renders decoded plain text with line breaks, quote blocks,

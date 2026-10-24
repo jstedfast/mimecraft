@@ -71,6 +71,8 @@ MimeKit. The crate is not configured for publication.
 - RTF-to-HTML rendering with character styles, paragraph alignment, colors,
   tables, bounded hyperlink fields, text or trusted-HTML decorations, and
   generated-tag callbacks with optional content suppression.
+- Separate raw encapsulated-HTML extraction with bounded RTF interpreter state,
+  document/font code-page handling, and optional capped diagnostics.
 - Delivery-status parts with bounded raw header-group parsing, encoded-remainder
   compatibility, and atomic edits that preserve outer metadata.
 - Disposition-notification parts with bounded raw field access, global-subtype
@@ -2073,10 +2075,69 @@ effects are not rolled back.
 
 This is **RTF rendering, not encapsulated-HTML extraction**: `\fromhtml` does not
 switch modes, `\htmltag` groups are skipped, and `\htmlrtf` content is rendered.
-Encapsulated-HTML extraction, HTML tokenization/filtering, and streaming-output
-conversion remain deferred. This is not a sanitizer:
+Use `RtfHtmlExtractor` separately for raw, unfiltered encapsulated HTML.
+HTML tokenization/filtering and streaming-output conversion remain deferred.
+This is not a sanitizer:
 HTML decorations and callback markup are trusted, and the hyperlink scheme
 allowlist does not validate addresses or make targets trustworthy.
+
+### Extracting raw HTML from RTF
+
+`text::RtfHtmlExtractor` recovers HTML encapsulated in original RTF bytes without
+rendering it. `extract(reader)` returns `io::Result<Option<String>>`: `None`
+means no recognized HTML declaration, while `Some("")` means recognized empty
+HTML. It never falls back to RTF-to-HTML rendering.
+
+```rust
+use mimecraft::text::RtfHtmlExtractor;
+
+let extractor = RtfHtmlExtractor::new();
+let rtf = br"{\rtf1\fromhtml1 {\*\htmltag <p>}Hello &amp; goodbye{\*\htmltag </p>}}";
+assert_eq!(
+    extractor.extract(&rtf[..])?.as_deref(),
+    Some("<p>Hello &amp; goodbye</p>")
+);
+assert_eq!(extractor.extract(&b"{\\rtf1 ordinary RTF}"[..])?, None);
+# Ok::<(), std::io::Error>(())
+```
+
+Recognition follows MimeKit's first-ten-token window: tokens must be group
+starts or control words. A bare or nonzero `\fromhtml` enables extraction and
+zero disables it within that window. Other token kinds, emitted content, or
+the eleventh token close the window; later declarations cannot change modes.
+Ignored physical RTF newlines do not consume token slots. Recognition is
+tolerant and does not prove the RTF header or group structure is valid.
+
+HTMLTAG contents use the document code page, regardless of the selected font;
+ordinary text uses the current font's code page. The numeric HTMLTAG parameter
+is ignored. Both HTMLTAG contents and unsuppressed surrounding text are already
+HTML and are copied without HTML encoding. `\htmlrtf` suppresses RTF-only text
+but still updates group-scoped properties, including font selection. Ordinary
+hidden text is skipped; like MimeKit, HTMLTAG destinations are copied even
+when hidden/HTMLRTF flags are set.
+
+`\par` and `\line` become CRLF and `\tab` becomes a tab. Inside HTMLTAG, `\_`
+becomes a soft hyphen instead of a nonbreaking hyphen. Formatting and table
+boundaries add no markup. Attachments are not rendered; a visible placeholder
+still consumes its immediately following literal or hex-escaped space.
+Charset decoding, Unicode fallback, surrogate repair, and destination recovery
+reuse the existing interpreter.
+
+**Extracted HTML is untrusted and unfiltered.** Scripts, event attributes,
+arbitrary URLs, comments, and malformed tags remain. No HTML parsing, tag
+callbacks, wrappers, decorations, or fragment conversion occur. Use a separate
+sanitization policy before displaying it; `RtfToHtml`'s tag callbacks do not
+filter this extractor's output.
+
+`max_group_depth` and `max_font_table_entries` default to 4096 and use the
+same bounded-state recovery as `RtfToText`. Color-table and hyperlink-field
+collection are disabled. Output size is not capped.
+`extract_with_issues(reader, report)` reports lexical, structural, and decoding
+issues even for non-HTML input. `max_issues_per_violation` defaults to zero
+(unlimited) and uses the shared report's single first-suppression marker.
+Every invocation starts fresh and consumes the entire source unless an I/O
+error occurs. Source errors return neither partial HTML nor `None`; already
+delivered diagnostics are not rolled back.
 
 ### Parsing RTF hyperlink fields
 
@@ -4857,7 +4918,15 @@ in `Text/RtfToHtml.cs`. Closures are supplied per conversion rather than stored
 in converter options. Read-only source attributes, explicit end-tag opt-in,
 suppression after popping a context, and placeholder numbering follow the source.
 Comments explain why suppressed contexts stay tracked and why custom markup
-does not affect generated nesting. Encapsulated-HTML extraction is not ported.
+does not affect generated nesting.
+`RtfHtmlExtractor` adapts raw de-encapsulation from `Text/RtfInterpreter.cs`
+and the extraction-mode handler in `Text/RtfToHtml.cs`, with canonical cases
+from `UnitTests/Text/RtfInterpreterTests.cs`. Applicable comments retain the
+recognition window, HTMLTAG document-code-page rule, HTMLRTF state tracking,
+CRLF conversion, and soft-hyphen exception. A separate `Option<String>` result
+distinguishes non-HTML RTF from empty HTML without changing the rendering APIs.
+Unlike MimeKit's full `RtfToHtml` extraction pipeline, this helper does not
+tokenize/filter HTML or provide a streaming extracted-character reader.
 RTF hyperlink-field parsing ports `RtfInterpreter.ParseHyperlink` and its
 canonical fixtures in `UnitTests/Text/RtfInterpreterTests.cs`. Borrowed UTF-8
 slices replace `StringBuilder` and substring allocations. The switch/argument
