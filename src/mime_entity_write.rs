@@ -138,7 +138,8 @@ impl<R: Read + Seek> Multipart<R> {
     ///
     /// Invalid options return [`io::ErrorKind::InvalidInput`] before any I/O.
     /// Invalid container metadata or ancestor boundary conflicts return
-    /// [`io::ErrorKind::InvalidData`] before that container's headers are written.
+    /// [`io::ErrorKind::InvalidData`] before that container's headers are written,
+    /// unless already emitted as part of a message's interleaved header section.
     /// Validation proceeds in traversal order, not as an all-tree preflight:
     /// ancestor framing and earlier siblings may already have been written.
     /// Leaf metadata and I/O errors propagate unchanged. No output rollback or
@@ -247,7 +248,8 @@ impl<R: Read + Seek> MessagePart<R> {
     /// # Errors
     ///
     /// Invalid options fail with `InvalidInput` before I/O. Invalid wrapper
-    /// metadata fails with `InvalidData` before its headers are written.
+    /// metadata fails with `InvalidData` before its headers are written, unless
+    /// already emitted as part of a message's interleaved header section.
     /// Descendant errors propagate in traversal order, potentially after partial
     /// output. Nothing is rolled back; retrying writes the whole wrapper again.
     pub fn write_to_with_options<W: Write + ?Sized>(
@@ -331,23 +333,27 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
 
     while let Some(task) = stack.pop() {
         match task {
-            Task::Entity(entity, ensure_new_line, digest_child) => match entity {
-                MimeEntity::Part(part) => part.write_to_with_options(
-                    output,
-                    &MimePartWriteOptions {
+            Task::Entity(entity, ensure_new_line, digest_child, content_only) => match entity {
+                MimeEntity::Part(part) => {
+                    let options = MimePartWriteOptions {
                         ensure_new_line,
                         ..*options
-                    },
-                )?,
+                    };
+                    if content_only {
+                        part.write_content_to_with_options(output, &options)?;
+                    } else {
+                        part.write_to_with_options(output, &options)?;
+                    }
+                }
                 MimeEntity::Multipart(multipart) => {
-                    stack.push(Task::Multipart(multipart, ensure_new_line, false));
+                    stack.push(Task::Multipart(multipart, ensure_new_line, content_only));
                 }
                 MimeEntity::Message(part) => {
                     stack.push(Task::MessagePart(
                         part,
                         ensure_new_line,
                         digest_child,
-                        false,
+                        content_only,
                     ));
                 }
             },
@@ -367,13 +373,11 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                 }
             }
             Task::Message(message, ensure_new_line) => {
-                message
-                    .headers()
-                    .write_terminated(output, options.new_line_format)?;
+                message.write_headers_to_with_options(output, options)?;
                 if let Some(body) = message.body_mut() {
-                    stack.push(Task::Entity(body, ensure_new_line, false));
-                } else {
-                    output.write_all(newline)?;
+                    // The root body's headers were merged with the message's.
+                    // Omit only that section; descendants still write in full.
+                    stack.push(Task::Entity(body, ensure_new_line, false, true));
                 }
             }
             Task::Multipart(multipart, ensure_new_line, content_only) => {
@@ -436,7 +440,7 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     stack.push(Task::Children(frame));
                     // As in MimeKit, every multipart child starts a complete
                     // entity, even when its parent's headers were omitted.
-                    stack.push(Task::Entity(child, false, digest_child));
+                    stack.push(Task::Entity(child, false, digest_child, false));
                 } else {
                     output.write_all(b"--")?;
                     output.write_all(newline)?;
@@ -477,7 +481,7 @@ impl<W: Write + ?Sized> Write for EndingWriter<'_, W> {
 }
 
 enum Task<'a, R> {
-    Entity(&'a mut MimeEntity<R>, bool, bool),
+    Entity(&'a mut MimeEntity<R>, bool, bool, bool),
     MessagePart(&'a mut MessagePart<R>, bool, bool, bool),
     Message(&'a mut MimeMessage<R>, bool),
     Multipart(&'a mut Multipart<R>, bool, bool),

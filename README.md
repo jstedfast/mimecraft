@@ -46,7 +46,7 @@ MimeKit. The crate is not configured for publication.
 - Masked message-header sections, including root-body headers and a separator,
   without reading content or modifying the message.
 - Streaming masking of ordinary part content after serialization, including
-  transfer-encoded payloads and UU wrappers.
+  transfer-encoded payloads and UU wrappers, plus complete masked ordinary parts.
 - Specialized decoded-field masking of delivery-status and disposition-
   notification bodies, with configurable preservation and parse limits.
 - Raw-byte masking output with newline conversion and optional termination
@@ -612,12 +612,18 @@ possibly after partial output; retrying with a fresh iterator starts over.
 Writing into another filter writer does not finalize that destination's filter.
 No headers, options, or bodies are mutated or automatically authored.
 
-`anonymize::write_message_headers(&message, output)` writes masked message
-headers followed by root-body headers and one CRLF separator newline. Its
-`_with_options` variant takes `&HeaderOptions` and `NewLineFormat` after the
-destination. Both lists share the configured masking rules and newline state.
-Order within each list, duplicates, and misplaced fields are retained; original
-message/body header interleaving is not reconstructed. No MIME-Version or other
+`anonymize::write_message_headers(&message, output)` interleaves masked message
+and root-body headers in their loaded order, then writes one CRLF separator
+newline. Its `_with_options` variant takes `&HeaderOptions` and `NewLineFormat`
+after the destination. Both lists share the configured masking rules and newline state.
+Loading retains original stream byte offsets, including for duplicates and
+malformed records. Leading newly prepended message headers come first; loaded
+records then merge by original position, followed by remaining message headers
+and newly added body headers, following MimeKit's merge rules. Authored
+replacements have no stream offset and follow the new-header rules. Lists are
+not sorted or repartitioned, so explicit in-list reordering is not undone.
+Independently authored lists without
+loaded ordering information use message-first order. No MIME-Version or other
 metadata is generated. Bcc and Resent-Bcc are masked, not removed, and explicitly
 preserving them exposes their values.
 
@@ -652,6 +658,21 @@ closed or finalized if it is another filter writer. Retrying starts over.
 These helpers treat even report/message payloads as opaque ordinary-part content:
 they do not apply `HeaderOptions` inside bodies, interpret status groups, or
 traverse MIME trees.
+
+`anonymize::write_part(&mut part, output)` combines field-aware masked headers,
+one separator newline, and that ordinary-part content path. Its `_with_options`
+variant takes `&HeaderOptions` and `&MimePartWriteOptions` after the destination.
+Header preservation affects only outer fields, never the body. Both sections use
+the selected newline format, except binary body output retains its whitespace
+unchanged. Header terminators are not repaired; truncated records can run into
+one another and the added newline need not produce a blank separator.
+
+Invalid serialization options fail before I/O. As in MimeKit's anonymizer,
+content metadata is checked after headers and the separator are emitted, unlike
+the ordinary complete-part serializer's preflight. Unknown transfer encodings,
+invalid required UU filenames, or source failures can therefore leave a masked
+header prefix. I/O errors propagate without rollback; retrying starts the part
+over. Reports and attached messages remain opaque on this path.
 
 `anonymize::write_delivery_status_content(&mut status, output)` and
 `write_disposition_notification_content(&mut notification, output)` instead parse
@@ -1479,8 +1500,16 @@ message root, headers are partitioned: parsed case-insensitive `Content-*` field
 belong to the body, including unknown extensions; all others, including MIME-Version and
 malformed records, belong to the message. `Header::is_content_header` exposes
 this name-only classification. Records retain bytes and order within each
-list, but original message/body header interleaving is not retained. Ordinary
-descendant entity headers are not repartitioned.
+list, with original stream byte offsets retained for ordinary and masked output.
+Ordinary descendant entity headers are not repartitioned.
+
+`Header::offset()` returns the parsed stream byte position as `Option<u64>`,
+not an index in either list. Stream loaders count from the beginning of their
+input, including all MIME framing, and nested headers share that origin.
+These non-seeking APIs do not query the underlying reader's seek position.
+Standalone parsing and authored headers have `None`; clones retain offsets,
+but authored replacements do not inherit the replaced record's offset.
+Offsets do not affect header value equality.
 
 Loading always produces a body, even for empty content, and requires a complete
 header/body separator. Missing From/Date and invalid non-content metadata are
@@ -1489,18 +1518,28 @@ same limits across all message and multipart nesting. Raw constructors and
 edits do not repartition misplaced headers; callers must keep Content-* fields on the
 body and manage any duplicates themselves.
 
-`write_to` and `write_to_with_options` write message headers followed by body
-headers, one separator, and body content, reusing `MimePartWriteOptions` and
-the tree writer. An absent body still gets a separator; an entirely empty
-message writes one newline. Options fail before I/O; later metadata or I/O
+`write_to` and `write_to_with_options` interleave message and root-body headers
+in their loaded order, then write one separator and body content, reusing
+`MimePartWriteOptions` and the tree writer. An absent body still gets a separator;
+an entirely empty message writes one newline. Options fail before I/O; later metadata or I/O
 errors can leave partial output. Sinks are flushed, not closed, and successful
 body copying rewinds sources. Headers and stored bytes are not mutated.
+Body metadata is checked after the merged header section and separator are
+written, so metadata errors can leave that prefix. Embedded messages use the
+same merge independently; the body's headers are not written twice.
 
 `write_headers_to` and `write_headers_to_with_options` write only that header
-section: message headers, root-body headers, then the blank separator. They take
+section: interleaved message/root-body headers, then the blank separator. They take
 `&self` and need no source `Read`/`Seek` bounds. Multipart children, attached
 message contents, preambles, epilogues, and delimiters are never visited or
 written. An attached-message root contributes its wrapper headers only.
+
+Both ordinary writers use the same merge rules as masked message headers:
+leading new message headers come first, loaded records merge by original
+stream offset until a new body header, then remaining message headers precede
+remaining body headers. Authored replacements have no offset; lists are not
+sorted or repartitioned. Independently authored lists without loaded positions
+use message-first order.
 
 Headers-only output uses the same newline conversion and missing-terminator
 repair without decoding or refolding values. It does not validate body metadata,
@@ -1512,8 +1551,8 @@ positions and raw headers remain unchanged. Retrying restarts at the beginning.
 
 Writing generates no Date, Message-Id, From, Subject, or MIME-Version. This is not
 transport preparation: **Bcc and Resent-Bcc are written as supplied**.
-Other message-specific typed convenience setters, offset-based header merging,
-hidden-header filtering, and automatic transport preparation remain deferred.
+Other message-specific typed convenience setters, hidden-header filtering,
+and automatic transport preparation remain deferred.
 
 ### Explicit tree transport preparation
 
@@ -3529,8 +3568,8 @@ fields and discards other enclosed non-Content headers. Other enclosing
 non-Content fields are copied in order; the four special fields take matching
 enclosed values at their enclosing slots, with remaining enclosed special
 fields appended. The enclosed body's Content-* headers are preserved.
-Raw spelling, duplicates, folds, and values are retained; ordinary message
-serialization still groups message headers before body headers.
+Raw spelling, duplicates, folds, and values are retained; reassembled messages
+use the same message/body header merge as ordinary message serialization.
 Automatic splitting and generated IDs remain deferred. Fragment leaves can use
 ordinary part/tree transport preparation; no splitting-specific preparation
 is performed.
@@ -5740,8 +5779,9 @@ lists, optional body, and combined header output, plus `Header.cs`'s
 case-insensitive Content-* classification. Existing entity I/O is reused
 without copying payloads during header partitioning. Explicit constructors
 replace clock/random-ID defaults, and serialization does not insert
-MIME-Version or hide Bcc. Header offsets are not stored, so grouped output
-replaces the source's original-order merge. Other typed conveniences, change
+MIME-Version or hide Bcc. Parsed stream byte offsets are retained during
+partitioning and used in the source's original-order merge,
+shared by ordinary and masked writers. Other typed conveniences, change
 events and automatic preparation are deferred.
 Message importance and priority adapt `MessageImportance.cs`,
 `MessagePriority.cs`, `XMessagePriority.cs`, the corresponding `MimeMessage.cs`

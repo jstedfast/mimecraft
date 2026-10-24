@@ -173,6 +173,47 @@ impl<R> MimeMessage<R> {
         &mut self.headers
     }
 
+    pub(crate) fn merged_headers(&self) -> impl Iterator<Item = &Header> {
+        let mut message = self.headers.iter().peekable();
+        let mut body = self
+            .body
+            .as_ref()
+            .map_or(&[][..], |body| body.headers().as_slice())
+            .iter()
+            .peekable();
+        let mut prepended = true;
+        let mut merging = true;
+        std::iter::from_fn(move || {
+            // Write all prepended message headers before the original records.
+            if prepended {
+                if message
+                    .peek()
+                    .is_some_and(|header| header.offset().is_none())
+                {
+                    return message.next();
+                }
+                prepended = false;
+            }
+            // Merge message and body headers as they appeared in the input.
+            if merging
+                && let (Some(message_header), Some(body_header)) = (message.peek(), body.peek())
+            {
+                if let Some(body_offset) = body_header.offset() {
+                    if message_header
+                        .offset()
+                        .is_some_and(|offset| offset < body_offset)
+                    {
+                        return message.next();
+                    }
+                    return body.next();
+                }
+                merging = false;
+            }
+            // As in MimeKit, remaining message headers precede new body headers.
+            message.next().or_else(|| body.next())
+        })
+    }
+
     /// Writes just the message's complete header section using default CRLF options.
     ///
     /// Includes root-body headers and the blank header/body separator, but no
@@ -187,11 +228,18 @@ impl<R> MimeMessage<R> {
 
     /// Writes message headers, root-body headers, and one blank separator.
     ///
-    /// This is the headers-only form of [`Self::write_to_with_options`]. Message
-    /// headers precede root-body headers, retaining order within each list, not
-    /// original interleaving. The existing header writer normalizes newlines and
-    /// adds missing record terminators without decoding, refolding, or changing
-    /// stored bytes. An entirely empty message writes one newline.
+    /// This is the headers-only form of [`Self::write_to_with_options`]. Loaded
+    /// message and root-body headers are interleaved in their original order.
+    /// Leading new message headers come first; remaining records merge by their
+    /// stream offsets until a new body header, then remaining message headers
+    /// precede remaining body headers, as in MimeKit. Authored replacements have
+    /// no stream offset; explicit list order is respected rather than sorted away.
+    /// Independently authored lists without loaded positions use message-first
+    /// order. The same merge is used by [`crate::anonymize::write_message_headers`].
+    ///
+    /// The existing header writer normalizes newlines and adds missing record
+    /// terminators without decoding, refolding, or changing stored bytes.
+    /// An entirely empty message writes one newline.
     ///
     /// Does not traverse descendants, inspect multipart boundaries or transfer
     /// encodings, write preambles/epilogues, or read/seek content sources. An
@@ -233,15 +281,13 @@ impl<R> MimeMessage<R> {
         options: &MimePartWriteOptions,
     ) -> io::Result<()> {
         let newline = options.validate()?;
-        // Write message headers together with the body's headers, if any, and
-        // the blank line separating them from content. Use our existing grouped
-        // ordering rather than MimeKit's offset-based merge; do not enter bodies.
-        self.headers
-            .write_terminated(output, options.new_line_format)?;
-        if let Some(body) = &self.body {
-            body.headers()
-                .write_terminated(output, options.new_line_format)?;
-        }
+        // Merge message and body headers as they appeared in the raw message,
+        // then write the blank line separating the combined section from content.
+        HeaderList::write_terminated_headers(
+            self.merged_headers(),
+            output,
+            options.new_line_format,
+        )?;
         output.write_all(newline)?;
         output.flush()
     }
@@ -1622,8 +1668,8 @@ impl MimeMessage {
     /// body; everything else, including MIME-Version and malformed records,
     /// moves to the message headers. Embedded message roots are partitioned
     /// separately; ordinary descendant entity headers are not repartitioned.
-    /// Records retain their bytes and relative order within each list, but
-    /// original interleaving between the lists is not tracked.
+    /// Records retain their bytes, relative order within each list, and original
+    /// stream byte offsets for ordinary and masked message serialization.
     ///
     /// The body is always `Some`, even for empty content. Sources start at zero
     /// and retain encoded bytes and their stored encodings. Input must contain
@@ -1719,11 +1765,11 @@ impl<R: Read + Seek> MimeMessage<R> {
 
     /// Writes message headers, body headers, one separator, and body content.
     ///
-    /// Message headers precede all body headers; original interleaving is not
-    /// reconstructed. The existing header writer normalizes newlines and
-    /// terminates truncated records without changing stored bytes. With a body,
-    /// its entity writer supplies body headers and the separator; without one,
-    /// this method supplies the separator. An empty message writes one newline.
+    /// Message and root-body headers use the interleaving, newline normalization,
+    /// and missing-terminator repair of [`Self::write_headers_to_with_options`].
+    /// One separator follows the merged records, then the body's content is
+    /// written without repeating its headers. Embedded messages use the same
+    /// merge independently. An empty message writes one newline.
     ///
     /// Body encodings, framing, and rewind rules follow [`MimeEntity::write_to_with_options`].
     /// No headers are generated, removed, or repartitioned. In particular,
@@ -1737,9 +1783,9 @@ impl<R: Read + Seek> MimeMessage<R> {
     /// # Errors
     ///
     /// Invalid options fail with `InvalidInput` before source I/O or output.
-    /// Body metadata is validated by its writer after message headers have
-    /// been written. I/O errors propagate, possibly after partial output;
-    /// nothing is rolled back, and retrying repeats the whole message.
+    /// Body metadata is validated by its writer after the combined headers and
+    /// separator have been written. I/O errors propagate, possibly after partial
+    /// output; nothing is rolled back, and retrying repeats the whole message.
     pub fn write_to_with_options<W: Write + ?Sized>(
         &mut self,
         output: &mut W,

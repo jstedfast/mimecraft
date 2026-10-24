@@ -19,6 +19,201 @@ fn headers(raw: &[u8]) -> HeaderList {
     records.into()
 }
 
+#[test]
+fn loaded_message_headers_preserve_original_order_with_and_without_masking() {
+    use std::io::BufReader;
+
+    let raw = b"X-First: one\nContent-Type: text/plain\nSubject: two\nContent-Language: en\nX-Last: three\n\nbody";
+    let expected = "X-First: xxx\nContent-Type: text/plain\nSubject: xxx\nContent-Language: xx\nX-Last: xxxxx\n\n";
+    for capacity in 1..=raw.len() {
+        let mut reader = BufReader::with_capacity(capacity, raw.as_slice());
+        let message = MimeMessage::load(&mut reader).unwrap();
+        let before = message.headers().clone();
+        let body_before = message.body().unwrap().headers().clone();
+        for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+            let original = std::str::from_utf8(raw.strip_suffix(b"body").unwrap()).unwrap();
+            assert_eq!(
+                serialize(&message, format),
+                original.replace('\n', newline).as_bytes()
+            );
+            assert_eq!(
+                masked(&message, format),
+                expected.replace('\n', newline).as_bytes()
+            );
+        }
+        assert_eq!(message.headers(), &before);
+        assert_eq!(message.body().unwrap().headers(), &body_before);
+        // Loading provenance must not change value equality with identical
+        // standalone records or prevent a clone retaining its output position.
+        assert_eq!(
+            message.headers().get("Subject").unwrap(),
+            &Header::parse(b"Subject: two\n").unwrap()
+        );
+        let copied = MimeMessage::from_parts(
+            message.headers().clone(),
+            Some(MimePart::from_parts(body_before, MimeContent::new(NoIo)).into()),
+        );
+        assert_eq!(masked(&copied, NewLineFormat::Unix), expected.as_bytes());
+        assert_eq!(
+            serialize(&copied, NewLineFormat::Unix),
+            raw.strip_suffix(b"body").unwrap()
+        );
+    }
+}
+
+#[test]
+fn every_message_body_header_partition_preserves_loaded_order() {
+    for count in 0..=6 {
+        for partition in 0..(1 << count) {
+            let mut raw = String::new();
+            let mut expected = String::new();
+            for index in 0..count {
+                let prefix = if partition & (1 << index) == 0 {
+                    "X"
+                } else {
+                    "Content-X"
+                };
+                raw.push_str(&format!("{prefix}-{index}: value\n"));
+                expected.push_str(&format!("{prefix}-{index}: xxxxx\n"));
+            }
+            raw.push_str("\nbody");
+            expected.push('\n');
+            let mut message = MimeMessage::load(&mut raw.as_bytes()).unwrap();
+            assert_eq!(masked(&message, NewLineFormat::Unix), expected.as_bytes());
+            assert_eq!(
+                serialize(&message, NewLineFormat::Unix),
+                raw.strip_suffix("body").unwrap().as_bytes()
+            );
+            let mut full = Vec::new();
+            message
+                .write_to_with_options(
+                    &mut full,
+                    &MimePartWriteOptions {
+                        new_line_format: NewLineFormat::Unix,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(full, raw.as_bytes());
+        }
+    }
+}
+
+#[test]
+fn interleaving_retains_duplicates_folds_malformed_records_and_preserved_values() {
+    let raw = b"Content-Type: text/plain\r\nX-Dup: first\nContent-X: one\nBroken\xff\nX-Dup: second\n\tfold\nContent-X: two\nDate: private\n\nbody";
+    let message = MimeMessage::load(&mut &raw[..]).unwrap();
+    assert_eq!(
+        serialize(&message, NewLineFormat::Unix),
+        b"Content-Type: text/plain\nX-Dup: first\nContent-X: one\nBroken\xff\nX-Dup: second\n\tfold\nContent-X: two\nDate: private\n\n"
+    );
+    let mut output = Vec::new();
+    anonymize::write_message_headers_with_options(
+        &message,
+        &mut output,
+        &HeaderOptions {
+            preserve_headers: vec!["x-dup".into(), "content-x".into()],
+        },
+        NewLineFormat::Unix,
+    )
+    .unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: text/plain\nX-Dup: first\nContent-X: one\nxxxxxxx\nX-Dup: second\n\tfold\nContent-X: two\nDate: private\n\n"
+    );
+}
+
+#[test]
+fn interleaving_treats_authored_replacements_as_headers_without_stream_offsets() {
+    let raw = b"X-First: one\nContent-Type: text/plain\nSubject: old\nContent-Description: secret\nX-Last: end\nContent-Description: duplicate\nSubject: duplicate\n\nbody";
+    let mut message = MimeMessage::load(&mut &raw[..]).unwrap();
+    message.set_subject("updated").unwrap();
+    message
+        .headers_mut()
+        .insert(0, Header::parse(b"X-New: first\n").unwrap())
+        .unwrap();
+    message
+        .headers_mut()
+        .add(Header::parse(b"X-New: last\n").unwrap());
+    let body = message.body_mut().unwrap().headers_mut();
+    body.replace(0, Header::parse(b"Content-Type: text/html\n").unwrap())
+        .unwrap();
+    body.replace_all(Header::parse(b"Content-Description: changed\n").unwrap())
+        .unwrap();
+    body.add(Header::parse(b"Content-New: end\n").unwrap());
+    assert_eq!(
+        serialize(&message, NewLineFormat::Unix),
+        b"X-New: first\nX-First: one\nSubject: updated\nX-Last: end\nX-New: last\nContent-Type: text/html\nContent-Description: changed\nContent-New: end\n\n"
+    );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"X-New: xxxxx\nX-First: xxx\nSubject: xxxxxxx\nX-Last: xxx\nX-New: xxxx\nContent-Type: text/html\nContent-Description: xxxxxxx\nContent-New: xxx\n\n"
+    );
+    message.headers_mut().remove("X-First");
+    message
+        .body_mut()
+        .unwrap()
+        .headers_mut()
+        .remove("Content-Description");
+    assert_eq!(
+        serialize(&message, NewLineFormat::Unix),
+        b"X-New: first\nSubject: updated\nX-Last: end\nX-New: last\nContent-Type: text/html\nContent-New: end\n\n"
+    );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"X-New: xxxxx\nSubject: xxxxxxx\nX-Last: xxx\nX-New: xxxx\nContent-Type: text/html\nContent-New: xxx\n\n"
+    );
+}
+
+#[test]
+fn interleaving_uses_list_order_instead_of_sorting_explicitly_moved_records() {
+    let raw = b"X-First: one\nContent-Type: text/plain\nSubject: old\nContent-Description: secret\nX-Last: end\n\nbody";
+    let mut message = MimeMessage::load(&mut &raw[..]).unwrap();
+    let moved = message.headers_mut().remove("X-Last").unwrap();
+    message.headers_mut().insert(0, moved).unwrap();
+    assert_eq!(
+        serialize(&message, NewLineFormat::Unix),
+        b"Content-Type: text/plain\nContent-Description: secret\nX-Last: end\nX-First: one\nSubject: old\n\n"
+    );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"Content-Type: text/plain\nContent-Description: xxxxxx\nX-Last: xxx\nX-First: xxx\nSubject: xxx\n\n"
+    );
+    // New body headers end the merge, as in MimeKit; do not reorder the body
+    // list by sorting its new and loaded records globally.
+    message
+        .body_mut()
+        .unwrap()
+        .headers_mut()
+        .insert(0, Header::parse(b"Content-New: first\n").unwrap())
+        .unwrap();
+    assert_eq!(
+        serialize(&message, NewLineFormat::Unix),
+        b"X-Last: end\nX-First: one\nSubject: old\nContent-New: first\nContent-Type: text/plain\nContent-Description: secret\n\n"
+    );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"X-Last: xxx\nX-First: xxx\nSubject: xxx\nContent-New: xxxxx\nContent-Type: text/plain\nContent-Description: xxxxxx\n\n"
+    );
+}
+
+#[test]
+fn loaded_embedded_messages_track_their_own_interleaving() {
+    let raw = b"X-Outer: first\nContent-Type: message/rfc822\nX-Outer: last\n\nContent-Type: text/plain\nSubject: inside\nContent-Language: en\n\nbody";
+    let message = MimeMessage::load(&mut &raw[..]).unwrap();
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"X-Outer: xxxxx\nContent-Type: message/rfc822\nX-Outer: xxxx\n\n"
+    );
+    let MimeEntity::Message(wrapper) = message.body().unwrap() else {
+        panic!("expected an attached message");
+    };
+    assert_eq!(
+        masked(wrapper.message().unwrap(), NewLineFormat::Unix),
+        b"Content-Type: text/plain\nSubject: xxxxxx\nContent-Language: xx\n\n"
+    );
+}
+
 #[derive(Debug)]
 struct NoIo;
 
@@ -504,10 +699,10 @@ fn valid_body_encoding_options_do_not_refold_headers_or_change_output() {
 
 #[test]
 fn short_interrupted_zero_writes_and_flush_errors_propagate_correctly() {
-    let message = MimeMessage::from_parts(
-        headers(b"Subject: outer\n"),
-        Some(leaf(b"Content-Type: text/plain\n")),
-    );
+    let message = MimeMessage::load(
+        &mut &b"X-First: first\nContent-Type: text/plain\nSubject: outer\n\nbody"[..],
+    )
+    .unwrap();
     let expected = serialize(&message, NewLineFormat::Dos);
     let mut output = Sink {
         interrupt_once: true,

@@ -30,11 +30,20 @@ use crate::{
 /// Malformed records are retained and explicitly marked by [`is_invalid`](Self::is_invalid).
 /// That flag checks only the field/colon syntax, not value syntax or compliance.
 /// Like MimeKit, an empty name followed by a colon is not marked invalid.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq)]
 pub struct Header {
     raw: Vec<u8>,
     field: Option<(usize, usize)>,
     id: HeaderId,
+    offset: Option<u64>,
+}
+
+impl PartialEq for Header {
+    fn eq(&self, other: &Self) -> bool {
+        // Source position is metadata, not part of header value
+        // equality. A loaded record must still equal the same authored bytes.
+        self.raw == other.raw && self.field == other.field && self.id == other.id
+    }
 }
 
 impl Header {
@@ -159,6 +168,7 @@ impl Header {
             raw,
             field,
             id: HeaderId::Unknown,
+            offset: None,
         };
         header.id = header
             .field()
@@ -174,6 +184,18 @@ impl Header {
     /// Original spelling remains available through [`field`](Self::field).
     pub fn id(&self) -> HeaderId {
         self.id
+    }
+
+    /// Returns the byte offset where this header began in its parsed stream.
+    ///
+    /// Offsets count original bytes, including prior headers, folding, and MIME
+    /// framing, not indices in a header list. Non-seeking stream loaders count
+    /// from the start of their input; nested entities share that origin.
+    /// Standalone parsing and authored headers return `None`. Clones retain
+    /// offsets, but replacing a record does not assign the old record's offset.
+    /// Offsets do not participate in header value equality.
+    pub fn offset(&self) -> Option<u64> {
+        self.offset
     }
 
     /// Returns the ASCII field name, excluding blanks before the colon.
@@ -487,6 +509,8 @@ impl Error for HeaderTooLong {}
 #[derive(Clone, Debug)]
 pub struct HeaderParser {
     pending: Vec<u8>,
+    offset: u64,
+    track_offsets: bool,
     line_start: bool,
     pending_cr: bool,
     finished: bool,
@@ -500,6 +524,8 @@ impl HeaderParser {
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
+            offset: 0,
+            track_offsets: false,
             line_start: true,
             pending_cr: false,
             finished: false,
@@ -515,6 +541,11 @@ impl HeaderParser {
             max_header_length: limit.get(),
             ..Self::new()
         }
+    }
+
+    pub(crate) fn set_stream_offset(&mut self, offset: u64) {
+        self.offset = offset;
+        self.track_offsets = true;
     }
 
     /// Returns the configured maximum size of a header record in bytes.
@@ -545,6 +576,10 @@ impl HeaderParser {
     /// EOF calls [`finish`](Self::finish), preserving unterminated records.
     /// An already-finished parser performs no I/O. Existing parser state and
     /// output are retained, allowing continuation after earlier buffer parsing.
+    /// Emitted headers retain byte offsets from the start of this parser's
+    /// input, including any preceding bytes supplied to [`parse`](Self::parse).
+    /// No underlying seek position is queried. After reset, offsets restart at
+    /// zero even when the same reader is used.
     ///
     /// [`body_separator`](Self::body_separator) retains the exact separator.
     /// The record limit still applies, but total bytes and record count are not
@@ -565,6 +600,7 @@ impl HeaderParser {
         if let Some(error) = self.error {
             return Err(io::Error::new(io::ErrorKind::InvalidData, error));
         }
+        self.track_offsets = true;
         while !self.finished {
             let input = match reader.fill_buf() {
                 Ok(input) => input,
@@ -595,6 +631,8 @@ impl HeaderParser {
     /// A record is held until the next line establishes whether it continues,
     /// a separator is seen, or [`finish`](Self::finish) is called. Empty input
     /// consumes nothing and never finalizes.
+    /// Buffer-only parsing has no associated stream offsets;
+    /// [`read_from`](Self::read_from) enables tracking for subsequently emitted records.
     ///
     /// # Errors
     ///
@@ -693,6 +731,8 @@ impl HeaderParser {
     /// Previously emitted records in the caller's output are not modified.
     pub fn reset(&mut self) {
         self.pending.clear();
+        self.offset = 0;
+        self.track_offsets = false;
         self.line_start = true;
         self.pending_cr = false;
         self.finished = false;
@@ -716,7 +756,12 @@ impl HeaderParser {
         if !self.pending.is_empty() {
             // This is the byte-preserving stream path, not MimeKit's standalone
             // strict Header.Parse path; do not synthesize a terminal newline.
-            output.push(Header::from_raw(std::mem::take(&mut self.pending)));
+            let mut header = Header::from_raw(std::mem::take(&mut self.pending));
+            if self.track_offsets {
+                header.offset = Some(self.offset);
+            }
+            self.offset += header.raw.len() as u64;
+            output.push(header);
         }
     }
 }

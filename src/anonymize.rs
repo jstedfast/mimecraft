@@ -14,6 +14,8 @@
 //! without reading any content or traversing descendants.
 //! [`write_part_content`] and [`write_part_content_with_options`] mask ordinary
 //! leaf content after serialization, preserving only MIME whitespace.
+//! [`write_part`] adds field-aware header masking and a separator for a complete
+//! ordinary part, without interpreting reports or attached messages.
 //! [`write_delivery_status_content`] and [`write_disposition_notification_content`]
 //! instead parse report bodies and mask their decoded header fields.
 //! [`write_bytes`] and [`write_bytes_with_options`] mask raw bytes with newline
@@ -365,12 +367,19 @@ pub fn write_message_headers<R, W: Write + ?Sized>(
     )
 }
 
-/// Writes masked message headers, root-body headers, and a separator newline.
+/// Writes interleaved masked message/root-body headers and a separator newline.
 ///
-/// Adapts the header portion of MimeKit's message anonymizer. Message headers
-/// precede root-body headers, retaining order and duplicates within each list.
-/// Like [`MimeMessage::write_headers_to`], this uses mimecraft's grouped order,
-/// not MimeKit's original-offset interleaving. Misplaced fields are not moved.
+/// Adapts the header portion of MimeKit's message anonymizer. Headers retained
+/// by [`MimeMessage::load`] are interleaved in their original message/body order,
+/// including duplicates and malformed records. This uses the same ordering as
+/// ordinary [`MimeMessage::write_headers_to`] output.
+///
+/// Leading new message headers come first. Remaining loaded message and body
+/// headers merge by stream byte offset, then remaining message headers precede
+/// newly added body headers, as in MimeKit. Authored replacements have no stream
+/// offset and follow the new-header rules. Lists are never sorted or repartitioned;
+/// explicit in-list reordering is respected rather than undone. Independently authored
+/// lists without loaded ordering information use message-first order.
 ///
 /// Both lists use [`write_headers_with_options`] as one sequence, including
 /// configured preservation, malformed-record masking, and newline conversion.
@@ -420,14 +429,9 @@ pub fn write_message_headers_with_options<R, W: Write + ?Sized>(
     format: NewLineFormat,
 ) -> io::Result<()> {
     let newline = header_new_line_bytes(format)?;
-    // Combine the message headers with its body's headers, if any, before
-    // writing the separator. Original offsets are not retained, so follow
-    // mimecraft's message-first order instead of MimeKit's offset-based merge.
-    let headers = message
-        .headers()
-        .iter()
-        .chain(message.body().into_iter().flat_map(|body| body.headers()));
-    write_headers_with_options(headers, output, options, format)?;
+    // Interleave the message and root-body headers before masking them: grouping
+    // the lists first would lose ordering even when all raw values are retained.
+    write_headers_with_options(message.merged_headers(), output, options, format)?;
     output.write_all(newline)?;
     output.flush()
 }
@@ -525,6 +529,89 @@ fn write_filtered_bytes<W: Write + ?Sized, F: MimeFilter>(
     // its pending CR or ensured final newline still needs an explicit finish.
     masked.finish()?;
     newline.finish()
+}
+
+/// Writes a complete masked ordinary part using default header and body options.
+///
+/// See [`write_part_with_options`] for header framing, encoding, and errors.
+///
+/// # Errors
+///
+/// Propagates invalid options, required body metadata, and I/O errors.
+pub fn write_part<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_part_with_options(
+        part,
+        output,
+        &HeaderOptions::default(),
+        &MimePartWriteOptions::default(),
+    )
+}
+
+/// Writes masked headers, a separator newline, and serialized masked content.
+///
+/// Uses [`write_headers_with_options`] for field-aware masking and configured
+/// preservation, then [`write_part_content_with_options`] for the body. Both
+/// use `options.new_line_format`; encoder width and final-newline settings
+/// affect only content. Body masking occurs after transfer encoding and includes
+/// generated UU wrappers, so the output need not remain valid encoded content.
+/// Preserving an outer header never exempts any body bytes from masking.
+///
+/// Appends one separator newline even with no headers or empty content.
+/// Missing header terminators are not repaired, unlike [`MimePart::write_to`];
+/// records can run together and truncated headers need not form a blank line
+/// before the body. Malformed records use the masking writer's newline rules,
+/// not the ordinary header writer's CR-only round-trip exception.
+///
+/// Treats all [`MimePart`] content as opaque, including report and message
+/// payloads. Does not parse fields inside the body or traverse MIME entities.
+/// Use the specialized report-content writers for decoded-field masking.
+/// No headers, stored bytes, encoding labels, or newline hints are changed.
+///
+/// Streams with one masked header record and bounded body buffers. Copying
+/// starts at source offset zero and rewinds on success, not to its old position.
+/// The destination is flushed but not closed; caller-owned filters still need
+/// finalization. This is diagnostic output, not guaranteed MIME round-tripping
+/// or removal of sensitive information.
+///
+/// # Errors
+///
+/// Invalid serialization options fail before any source or destination I/O.
+/// As in MimeKit's anonymizer, headers are written before content serialization:
+/// required encoding/UU metadata and source errors may leave a header prefix.
+/// Destination errors can leave partial or complete output. Errors propagate
+/// without rollback or finalizing failed body output; retrying starts over.
+///
+/// ```
+/// use std::io::Cursor;
+/// use mimecraft::{HeaderList, MimeContent, MimePart, anonymize};
+///
+/// let headers = HeaderList::load(&mut &b"X-Private: secret\n"[..])?;
+/// let mut part = MimePart::from_parts(headers, MimeContent::new(Cursor::new(b"Cat")));
+/// let mut output = Vec::new();
+/// anonymize::write_part(&mut part, &mut output)?;
+/// assert_eq!(output, b"X-Private: xxxxxx\r\n\r\nxxx");
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn write_part_with_options<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+    header_options: &HeaderOptions,
+    options: &MimePartWriteOptions,
+) -> io::Result<()> {
+    let newline = options.validate()?;
+    // MimeKit writes entity headers before entering the content path. Preserve
+    // that order without wrapping headers in the body's blanket byte masker.
+    write_headers_with_options(
+        part.headers(),
+        output,
+        header_options,
+        options.new_line_format,
+    )?;
+    output.write_all(newline)?;
+    write_part_content_with_options(part, output, options)
 }
 
 /// Writes masked ordinary-part content using default serialization options.

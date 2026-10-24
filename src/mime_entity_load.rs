@@ -160,8 +160,10 @@ impl MimeEntity {
         let mut state = State::headers(header_limit);
         let mut line = Vec::new();
         let mut pending = Vec::new();
+        let mut pending_offset = 0;
 
         while input.next(&mut line)? {
+            let line_offset = (options.max_input_bytes - input.remaining - line.len()) as u64;
             let delimiter = find_boundary(&stack, &line);
             // Withhold a line so a delimiter's newline cannot become an
             // absent message's separator. Existing headers and preambles keep theirs.
@@ -171,7 +173,14 @@ impl MimeEntity {
             if delimiter.is_some() && trim {
                 trim_delimiter_newline(&mut pending);
             }
-            consume_line(&pending, &mut state, &mut stack, options, header_limit)?;
+            consume_line(
+                &pending,
+                pending_offset,
+                &mut state,
+                &mut stack,
+                options,
+                header_limit,
+            )?;
             pending.clear();
             // The pending separator may have introduced a multipart boundary.
             let delimiter = delimiter.or_else(|| find_boundary(&stack, &line));
@@ -179,10 +188,18 @@ impl MimeEntity {
                 state = at_boundary(state, &mut stack, index, close, options, header_limit)?;
             } else {
                 std::mem::swap(&mut pending, &mut line);
+                pending_offset = line_offset;
             }
         }
 
-        consume_line(&pending, &mut state, &mut stack, options, header_limit)?;
+        consume_line(
+            &pending,
+            pending_offset,
+            &mut state,
+            &mut stack,
+            options,
+            header_limit,
+        )?;
         let entity = finish_entity(state, &mut stack, io::ErrorKind::UnexpectedEof)?;
         let entity = wrap_messages(entity, &mut stack);
         if stack.is_empty() {
@@ -225,6 +242,7 @@ fn find_boundary(stack: &[Frame], line: &[u8]) -> Option<(usize, bool)> {
 
 fn consume_line(
     line: &[u8],
+    offset: u64,
     state: &mut State,
     stack: &mut Vec<Frame>,
     options: &MimeEntityParseOptions,
@@ -240,6 +258,11 @@ fn consume_line(
             started,
         } => {
             check_depth(stack.len(), options)?;
+            if !*started {
+                // Use the original input position, including withheld lines
+                // and multipart framing, rather than restarting at each block.
+                parser.set_stream_offset(offset);
+            }
             *started = true;
             parser
                 .parse(line, headers)

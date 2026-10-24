@@ -898,7 +898,7 @@ fn content_only_root_boundaries_remain_active_inside_attached_messages() {
         assert!(error.to_string().contains("ancestor"));
         assert_eq!(
             output,
-            format!("--{outer}\r\nContent-Type: message/rfc822\r\n\r\n").as_bytes()
+            format!("--{outer}\r\nContent-Type: message/rfc822\r\n\r\nContent-Type: multipart/mixed; boundary={inner}\r\n\r\n").as_bytes()
         );
     }
 }

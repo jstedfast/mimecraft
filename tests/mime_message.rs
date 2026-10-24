@@ -337,11 +337,59 @@ fn absent_body_empty_message_and_truncated_headers_write_complete_separators() {
 }
 
 #[test]
-fn interleaved_input_is_grouped_without_losing_raw_values_or_duplicate_fields() {
+fn interleaved_input_retains_raw_values_order_and_duplicate_fields() {
     let input = b"Subject: first\r\nContent-Type: text/plain\r\nReceived: x\r\nContent-X: value\r\nSubject: second\r\n\r\nbody";
     let mut message = MimeMessage::load(&mut &input[..]).unwrap();
-    assert_eq!(serialize(&mut message, NewLineFormat::Dos), b"Subject: first\r\nReceived: x\r\nSubject: second\r\nContent-Type: text/plain\r\nContent-X: value\r\n\r\nbody");
+    assert_eq!(serialize(&mut message, NewLineFormat::Dos), input);
     assert_eq!(message.headers().get_all("subject").count(), 2);
+}
+
+#[test]
+fn interleaved_headers_round_trip_each_root_kind_and_nested_messages() {
+    for raw in [
+        "Content-Type: text/plain\nX-Message: value\nContent-Language: en\nSubject: end\n\nbody",
+        "Content-Type: message/rfc822\nX-Message: wrapper\nContent-X: end\n\nContent-Type: text/plain\nSubject: inner\nContent-Language: en\n\nbody",
+        "Content-Type: multipart/mixed; boundary=outer\nX-Message: value\nContent-X: root\nSubject: end\n\npreamble\n--outer\nContent-Type: text/plain\n\nchild\n--outer\nContent-Type: message/rfc822\n\nContent-Type: multipart/mixed; boundary=inner\nSubject: inner\nContent-Language: en\n\n--inner\nContent-Type: application/octet-stream\nContent-Transfer-Encoding: binary\n\nbinary\n--inner--\n\n--outer--\nepilogue",
+    ] {
+        for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+            let input = raw.replace('\n', newline);
+            let mut message = MimeMessage::load(&mut input.as_bytes()).unwrap();
+            let options = MimePartWriteOptions {
+                new_line_format: format,
+                ..Default::default()
+            };
+            let separator = format!("{newline}{newline}");
+            let prefix_len = input.find(&separator).unwrap() + separator.len();
+            let mut headers = Vec::new();
+            message
+                .write_headers_to_with_options(&mut headers, &options)
+                .unwrap();
+            assert_eq!(headers, input.as_bytes()[..prefix_len]);
+            assert_eq!(serialize(&mut message, format), input.as_bytes());
+            assert_eq!(serialize(&mut message, format), input.as_bytes());
+            let mut content = Vec::new();
+            message
+                .body_mut()
+                .unwrap()
+                .write_content_to_with_options(&mut content, &options)
+                .unwrap();
+            assert_eq!(content, input.as_bytes()[prefix_len..]);
+        }
+    }
+}
+
+#[test]
+fn interleaved_malformed_and_truncated_replacements_keep_header_framing() {
+    let raw = b"Content-Type: text/plain\n\r\r\nSubject: folded\n\tvalue\nContent-X: end\n\nbody";
+    let mut message = MimeMessage::load(&mut &raw[..]).unwrap();
+    message
+        .headers_mut()
+        .replace_all(headers(b"Subject: truncated\r").remove("Subject").unwrap())
+        .unwrap();
+    let expected = b"Content-Type: text/plain\n\r\r\nContent-X: end\nSubject: truncated\n\nbody";
+    assert_eq!(serialize(&mut message, NewLineFormat::Unix), expected);
+    let mut loaded = MimeMessage::load(&mut &expected[..]).unwrap();
+    assert_eq!(serialize(&mut loaded, NewLineFormat::Unix), expected);
 }
 
 #[test]
@@ -548,7 +596,10 @@ fn short_and_interrupted_reads_and_source_failures_follow_loader_rules() {
 
 #[test]
 fn output_failures_are_partial_retryable_from_start_and_leave_headers_unchanged() {
-    let mut message = MimeMessage::from_parts(headers(b"Subject: hi\r\n"), Some(leaf(b"body")));
+    let mut message = MimeMessage::load(
+        &mut &b"Content-Type: text/plain\r\nSubject: hi\r\nContent-X: end\r\n\r\nbody"[..],
+    )
+    .unwrap();
     let expected = serialize(&mut message, NewLineFormat::Dos);
     for limit in 0..expected.len() {
         let mut sink = Sink {
@@ -584,7 +635,7 @@ fn output_failures_are_partial_retryable_from_start_and_leave_headers_unchanged(
 }
 
 #[test]
-fn invalid_write_options_fail_before_output_and_body_errors_keep_message_prefix() {
+fn invalid_write_options_fail_before_output_and_body_errors_keep_header_section() {
     let mut source = Cursor::new(b"body");
     source.set_position(2);
     let mut body = MimePart::new(MimeContent::new(&mut source));
@@ -616,7 +667,7 @@ fn invalid_write_options_fail_before_output_and_body_errors_keep_message_prefix(
         message.write_to(&mut output).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
-    assert_eq!(output, b"Subject: hi\r\n");
+    assert_eq!(output, b"Subject: hi\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: unknown\r\n\r\n");
     drop(message);
     assert_eq!(source.position(), 2);
 }

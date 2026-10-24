@@ -269,13 +269,22 @@ fn ancestor_boundaries_remain_active_across_multiple_message_wrappers() {
             outer.write_to(&mut output).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
-        assert!(output.ends_with(b"Subject: attached\r\n"));
+        assert!(output.ends_with(format!(
+            "Subject: attached\r\nContent-Type: multipart/mixed; boundary={inner_boundary}\r\n\r\n"
+        ).as_bytes()));
         assert_eq!(
             output
                 .windows(b"Content-Type: multipart/".len())
                 .filter(|bytes| *bytes == b"Content-Type: multipart/")
                 .count(),
-            1
+            2
+        );
+        // The merged header section is already written, but validation still
+        // rejects overlapping boundaries before any inner delimiter is emitted.
+        assert!(
+            !output
+                .windows(format!("--{inner_boundary}--").len())
+                .any(|bytes| bytes == format!("--{inner_boundary}--").as_bytes())
         );
     }
     let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
@@ -392,7 +401,7 @@ fn options_and_descendant_errors_have_explicit_output_boundaries() {
     );
     assert_eq!(
         output,
-        b"Content-Type: message/rfc822\r\n\r\nSubject: attached\r\n"
+        b"Content-Type: message/rfc822\r\n\r\nSubject: attached\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: unknown\r\n\r\n"
     );
     drop(part);
     assert_eq!(source.position(), 2);

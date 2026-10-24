@@ -98,6 +98,7 @@ impl HeaderList {
     /// header bytes. Uses the default 16 KiB per-record limit. Body bytes remain
     /// available through the same buffered reader; do not discard that buffer.
     /// Empty input yields an empty list. No seeking or closing is performed.
+    /// Header offsets count original bytes from the start of this load's input.
     ///
     /// The separator is consumed but not stored in this collection. To retain
     /// it, use [`HeaderParser::read_from`] and convert its output into a list.
@@ -191,7 +192,7 @@ impl HeaderList {
         output: &mut W,
         format: NewLineFormat,
     ) -> io::Result<()> {
-        self.write_normalized(output, format, false)
+        Self::write_normalized(self, output, format, false)
     }
 
     pub(crate) fn write_terminated<W: Write + ?Sized>(
@@ -199,21 +200,29 @@ impl HeaderList {
         output: &mut W,
         format: NewLineFormat,
     ) -> io::Result<()> {
-        self.write_normalized(output, format, true)
+        Self::write_terminated_headers(self, output, format)
     }
 
-    fn write_normalized<W: Write + ?Sized>(
-        &self,
+    pub(crate) fn write_terminated_headers<'a, W: Write + ?Sized>(
+        headers: impl IntoIterator<Item = &'a Header>,
+        output: &mut W,
+        format: NewLineFormat,
+    ) -> io::Result<()> {
+        Self::write_normalized(headers, output, format, true)
+    }
+
+    fn write_normalized<'a, W: Write + ?Sized>(
+        headers: impl IntoIterator<Item = &'a Header>,
         output: &mut W,
         format: NewLineFormat,
         terminate_records: bool,
     ) -> io::Result<()> {
         match format {
             NewLineFormat::Dos => {
-                self.write_filtered(output, Unix2DosFilter::new(), terminate_records)
+                Self::write_filtered(headers, output, Unix2DosFilter::new(), terminate_records)
             }
             NewLineFormat::Unix => {
-                self.write_filtered(output, Dos2UnixFilter::new(), terminate_records)
+                Self::write_filtered(headers, output, Dos2UnixFilter::new(), terminate_records)
             }
             NewLineFormat::Mixed => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -222,14 +231,14 @@ impl HeaderList {
         }
     }
 
-    fn write_filtered<W: Write + ?Sized, F: MimeFilter>(
-        &self,
+    fn write_filtered<'a, W: Write + ?Sized, F: MimeFilter>(
+        headers: impl IntoIterator<Item = &'a Header>,
         output: &mut W,
         filter: F,
         terminate_records: bool,
     ) -> io::Result<()> {
         let mut filtered = FilteredWriter::new(output, filter);
-        for header in &self.headers {
+        for header in headers {
             let raw = header.raw();
             let mut prefix = 0;
             if header.is_invalid() {
@@ -362,6 +371,7 @@ impl HeaderList {
     /// The replacement may have a different field name or be malformed.
     /// Other records, including duplicates, are left untouched. To collapse
     /// duplicates by field name instead, use [`replace_all`](Self::replace_all).
+    /// The replacement keeps its own stream offset, if any, not the old record's.
     ///
     /// # Errors
     ///
@@ -391,6 +401,7 @@ impl HeaderList {
     /// position and discards later duplicates without reordering other fields.
     /// If the field is absent, appends the record. Adopts all replacement bytes,
     /// including field spelling, rather than modifying the old record's value.
+    /// The replacement keeps its own stream offset, if any, not the old record's.
     ///
     /// Returns the previous first record, or `None` if appended. Later matching
     /// records are dropped, not included in the return value.

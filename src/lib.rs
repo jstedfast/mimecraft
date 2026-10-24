@@ -35,6 +35,8 @@
 //! conversion and optional termination, skipping empty preambles/epilogues.
 //! [`anonymize::write_part_content_with_options`] masks ordinary leaf content
 //! after transfer encoding and newline handling, without writing its headers.
+//! [`anonymize::write_part`] combines field-aware header masking with that body
+//! path for complete ordinary parts, without report parsing or tree traversal.
 //! Specialized delivery-status and disposition-notification masking in
 //! [`anonymize`] instead parses decoded report fields with explicit limits.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
@@ -91,10 +93,11 @@
 //! [`MimeEntityParseOptions`] limits. Recovery of truncated entities is deferred.
 //! [`MimeMessage`] owns message headers and an optional body tree. Loading
 //! partitions root Content-* headers onto the body, preserving raw records;
-//! writing groups message headers before body headers without generating fields.
+//! writing interleaves their loaded order without generating fields.
 //! [`MimeMessage::write_headers_to`] writes only that header section and separator
 //! with an immutable borrow, without inspecting body metadata or reading sources.
-//! Original header interleaving and automatic transport preparation are deferred.
+//! Ordinary and masked message output share the same header merge rules.
+//! Automatic transport preparation is deferred.
 //! [`MessageImportance`], [`MessagePriority`], and [`XMessagePriority`] add
 //! independent typed header access with checked parsing and canonical setters.
 //! Message identifiers and reply references also have raw-header-backed accessors,
