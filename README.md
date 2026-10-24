@@ -87,6 +87,8 @@ MimeKit. The crate is not configured for publication.
   edits, raw preamble/epilogue storage, and iterative leaf traversal.
 - Synchronous MIME tree writing with iterative traversal, checked ancestor
   boundaries, and delimiter framing that preserves binary body suffixes.
+- Explicit transport encoding preparation across MIME trees and attached messages,
+  with iterative traversal and conditional message MIME-Version insertion.
 - Buffered loading of complete MIME entity trees into owned body streams,
   with raw headers, stored transfer encodings, and input/header/depth limits.
 - Message ownership, buffered loading, and synchronous writing, with separate
@@ -801,8 +803,8 @@ options are validated before metadata or I/O, even for shortcuts. Failure leaves
 headers unchanged; scans retain the analyzer's source positioning rules.
 Preparation trusts already-safe requested encodings: it does not verify their
 payloads, rewrap stored encoded content, or refold raw headers. It is not a full
-transport-safety validator. Multipart/message-tree preparation remains deferred;
-text parts expose leaf preparation through `part_mut()`.
+transport-safety validator. Text parts expose leaf preparation through
+`part_mut()`; the tree APIs described below also visit attached message bodies.
 
 Complete entity loading is available through `MimeEntity::load`, and message
 loading through `MimeMessage::load`, including transparent attached messages.
@@ -1035,8 +1037,8 @@ Invalid options return `InvalidInput`, invalid metadata returns `InvalidData`,
 and source/destination errors propagate. No rollback occurs; retries restart
 serialization. Sources follow the leaf writer's rewind rules, the destination
 is flushed but not closed, and stored headers, text, bodies, and structure are
-unchanged. Tree-wide transport preparation and signature-specific handling
-are deferred.
+unchanged. Writing does not prepare implicitly; signature-specific handling
+remains deferred.
 
 `Multipart` and `MimeEntity` also provide `write_content_to` and
 `write_content_to_with_options`. Only the root header section is omitted:
@@ -1180,10 +1182,60 @@ widths and `ensure_new_line` have no additional effect without a body. Write
 and flush failures propagate, potentially after partial output, while source
 positions and raw headers remain unchanged. Retrying restarts at the beginning.
 
-No Date, Message-Id, From, Subject, or MIME-Version is generated. This is not
+Writing generates no Date, Message-Id, From, Subject, or MIME-Version. This is not
 transport preparation: **Bcc and Resent-Bcc are written as supplied**.
 Other message-specific typed convenience setters, offset-based header merging,
 hidden-header filtering, and automatic transport preparation remain deferred.
+
+### Explicit tree transport preparation
+
+`MimeEntity`, `Multipart`, `MessagePart`, and `MimeMessage` expose
+`prepare(constraint)` and `prepare_with_options(constraint, &options)`.
+They apply the leaf preparation rules above in depth-first child order,
+including enclosed message bodies. Traversal uses an explicit stack with
+storage proportional to depth, not the number of siblings. Ordinary destruction
+and derived debugging still recurse.
+
+Multipart preparation only delegates to children; message wrappers only
+delegate to an enclosed message, if present. Neither operation validates or
+rewrites container headers, boundaries, transfer encodings, preambles, or
+epilogues. The model variant controls traversal, not raw Content-Type spelling.
+An opaque message payload remains a leaf and uses leaf encoding selection.
+An absent enclosed message is a no-op after options validation.
+
+Message preparation with a body parses the first message-level MIME-Version.
+If absent and the body's root header list is nonempty, it appends
+`MIME-Version: 1.0` before preparing the body. Descendant headers do not count,
+and misplaced body-level versions do not replace message metadata. Existing
+valid versions, including non-1.0 values and duplicates, remain unchanged.
+A bodyless message skips the version check. No Date, Message-Id, address, or
+other metadata is generated, and Bcc/Resent-Bcc remain present.
+
+`MimePrepareError` distinguishes invalid options, invalid first MIME-Version,
+and underlying `PartPrepareError` failures. Invalid versions are explicit errors,
+not MimeKit's missing-value fallback, even when the body has no headers.
+Options are checked before any traversal or mutation. A later error stops
+traversal without rolling back earlier leaf edits or inserted versions; later
+siblings remain untouched. Source positioning follows the leaf analyzer.
+Retrying starts a fresh traversal against the current headers and sources.
+
+Use the same `MimePartWriteOptions` for preparation and serialization, as no
+private line-width state is retained. Stored bytes and newline hints are not
+changed. Preparation trusts safe requested encodings and does not refold raw
+headers or repair container metadata: success does not guarantee that writing
+will succeed or that all output is transport-safe. Constructors, loading, and
+writing never invoke preparation implicitly.
+
+```rust
+use mimecraft::{EncodingConstraint, MimeMessage, MimePartWriteOptions, TextPart};
+
+let mut message = MimeMessage::with_body(TextPart::new("plain", "From sender\n")?.into());
+let options = MimePartWriteOptions { max_line_length: 60, ..Default::default() };
+message.prepare_with_options(EncodingConstraint::SevenBit, &options)?;
+let mut output = Vec::new();
+message.write_to_with_options(&mut output, &options)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ### Message subjects and unstructured headers
 
@@ -3104,7 +3156,9 @@ enclosed values at their enclosing slots, with remaining enclosed special
 fields appended. The enclosed body's Content-* headers are preserved.
 Raw spelling, duplicates, folds, and values are retained; ordinary message
 serialization still groups message headers before body headers.
-Automatic splitting, generated IDs, and transport preparation remain deferred.
+Automatic splitting and generated IDs remain deferred. Fragment leaves can use
+ordinary part/tree transport preparation; no splitting-specific preparation
+is performed.
 
 ### Returned-message headers
 
@@ -5254,9 +5308,14 @@ the existing transfer codecs, newline filters, and normalized header writer.
 Stored/requested encoding comparisons, binary pass-through, UU wrappers, and
 empty-body newline handling are retained. Options and required metadata errors
 are explicit, UU filename controls are rejected, and truncated header records
-are terminated in output to keep the separator distinct. Signature verification,
-configurable message-level formatting, and tree-wide transport preparation
-are not implemented.
+are terminated in output to keep the separator distinct. Signature verification
+and configurable message-level formatting are not implemented. Writing does not
+prepare implicitly. Explicit tree preparation adapts `Multipart.Prepare`,
+`MessagePart.Prepare`, and `MimeMessage.Prepare` using a depth-proportional
+iterator stack instead of recursive calls. It retains pre-descent MIME-Version
+insertion and traversal-order partial changes on failure. Invalid versions
+produce typed errors rather than being treated as absent. Container metadata
+and framing remain unchanged, as in the source.
 Text parts adapt `TextPart.cs`'s subtype construction, explicit charset text
 access, and text/charset replacement. Composition over `MimePart<R>` replaces
 inheritance, while in-memory-only setters respect Rust source types. Existing

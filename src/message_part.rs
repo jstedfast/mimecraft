@@ -28,7 +28,7 @@ use crate::{
 /// Use ordinary [`crate::MimePart`] leaves for message payloads that are not
 /// complete messages, such as delivery-status fields or partial fragments.
 ///
-/// Writing and leaf traversal descend through attached messages iteratively.
+/// Writing, preparation, and leaf traversal descend through messages iteratively.
 /// Only transparent wrapper transfer encodings are supported by the writer;
 /// encoded wrappers must remain opaque leaves for now, including encoded
 /// message/global. [`crate::MimeEntity::load`] constructs this variant for

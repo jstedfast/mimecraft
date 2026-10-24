@@ -20,10 +20,11 @@ use crate::{
 /// raw constructors and edits preserve supplied placement without filtering,
 /// validation, synchronization, or duplicate removal.
 ///
-/// Unlike MimeKit's default constructor and writer, this model never supplies
-/// the current date, generated Message-Id, empty From/Subject, or MIME-Version.
-/// Supply required metadata explicitly. It has no mutable parsed-value caches
-/// or change events: use existing typed header parsers and factories through
+/// Constructors and writers never supply the current date, generated Message-Id,
+/// empty From/Subject, or MIME-Version, unlike MimeKit's default behavior.
+/// Explicit [`Self::prepare`] can insert MIME-Version for a body with headers;
+/// supply other required metadata explicitly. There are no mutable parsed-value
+/// caches or change events: use existing typed header parsers and factories through
 /// [`Self::headers`] and [`Self::headers_mut`].
 /// Importance and priority conveniences read those raw headers on every call;
 /// missing fields mean Normal, while invalid present values return errors.
@@ -1042,9 +1043,9 @@ impl<R> MimeMessage<R> {
     /// duplicates, or appends if absent. Invalid existing values are replaced.
     /// Component counts remain significant: `1.0` differs from `1.0.0`.
     ///
-    /// No version is generated automatically; remove raw occurrences to restore
-    /// absence. Accepting a value other than 1.0 does not implement that version
-    /// of MIME or alter parsing/writing behavior. No source I/O occurs.
+    /// Remove raw occurrences to restore absence; explicit [`Self::prepare`]
+    /// may add version 1.0 again. Accepting another value does not implement that
+    /// version of MIME or alter parsing/writing behavior. No source I/O occurs.
     ///
     /// ```
     /// use mimecraft::{DateTimeOffset, MimeMessage, MimeVersion};

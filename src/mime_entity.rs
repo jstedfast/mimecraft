@@ -33,7 +33,8 @@ use crate::{
 /// Loading recognizes transparent message wrappers by default; encoded wrappers
 /// and unrecognized message subtypes remain opaque leaves.
 /// Programmatic nesting is unrestricted; callers must bound tree depth.
-/// Leaf iteration, loading, and writing are iterative; debugging and drop recurse.
+/// Leaf iteration, loading, writing, and preparation are iterative; debugging
+/// and drop recurse.
 #[derive(Debug)]
 pub enum MimeEntity<R = Cursor<Vec<u8>>> {
     /// A leaf with one body stream, including text parts.

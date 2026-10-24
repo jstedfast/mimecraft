@@ -38,7 +38,10 @@
 //! [`BestEncodingError`] retains metadata, line-limit, and source I/O failures.
 //! [`MimePart::prepare`] applies transport encoding selection to a leaf, retaining
 //! already-safe requested encodings; [`PartPrepareError`] preserves failures.
-//! Its synchronous writer serializes complete single parts with streaming
+//! [`MimeEntity::prepare`] extends this to trees with iterative traversal.
+//! [`MimeMessage::prepare`] also inserts a missing MIME-Version for a body with
+//! headers; [`MimePrepareError`] reports traversal-stopping failures.
+//! The part's synchronous writer serializes complete single parts with streaming
 //! transfer conversion, UU wrappers, and [`MimePartWriteOptions`] newline settings.
 //! [`TextPart`] adds strict charset-aware text reads and atomic in-memory text
 //! updates, preserving raw metadata and reusing single-part serialization.
@@ -283,6 +286,7 @@ mod message_priority;
 mod mime_content;
 mod mime_entity;
 mod mime_entity_load;
+mod mime_entity_prepare;
 mod mime_entity_write;
 mod mime_iterator;
 mod mime_message;
@@ -349,6 +353,7 @@ pub use message_priority::{
 pub use mime_content::MimeContent;
 pub use mime_entity::{AttachmentEditError, Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_load::MimeEntityParseOptions;
+pub use mime_entity_prepare::MimePrepareError;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
 pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};
 pub use mime_part::{
