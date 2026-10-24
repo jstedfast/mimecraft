@@ -29,6 +29,8 @@
 //! verbatim through [`anonymize::HeaderOptions`].
 //! [`anonymize::write_headers_with_options`] streams masked header records with
 //! selected preservation and CRLF/LF conversion, without serializing bodies.
+//! [`anonymize::write_message_headers`] combines masked message and root-body
+//! headers plus a separator without reading content or traversing descendants.
 //! [`anonymize::write_bytes_with_options`] masks raw regions with newline
 //! conversion and optional termination, skipping empty preambles/epilogues.
 //! [`anonymize::write_part_content_with_options`] masks ordinary leaf content

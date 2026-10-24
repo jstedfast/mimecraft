@@ -1,11 +1,14 @@
 // Adapted from MimeKit's UnitTests/MimeMessageTests.cs.
+// Masked header-section behavior adapted from MimeKit's MimeAnonymizer.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
 use mimecraft::{
     Header, HeaderList, HeaderParser, MessagePart, MimeContent, MimeEntity, MimeMessage, MimePart,
-    MimePartWriteOptions, Multipart, TextPart, encodings::NewLineFormat,
+    MimePartWriteOptions, Multipart, TextPart,
+    anonymize::{self, HeaderOptions},
+    encodings::NewLineFormat,
 };
 
 fn headers(raw: &[u8]) -> HeaderList {
@@ -47,6 +50,105 @@ fn serialize<R>(message: &MimeMessage<R>, format: NewLineFormat) -> Vec<u8> {
         )
         .unwrap();
     output
+}
+
+fn masked<R>(message: &MimeMessage<R>, format: NewLineFormat) -> Vec<u8> {
+    let mut output = Vec::new();
+    anonymize::write_message_headers_with_options(
+        message,
+        &mut output,
+        &HeaderOptions::default(),
+        format,
+    )
+    .unwrap();
+    output
+}
+
+#[test]
+fn masked_headers_share_preservation_rules_without_mutation_or_source_io() {
+    let message = MimeMessage::from_parts(
+        headers(b"sUbJeCt: private\nX-Keep: one\nBcc: Alice <a@b.c>\nSubject: second\nContent-X: misplaced\n"),
+        Some(leaf(b"Content-Type: text/plain; charset=utf-8; name=private.txt\nX-Keep: two\nX-Body: \xff\n")),
+    );
+    let before = message.headers().clone();
+    let body_before = message.body().unwrap().headers().clone();
+    let expected = "sUbJeCt: xxxxxxx\nX-Keep: xxx\nBcc: xxxxx <x@x.x>\nSubject: xxxxxx\nContent-X: xxxxxxxxx\nContent-Type: text/plain; charset=utf-8; name=xxxxxxxxxxx\nX-Keep: xxx\nX-Body: x\n\n";
+    assert_eq!(masked(&message, NewLineFormat::Unix), expected.as_bytes());
+    let mut output = Vec::new();
+    anonymize::write_message_headers(&message, &mut output).unwrap();
+    assert_eq!(output, expected.replace('\n', "\r\n").as_bytes());
+
+    let options = HeaderOptions {
+        preserve_headers: vec!["x-KEEP".into(), "bcc".into()],
+    };
+    for (format, newline) in [(NewLineFormat::Dos, "\r\n"), (NewLineFormat::Unix, "\n")] {
+        let mut output = Vec::new();
+        anonymize::write_message_headers_with_options(&message, &mut output, &options, format)
+            .unwrap();
+        let expected = expected
+            .replacen("X-Keep: xxx", "X-Keep: one", 1)
+            .replacen("X-Keep: xxx", "X-Keep: two", 1)
+            .replace("Bcc: xxxxx <x@x.x>", "Bcc: Alice <a@b.c>")
+            .replace('\n', newline);
+        assert_eq!(output, expected.as_bytes());
+    }
+    assert_eq!(message.headers(), &before);
+    assert_eq!(message.body().unwrap().headers(), &body_before);
+    assert!(!message.headers().contains("MIME-Version"));
+    assert!(!message.headers().contains("Date"));
+    assert!(!message.headers().contains("Message-Id"));
+}
+
+#[test]
+fn masked_header_sections_do_not_repair_truncated_records() {
+    let message = MimeMessage::from_parts(
+        headers(b"Subject: first")
+            .iter()
+            .chain(headers(b"X-Message: second").iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        Some(leaf(b"Content-Type: text/plain")),
+    );
+    for (format, newline) in [(NewLineFormat::Dos, "\r\n"), (NewLineFormat::Unix, "\n")] {
+        assert_eq!(
+            masked(&message, format),
+            format!("Subject: xxxxxX-Message: xxxxxxContent-Type: text/plain{newline}").as_bytes()
+        );
+        let bodyless = MimeMessage::<()>::from_parts(headers(b"Subject: final\r"), None);
+        assert_eq!(
+            masked(&bodyless, format),
+            format!("Subject: xxxxx\r{newline}").as_bytes()
+        );
+        let empty = MimeMessage::<()>::new();
+        assert_eq!(masked(&empty, format), newline.as_bytes());
+        let empty_body = MimeMessage::with_body(leaf(b""));
+        assert_eq!(masked(&empty_body, format), newline.as_bytes());
+    }
+}
+
+#[test]
+fn masked_malformed_records_use_anonymizer_not_round_trip_newline_rules() {
+    let message = MimeMessage::<()>::from_parts(
+        headers(b"invalid\xff\n\r\r\n\tcontinued\nSubject: a\rb\n"),
+        None,
+    );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"xxxxxxxx\n\r\n\txxxxxxxxx\nSubject: x\rx\n\n"
+    );
+    let options = HeaderOptions {
+        preserve_headers: vec!["invalid".into(), "".into()],
+    };
+    let mut output = Vec::new();
+    anonymize::write_message_headers_with_options(
+        &message,
+        &mut output,
+        &options,
+        NewLineFormat::Unix,
+    )
+    .unwrap();
+    assert_eq!(output, masked(&message, NewLineFormat::Unix));
 }
 
 #[test]
@@ -148,6 +250,10 @@ fn multipart_headers_do_not_write_descendants_preambles_or_delimiters() {
         serialize(&message, NewLineFormat::Unix),
         b"Content-Type: multipart/mixed; boundary=ignored\n\n"
     );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"Content-Type: multipart/mixed; boundary=ignored\n\n"
+    );
 }
 
 #[test]
@@ -161,6 +267,10 @@ fn attached_message_headers_are_not_part_of_the_outer_header_section() {
     assert_eq!(
         serialize(&message, NewLineFormat::Unix),
         b"Subject: outer\nContent-Type: message/rfc822\n\n"
+    );
+    assert_eq!(
+        masked(&message, NewLineFormat::Unix),
+        b"Subject: xxxxx\nContent-Type: message/rfc822\n\n"
     );
 }
 
@@ -187,6 +297,7 @@ fn invalid_body_metadata_does_not_trigger_content_writer_validation() {
         expected.extend_from_slice(b"\r\n");
         let message = MimeMessage::with_body(body);
         assert_eq!(serialize(&message, NewLineFormat::Dos), expected);
+        assert_eq!(masked(&message, NewLineFormat::Dos), expected);
     }
 }
 
@@ -239,6 +350,12 @@ fn borrowed_source_positions_remain_unchanged_and_raw_edits_are_visible() {
             .headers_mut()
             .add(Header::parse(b"Subject: now").unwrap());
         assert!(serialize(&message, NewLineFormat::Unix).starts_with(b"Subject: now\n"));
+        assert!(masked(&message, NewLineFormat::Unix).starts_with(b"Subject: xxx\n"));
+        message.headers_mut().clear();
+        assert_eq!(
+            masked(&message, NewLineFormat::Unix),
+            b"Content-Type: text/plain\n\n"
+        );
     }
     assert_eq!(source.position(), 4);
     assert_eq!(source.into_inner(), b"content");
@@ -437,4 +554,122 @@ fn short_interrupted_zero_writes_and_flush_errors_propagate_correctly() {
             assert_eq!(output.bytes, expected);
         }
     }
+}
+
+#[test]
+fn masked_message_headers_validate_before_io_and_propagate_separator_failures() {
+    let message = MimeMessage::from_parts(
+        headers(b"Subject: outer\n"),
+        Some(leaf(b"Content-Type: text/plain\n")),
+    );
+    let mut output = Sink::default();
+    assert_eq!(
+        anonymize::write_message_headers_with_options(
+            &message,
+            &mut output,
+            &HeaderOptions::default(),
+            NewLineFormat::Mixed,
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(output.bytes.is_empty());
+    assert_eq!(output.flushes, 0);
+
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let expected = masked(&message, format);
+        let mut output = Sink {
+            interrupt_once: true,
+            ..Default::default()
+        };
+        anonymize::write_message_headers_with_options(
+            &message,
+            &mut output as &mut dyn Write,
+            &HeaderOptions::default(),
+            format,
+        )
+        .unwrap();
+        assert_eq!(output.bytes, expected);
+        let successful_flushes = output.flushes;
+        assert!(successful_flushes > 0);
+        for limit in 0..expected.len() {
+            let mut output = Sink {
+                limit: Some(limit),
+                ..Default::default()
+            };
+            assert_eq!(
+                anonymize::write_message_headers_with_options(
+                    &message,
+                    &mut output,
+                    &HeaderOptions::default(),
+                    format,
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(output.bytes, expected[..limit]);
+            output.limit = None;
+            anonymize::write_message_headers_with_options(
+                &message,
+                &mut output,
+                &HeaderOptions::default(),
+                format,
+            )
+            .unwrap();
+            assert_eq!(&output.bytes[limit..], expected);
+        }
+        for flush in 1..=successful_flushes {
+            let mut output = Sink {
+                fail_flush_at: Some(flush),
+                ..Default::default()
+            };
+            assert_eq!(
+                anonymize::write_message_headers_with_options(
+                    &message,
+                    &mut output,
+                    &HeaderOptions::default(),
+                    format,
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::Other
+            );
+            assert_eq!(output.flushes, flush);
+            if flush == successful_flushes {
+                assert_eq!(output.bytes, expected);
+            } else {
+                let separator_length = if format == NewLineFormat::Dos { 2 } else { 1 };
+                assert_eq!(output.bytes, expected[..expected.len() - separator_length]);
+            }
+        }
+    }
+    for message in [message, MimeMessage::new()] {
+        let mut output = Sink {
+            write_zero: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            anonymize::write_message_headers(&message, &mut output)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
+        assert!(output.bytes.is_empty());
+    }
+}
+
+#[test]
+fn masked_message_headers_do_not_finalize_the_borrowed_destination_filter() {
+    use mimecraft::{encodings::Base64Encoder, filters::EncoderFilter, io::FilteredWriter};
+
+    let message = MimeMessage::<()>::new();
+    let mut output = Vec::new();
+    let mut encoded = FilteredWriter::new(&mut output, EncoderFilter::new(Base64Encoder::new()));
+    anonymize::write_message_headers(&message, &mut encoded).unwrap();
+    assert!(encoded.get_ref().is_empty());
+    encoded.write_all(b"X").unwrap();
+    encoded.finish().unwrap();
+    assert_eq!(output, b"DQpY\r\n");
 }

@@ -43,6 +43,8 @@ MimeKit. The crate is not configured for publication.
 - Field-aware masking of complete raw header records, including byte masking of
   malformed records, default metadata preservation, and configurable preserved
   fields, plus masked header-list output with CRLF/LF conversion.
+- Masked message-header sections, including root-body headers and a separator,
+  without reading content or modifying the message.
 - Streaming masking of ordinary part content after serialization, including
   transfer-encoded payloads and UU wrappers.
 - Specialized decoded-field masking of delivery-status and disposition-
@@ -609,6 +611,25 @@ Writers finalize the newline filter and flush, but do not close the destination.
 possibly after partial output; retrying with a fresh iterator starts over.
 Writing into another filter writer does not finalize that destination's filter.
 No headers, options, or bodies are mutated or automatically authored.
+
+`anonymize::write_message_headers(&message, output)` writes masked message
+headers followed by root-body headers and one CRLF separator newline. Its
+`_with_options` variant takes `&HeaderOptions` and `NewLineFormat` after the
+destination. Both lists share the configured masking rules and newline state.
+Order within each list, duplicates, and misplaced fields are retained; original
+message/body header interleaving is not reconstructed. No MIME-Version or other
+metadata is generated. Bcc and Resent-Bcc are masked, not removed, and explicitly
+preserving them exposes their values.
+
+Only the root's header section is visited: no content reads/seeks, report
+parsing, descendant headers, or body-metadata validation occurs. Attached-message
+roots contribute only wrapper headers. The message is immutably borrowed and
+its source type needs no I/O traits. Like the record masking writer, missing
+terminators are not repaired, so the added separator newline need not form a
+blank line in truncated input. Empty messages still write one newline.
+`Mixed` fails before I/O; destination errors may leave partial output. The
+destination is flushed after headers and again after the separator, not closed
+or finalized if it is another filter. Full-message masking remains deferred.
 
 `anonymize::write_part_content(&mut part, output)` masks an ordinary `MimePart`'s
 serialized body without writing headers or their separator.

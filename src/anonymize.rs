@@ -10,6 +10,8 @@
 //! validating, repairing, folding, or mutating headers. Each call starts fresh
 //! state; do not split one value across calls. [`write_headers`] and
 //! [`write_headers_with_options`] mask records and normalize output newlines.
+//! [`write_message_headers`] includes root-body headers and a separator,
+//! without reading any content or traversing descendants.
 //! [`write_part_content`] and [`write_part_content_with_options`] mask ordinary
 //! leaf content after serialization, preserving only MIME whitespace.
 //! [`write_delivery_status_content`] and [`write_disposition_notification_content`]
@@ -42,7 +44,7 @@ use std::io::{self, Read, Seek, Write};
 use crate::{
     DateTimeOffset, DeliveryStatusError, DeliveryStatusParseOptions, DispositionNotificationError,
     DispositionNotificationParseOptions, Header, HeaderId, MessageDeliveryStatus,
-    MessageDispositionNotification, MimePart, MimePartWriteOptions,
+    MessageDispositionNotification, MimeMessage, MimePart, MimePartWriteOptions,
     encodings::NewLineFormat,
     filters::{AnonymizeFilter, Dos2UnixFilter, MimeFilter, Unix2DosFilter},
     io::FilteredWriter,
@@ -341,6 +343,93 @@ fn write_filtered_headers<'a, W: Write + ?Sized, F: MimeFilter>(
     // MimeKit's filtered Flush finalizes filters; Rust's Write::flush does not.
     // Finish explicitly so a trailing CR held by Dos2Unix is not lost.
     filtered.finish()
+}
+
+/// Writes masked message and root-body headers plus a separator using CRLF.
+///
+/// Uses default [`HeaderOptions`]. See [`write_message_headers_with_options`]
+/// for ordering, framing, and no-content-I/O guarantees.
+///
+/// # Errors
+///
+/// Propagates destination write and flush errors, possibly after partial output.
+pub fn write_message_headers<R, W: Write + ?Sized>(
+    message: &MimeMessage<R>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_message_headers_with_options(
+        message,
+        output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+    )
+}
+
+/// Writes masked message headers, root-body headers, and a separator newline.
+///
+/// Adapts the header portion of MimeKit's message anonymizer. Message headers
+/// precede root-body headers, retaining order and duplicates within each list.
+/// Like [`MimeMessage::write_headers_to`], this uses mimecraft's grouped order,
+/// not MimeKit's original-offset interleaving. Misplaced fields are not moved.
+///
+/// Both lists use [`write_headers_with_options`] as one sequence, including
+/// configured preservation, malformed-record masking, and newline conversion.
+/// No headers are synthesized: in particular, this does not insert MIME-Version.
+/// Bcc and Resent-Bcc are masked as address fields, not removed; preserving
+/// those fields explicitly exposes their entire values.
+///
+/// Appends exactly one selected newline after the records, even when there is
+/// no body or no headers. Unlike ordinary message serialization, missing record
+/// terminators are **not** repaired. An unterminated record can run into the next
+/// record, and the added newline need not create a blank separator. This is
+/// diagnostic output, not guaranteed well-formed MIME. Original separator
+/// presence is not retained by mimecraft's message model.
+///
+/// Does not read/seek sources, validate body metadata, write content, or visit
+/// descendants. A multipart contributes only its own headers; an attached
+/// message contributes only its wrapper's headers, not the enclosed message's.
+/// No source I/O traits or mutable access are required. Headers, body sources,
+/// source positions, and metadata remain unchanged.
+///
+/// Buffers one masked record at a time. The destination is flushed after the
+/// header sequence and after the separator, without closing it or finalizing
+/// caller-owned filter writers.
+///
+/// # Errors
+///
+/// [`NewLineFormat::Mixed`] returns [`io::ErrorKind::InvalidInput`] before
+/// destination I/O. Write/flush errors propagate without rollback, possibly
+/// after partial or complete output. Retrying starts the header section over.
+///
+/// ```
+/// use mimecraft::{MimeMessage, TextPart, anonymize};
+///
+/// let mut message = MimeMessage::with_body(TextPart::new("plain", "private body")?.into());
+/// message.set_subject("private")?;
+/// let mut output = Vec::new();
+/// anonymize::write_message_headers(&message, &mut output)?;
+/// assert!(output.starts_with(b"Subject: xxxxxxx\r\n"));
+/// assert!(output.ends_with(b"\r\n\r\n"));
+/// assert!(!output.windows(12).any(|bytes| bytes == b"private body"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_message_headers_with_options<R, W: Write + ?Sized>(
+    message: &MimeMessage<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+) -> io::Result<()> {
+    let newline = header_new_line_bytes(format)?;
+    // Combine the message headers with its body's headers, if any, before
+    // writing the separator. Original offsets are not retained, so follow
+    // mimecraft's message-first order instead of MimeKit's offset-based merge.
+    let headers = message
+        .headers()
+        .iter()
+        .chain(message.body().into_iter().flat_map(|body| body.headers()));
+    write_headers_with_options(headers, output, options, format)?;
+    output.write_all(newline)?;
+    output.flush()
 }
 
 /// Writes masked raw bytes using CRLF, without forcing a final newline.
