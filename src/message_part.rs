@@ -110,6 +110,32 @@ impl<R> MessagePart<R> {
         &mut self.headers
     }
 
+    /// Reads the wrapper's first Content-Id, not any enclosed message's ID.
+    ///
+    /// See [`crate::MimeEntity::content_id`] for tolerant parsing and raw-header behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns a first-header parse error with offsets in the raw value.
+    pub fn content_id(&self) -> Result<Option<crate::MessageId>, crate::MessageIdParseError> {
+        crate::mime_entity::content_id(&self.headers)
+    }
+
+    /// Assigns the wrapper's Content-Id, or removes all occurrences for `None`.
+    ///
+    /// See [`crate::MimeEntity::set_content_id`] for checked normalization and duplicate
+    /// replacement. The contained message and its sources are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignments leave all headers unchanged.
+    pub fn set_content_id(
+        &mut self,
+        value: Option<&str>,
+    ) -> Result<(), crate::MessageIdParseError> {
+        crate::mime_entity::set_content_id(&mut self.headers, value)
+    }
+
     /// Returns the attached message, if present.
     pub fn message(&self) -> Option<&MimeMessage<R>> {
         self.message.as_deref()

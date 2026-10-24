@@ -8,9 +8,10 @@ use std::{
 };
 
 use crate::{
-    ContentHeaderParseError, HeaderList, MessageDeliveryStatus, MessageDispositionNotification,
-    MessageFeedbackReport, MessagePart, MessagePartial, MimePart, Multipart, MultipartRelated,
-    MultipartReport, TextBodyError, TextFormat, TextPart, TextRfc822Headers,
+    ContentHeaderParseError, Header, HeaderList, MessageDeliveryStatus,
+    MessageDispositionNotification, MessageFeedbackReport, MessageId, MessageIdParseError,
+    MessagePart, MessagePartial, MimePart, Multipart, MultipartRelated, MultipartReport,
+    TextBodyError, TextFormat, TextPart, TextRfc822Headers,
 };
 
 /// An owned MIME tree node: a body stream, multipart container, or attached message.
@@ -58,6 +59,61 @@ impl<R> MimeEntity<R> {
             Self::Multipart(multipart) => multipart.headers_mut(),
             Self::Message(part) => part.headers_mut(),
         }
+    }
+
+    /// Reads this node's first Content-Id using MimeKit's tolerant prefix parser.
+    ///
+    /// Returns a detached [`MessageId`] without outer brackets. Reads raw value
+    /// bytes without RFC 2047 decoding. Stops after the first identifier, ignoring
+    /// trailing text and later duplicate headers. Missing domains and other
+    /// compatibility forms follow [`MessageId::parse_prefix`]; this is not an
+    /// authoring validator. Absence returns `Ok(None)`.
+    ///
+    /// Does not inspect descendants, generate IDs, resolve `cid:` URIs, or
+    /// normalize case. Raw edits are observed immediately without caching or
+    /// source I/O. A message wrapper's ID is independent of its enclosed message.
+    ///
+    /// # Errors
+    ///
+    /// An invalid first value returns its [`MessageIdParseError`], not absence
+    /// or a later valid duplicate. Offsets refer to that header's raw value.
+    /// This does not prevent tolerant entity or message loading.
+    pub fn content_id(&self) -> Result<Option<MessageId>, MessageIdParseError> {
+        content_id(self.headers())
+    }
+
+    /// Assigns Content-Id, or removes all occurrences for `None`.
+    ///
+    /// Validates and normalizes with [`MessageId::from_value`] before changing
+    /// headers, accepting either bare or bracketed setter-compatible IDs.
+    /// Writes `Content-Id: <id>` with CRLF at the first matching position and
+    /// removes duplicates, or appends when absent. Like other raw-header part
+    /// setters, always reformats equal values rather than reproducing MimeKit's
+    /// cache-dependent no-op.
+    ///
+    /// Empty text is invalid; `None` removes the field. Generates no IDs and
+    /// does not check uniqueness, update related-container selectors or HTML
+    /// references, or touch sources. Case is retained. The underlying setter
+    /// grammar is compatible rather than strict RFC validation; it rejects
+    /// NUL and non-folding line breaks but imposes no physical line-length limit.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignment returns [`MessageIdParseError`] with offsets in the
+    /// original argument, leaving all headers and content unchanged.
+    ///
+    /// ```
+    /// use mimecraft::{MimeEntity, TextPart};
+    ///
+    /// let mut entity: MimeEntity = TextPart::new("html", "<p>Document</p>")?.into();
+    /// entity.set_content_id(Some("document@example.com"))?;
+    /// assert_eq!(entity.content_id()?.unwrap().as_str(), "document@example.com");
+    /// entity.set_content_id(None)?;
+    /// assert_eq!(entity.content_id()?, None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_content_id(&mut self, value: Option<&str>) -> Result<(), MessageIdParseError> {
+        set_content_id(self.headers_mut(), value)
     }
 
     /// Returns whether the first Content-Disposition specifies `attachment`.
@@ -181,6 +237,32 @@ impl<R> MimeEntity<R> {
     pub fn leaf_parts(&self) -> LeafParts<'_, R> {
         LeafParts::new(slice::from_ref(self))
     }
+}
+
+pub(crate) fn content_id(headers: &HeaderList) -> Result<Option<MessageId>, MessageIdParseError> {
+    headers
+        .get("Content-Id")
+        .map(|header| MessageId::parse_prefix(header.raw_value()).map(|(id, _)| id))
+        .transpose()
+}
+
+pub(crate) fn set_content_id(
+    headers: &mut HeaderList,
+    value: Option<&str>,
+) -> Result<(), MessageIdParseError> {
+    if let Some(value) = value {
+        // MimeKit's getter accepts loose raw syntax, but its setter uses the
+        // separate value validator. Revalidate even values returned by reading;
+        // a successfully parsed raw ID need not be safe to write into a header.
+        let id = MessageId::from_value(value)?;
+        let header = Header::from_formatted(format!("Content-Id: <{id}>\r\n"));
+        headers
+            .replace_all(header)
+            .expect("formatted Content-Id always has a parsed field name");
+    } else {
+        headers.remove_all("Content-Id");
+    }
+    Ok(())
 }
 
 impl<R: Read + Seek> MimeEntity<R> {

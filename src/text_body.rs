@@ -181,12 +181,12 @@ pub(crate) fn related_root_match<R>(
             .map_err(TextBodyError::RelatedStart)?;
         let start = reference.as_ref().map_or(start, MessageId::as_str);
         for (index, child) in part.children().iter().enumerate() {
-            if let Some(header) = child.headers().get("Content-Id") {
-                let (id, _) = MessageId::parse_prefix(header.raw_value())
-                    .map_err(TextBodyError::ContentId)?;
-                if id.as_str() == start {
-                    return Ok(Some(index));
-                }
+            if child
+                .content_id()
+                .map_err(TextBodyError::ContentId)?
+                .is_some_and(|id| id.as_str() == start)
+            {
+                return Ok(Some(index));
             }
         }
     } else if let Some(media_type) = content_type.parameters().get("type") {

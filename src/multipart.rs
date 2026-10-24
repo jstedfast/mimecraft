@@ -99,6 +99,32 @@ impl<R> Multipart<R> {
         &mut self.headers
     }
 
+    /// Reads this container's first Content-Id, without inspecting children.
+    ///
+    /// See [`MimeEntity::content_id`] for tolerant parsing and raw-header behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns a first-header parse error with offsets in the raw value.
+    pub fn content_id(&self) -> Result<Option<crate::MessageId>, crate::MessageIdParseError> {
+        crate::mime_entity::content_id(&self.headers)
+    }
+
+    /// Assigns this container's Content-Id, or removes all occurrences for `None`.
+    ///
+    /// See [`MimeEntity::set_content_id`] for checked normalization and duplicate
+    /// replacement. Children, root selectors, and source positions are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignments leave all headers unchanged.
+    pub fn set_content_id(
+        &mut self,
+        value: Option<&str>,
+    ) -> Result<(), crate::MessageIdParseError> {
+        crate::mime_entity::set_content_id(&mut self.headers, value)
+    }
+
     /// Returns immediate children in their stored order.
     pub fn children(&self) -> &[MimeEntity<R>] {
         &self.children

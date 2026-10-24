@@ -83,6 +83,10 @@
 //! and an opaque opt-out; encoded wrappers remain ordinary leaves.
 //! Untyped multipart/digest children default to attached messages without
 //! synthesizing headers; tree writing honors that immediate-parent context.
+//! [`MimeEntity::content_id`] and the concrete entity accessors parse the first
+//! raw Content-Id tolerantly, with explicit errors rather than silent absence.
+//! [`MimeEntity::set_content_id`] validates before canonical duplicate-collapsing
+//! replacement; neither operation reads sources or generates identifiers.
 //! [`BodyParts`] traverses non-multipart nodes without entering attached messages;
 //! [`Attachments`] filters their dispositions with explicit parse errors.
 //! [`MimeIterator`] visits every entity, including attached-message bodies, with

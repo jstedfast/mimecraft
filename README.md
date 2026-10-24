@@ -671,6 +671,26 @@ missing means `Unspecified`, but empty or unknown values return explicit errors.
 Setting `Unspecified` removes all transfer-encoding headers; other encodings write
 one canonical token with CRLF termination.
 
+`content_id()` is available on `MimePart`, `Multipart`, `MessagePart`, and
+`MimeEntity`, returning `Result<Option<MessageId>, MessageIdParseError>`.
+It parses the first raw Content-Id with the tolerant prefix grammar, without
+RFC 2047 decoding: brackets are removed, compatibility forms are normalized,
+case is preserved, and trailing text and later duplicates are ignored. Missing
+is `Ok(None)`; malformed first values report errors with raw-value offsets
+without preventing message loading. A container or wrapper returns only its
+own ID, not an ID from a child or enclosed message.
+
+`set_content_id(Some(value))` validates bare or bracketed input with
+`MessageId::from_value`, writes a canonical bracketed CRLF-terminated header
+at the first matching slot, and removes duplicates. Equal values are also
+reformatted. Invalid assignments leave all headers unchanged; `None` removes
+every occurrence, while empty text is invalid. Reading is deliberately more
+tolerant than authoring, so even a parsed ID must pass assignment validation.
+Neither operation needs source I/O traits. Text parts expose these methods
+through `part()`/`part_mut()`. IDs are not generated or checked for uniqueness;
+changing one does not update HTML references or parent `multipart/related`
+selectors. Related-root lookup observes the current raw headers on each call.
+
 `content_description()` returns the first Content-Description as an owned
 `Option<rfc2047::DecodedHeader>`, retaining tolerant decoding diagnostics.
 Its `_with_options` variant accepts explicit decoding settings. Missing and
@@ -5095,6 +5115,11 @@ stored/requested encodings. Raw headers and detached typed values replace
 change events and mutable caches. Checked setters reuse header formatting and
 duplicate-collapsing replacement; missing content metadata stays absent and
 invalid values return errors rather than silently selecting defaults.
+Content-Id follows `MimeEntity.ContentId`, sharing the existing loose raw-prefix
+parser and checked value validator across all entity kinds. Explicit accessor
+errors replace the upstream invalid-value null fallback; raw edits need no
+cache invalidation. Assignment always canonicalizes and collapses duplicates,
+without implicit ID generation or changes to related references.
 Content-Description and Content-Duration follow the same source's nullable
 properties: tolerant decoded descriptions and nonnegative integer seconds,
 with explicit errors replacing the duration getter's implicit null fallback.

@@ -127,6 +127,32 @@ impl<R> MimePart<R> {
         &mut self.headers
     }
 
+    /// Reads this part's first Content-Id without reading its content.
+    ///
+    /// Uses the tolerant raw-value parser; see [`crate::MimeEntity::content_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a first-header parse error with offsets in the raw value.
+    pub fn content_id(&self) -> Result<Option<crate::MessageId>, crate::MessageIdParseError> {
+        crate::mime_entity::content_id(&self.headers)
+    }
+
+    /// Assigns Content-Id, or removes every occurrence for `None`.
+    ///
+    /// See [`crate::MimeEntity::set_content_id`] for normalization, duplicate
+    /// replacement, and validation. Does not read or change the content source.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignments leave all headers unchanged.
+    pub fn set_content_id(
+        &mut self,
+        value: Option<&str>,
+    ) -> Result<(), crate::MessageIdParseError> {
+        crate::mime_entity::set_content_id(&mut self.headers, value)
+    }
+
     /// Decodes the first Content-Description header, or returns `None` if absent.
     ///
     /// Uses tolerant RFC 2047 decoding followed by unfolding and Unicode

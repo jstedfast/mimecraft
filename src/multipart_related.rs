@@ -4,8 +4,8 @@
 use std::{error::Error, fmt, io::Cursor};
 
 use crate::{
-    ContentHeaderParseError, ContentType, HeaderFormatOptions, MessageId, MessageIdParseError,
-    MimeEntity, Multipart, MultipartError, TextBodyError,
+    ContentHeaderParseError, ContentType, HeaderFormatOptions, MessageIdParseError, MimeEntity,
+    Multipart, MultipartError, TextBodyError,
 };
 
 /// A multipart/related container with checked root-document access and editing.
@@ -195,12 +195,10 @@ impl<R> MultipartRelated<R> {
         // Thunderbird bug 471402, as MimeKit does. Require an explicit ID rather
         // than generating one when a non-first replacement has no Content-Id.
         let start = if matched.is_some_and(|index| index > 0) {
-            let header = root
-                .headers()
-                .get("Content-Id")
+            let id = root
+                .content_id()
+                .map_err(MultipartRelatedError::RootContentId)?
                 .ok_or(MultipartRelatedError::MissingRootContentId)?;
-            let (id, _) = MessageId::parse_prefix(header.raw_value())
-                .map_err(MultipartRelatedError::RootContentId)?;
             Some(format!("<{}>", id.as_str()))
         } else {
             None
