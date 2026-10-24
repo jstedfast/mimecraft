@@ -27,6 +27,8 @@
 //! preserves selected metadata verbatim, and byte-masks malformed records.
 //! [`anonymize::header_with_options`] accepts additional fields to preserve
 //! verbatim through [`anonymize::HeaderOptions`].
+//! [`anonymize::write_headers_with_options`] streams masked header records with
+//! selected preservation and CRLF/LF conversion, without serializing bodies.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

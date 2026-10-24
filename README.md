@@ -42,7 +42,7 @@ MimeKit. The crate is not configured for publication.
   syntax, parameters, trace keywords, and recognized date suffixes for inspection.
 - Field-aware masking of complete raw header records, including byte masking of
   malformed records, default metadata preservation, and configurable preserved
-  fields.
+  fields, plus masked header-list output with CRLF/LF conversion.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -553,8 +553,8 @@ Preservation bypasses the value helper and copies the entire record, including
 invalid or sensitive values. Defaults preserve no additional fields; Date,
 MIME-Version, and Content-Transfer-Encoding still pass through regardless.
 The list is checked afresh for every call without mutating it or the record.
-Options do not affect raw-value helpers or automatically traverse header lists,
-MIME trees, or status-report bodies; callers explicitly select records.
+Options do not affect raw-value helpers or automatically traverse MIME trees or
+status-report bodies; callers explicitly select records.
 
 ```rust
 use mimecraft::{Header, anonymize::{self, HeaderOptions}};
@@ -567,6 +567,26 @@ assert_eq!(anonymize::header_with_options(&record, &options), record.raw());
 # Ok::<(), mimecraft::HeaderParseError>(())
 ```
 
+`anonymize::write_headers(headers, output)` masks an iterable of borrowed records
+with default preservation and CRLF output. `write_headers_with_options(headers,
+output, &HeaderOptions, NewLineFormat)` adds explicit preservation and CRLF/LF
+selection. Both accept a borrowed `HeaderList`, slice, or iterator, retaining
+order and duplicates. Masking runs on whole records before newline conversion,
+including for preserved fields. Only one masked record is buffered at a time.
+
+Neither missing record terminators nor a body separator are inserted; bare CR
+bytes survive unless followed by LF. Newline state spans the supplied records,
+while masking state starts fresh for each. Like MimeKit's anonymizer, malformed
+records also undergo newline conversion, without `HeaderList`'s special
+round-trip protection for CR-only invalid lines. Repeated LF conversion can
+eventually turn such a line into a blank separator.
+
+Writers finalize the newline filter and flush, but do not close the destination.
+`Mixed` is rejected before iteration or I/O. Write and flush errors propagate,
+possibly after partial output; retrying with a fresh iterator starts over.
+Writing into another filter writer does not finalize that destination's filter.
+No headers, options, or bodies are mutated or automatically authored.
+
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header
 text, parameter names, selected values, and accepted date suffixes remain visible,
@@ -576,7 +596,7 @@ configured preserved fields in their entirety.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Output formatting and complete message/entity anonymization remain deferred.
+Value reformatting and complete message/entity anonymization remain deferred.
 
 ### Incremental charset conversion
 

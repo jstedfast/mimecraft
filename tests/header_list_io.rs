@@ -1,4 +1,5 @@
 // Header-list round-trip vectors adapted from MimeKit's HeaderListTests.cs.
+// Header masking vectors adapted from MimeKit's MimeAnonymizerTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
@@ -7,7 +8,11 @@ use std::{
     num::NonZeroUsize,
 };
 
-use mimecraft::{HeaderList, HeaderParser, HeaderTooLong, encodings::NewLineFormat};
+use mimecraft::{
+    Header, HeaderList, HeaderParser, HeaderTooLong,
+    anonymize::{self, HeaderOptions},
+    encodings::NewLineFormat,
+};
 
 fn load(input: &[u8]) -> HeaderList {
     HeaderList::load(&mut &input[..]).unwrap()
@@ -417,6 +422,266 @@ fn buffered_io_accepts_trait_objects_without_owning_or_closing_them() {
     let writer: &mut dyn Write = &mut output;
     headers.write_to(writer).unwrap();
     assert_eq!(output, b"X: v\r\n");
+}
+
+#[test]
+fn source_anonymizer_signature_vector_writes_only_supplied_headers() {
+    // MimeAnonymizerTests includes a message separator; the header-only API
+    // leaves separator ownership and all body processing to the caller.
+    let mut input = &b"DKIM-Signature: v=1; a=rsa-sha256; d=example.com; s=selector;\n\tbh=abc123==; b=def456==\n\nbody"[..];
+    let headers = HeaderList::load(&mut input).unwrap();
+    let expected = "DKIM-Signature: x=xx x=xxxxxxxxxxx x=xxxxxxxxxxxx x=xxxxxxxxx\n\txx=xxxxxx==x x=xxxxxx==\n";
+    let mut output = Vec::new();
+    anonymize::write_headers(&headers, &mut output).unwrap();
+    assert_eq!(output, expected.replace('\n', "\r\n").as_bytes());
+    output.clear();
+    anonymize::write_headers_with_options(
+        headers.as_slice(),
+        &mut output,
+        &HeaderOptions::default(),
+        NewLineFormat::Unix,
+    )
+    .unwrap();
+    assert_eq!(output, expected.as_bytes());
+    assert_eq!(input, b"body");
+}
+
+#[test]
+fn masked_writing_normalizes_preserved_fields_and_keeps_order_and_duplicates() {
+    let headers = load(b"sUbJeCt \t: top\r\n\tline\nTo: Alice <a@b.c>\nSubject: again\nDate: private\r\nBad Name: \xff\0\nX-Last: tail\r");
+    let original = headers.clone();
+    let options = HeaderOptions {
+        preserve_headers: vec!["subject".into(), "Bad Name".into()],
+    };
+    let original_options = options.clone();
+    let expected = "sUbJeCt \t: top\n\tline\nTo: xxxxx <x@x.x>\nSubject: again\nDate: private\nxxx xxxxx xx\nX-Last: xxxx\r";
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        let mut output = Vec::new();
+        anonymize::write_headers_with_options(&headers, &mut output, &options, format).unwrap();
+        let expected = if format == NewLineFormat::Dos {
+            expected.replace('\n', "\r\n")
+        } else {
+            expected.into()
+        };
+        assert_eq!(output, expected.as_bytes());
+        assert_eq!(headers, original);
+        assert_eq!(options, original_options);
+    }
+}
+
+#[test]
+fn masked_writing_converts_cr_only_invalid_lines_without_reordering() {
+    let headers = load(b"A: b\r\n\r\r\n more\r\nC: d\r\n");
+    assert!(headers.as_slice()[1].is_invalid());
+    for (format, expected) in [
+        (NewLineFormat::Unix, b"A: x\n\r\n xxxx\nC: x\n".as_slice()),
+        (NewLineFormat::Dos, b"A: x\r\n\r\r\n xxxx\r\nC: x\r\n"),
+    ] {
+        let mut output = Vec::new();
+        anonymize::write_headers_with_options(
+            &headers,
+            &mut output,
+            &HeaderOptions::default(),
+            format,
+        )
+        .unwrap();
+        assert_eq!(output, expected);
+    }
+}
+
+#[test]
+fn masked_writing_handles_buffer_boundaries_and_finalizes_trailing_cr() {
+    // Put CRLF pairs and encoded-word transitions across the 4096-byte chunks.
+    for padding in [4068, 4069, 4070, 4084, 4085, 4086, 4087, 4088, 4089, 8182] {
+        let mut raw = b"Subject: ".to_vec();
+        raw.extend(std::iter::repeat_n(b'a', padding));
+        raw.extend_from_slice(b"=?utf-8?q?hello?=\r\n\tend\r");
+        let headers = load(&raw);
+        for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+            let mut expected = b"Subject: ".to_vec();
+            expected.extend(std::iter::repeat_n(b'x', padding));
+            expected.extend_from_slice(if format == NewLineFormat::Unix {
+                b"=?utf-8?q?xxxxx?=\n\txxx\r"
+            } else {
+                b"=?utf-8?q?xxxxx?=\r\n\txxx\r"
+            });
+            let mut output = TestWriter::new();
+            output.interrupt_once = true;
+            anonymize::write_headers_with_options(
+                &headers,
+                &mut output,
+                &HeaderOptions::default(),
+                format,
+            )
+            .unwrap();
+            assert_eq!(output.bytes, expected, "padding {padding}, {format:?}");
+            assert_eq!(output.flushes, 1);
+        }
+    }
+}
+
+#[test]
+fn masked_iterables_do_not_repair_unterminated_records_or_add_separators() {
+    let first = load(b"X: =?utf-8");
+    let second = load(b"Y: private\r");
+    let mut output = Vec::new();
+    let sink: &mut dyn Write = &mut output;
+    anonymize::write_headers_with_options(
+        first.iter().chain(second.iter()).chain(first.iter()),
+        sink,
+        &HeaderOptions::default(),
+        NewLineFormat::Unix,
+    )
+    .unwrap();
+    // The first value's incomplete charset state must not leak into Y's value.
+    assert_eq!(output, b"X: =?utf-8Y: xxxxxxx\rX: =?utf-8");
+    output.write_all(b"caller tail").unwrap();
+    assert!(output.ends_with(b"caller tail"));
+}
+
+#[test]
+fn masked_preserved_values_are_not_reparsed_or_sanitized_by_the_writer() {
+    let record = Header::parse(b"X-Keep: \xff\0\r\nHeader-Like: visible\n").unwrap();
+    let options = HeaderOptions {
+        preserve_headers: vec!["x-keep".into()],
+    };
+    let mut output = Vec::new();
+    anonymize::write_headers_with_options([&record], &mut output, &options, NewLineFormat::Unix)
+        .unwrap();
+    assert_eq!(output, b"X-Keep: \xff\0\nHeader-Like: visible\n");
+    assert_eq!(record.raw(), b"X-Keep: \xff\0\r\nHeader-Like: visible\n");
+}
+
+#[test]
+fn masked_writer_rejects_mixed_before_iteration_and_flushes_empty_input() {
+    struct UnreachableHeaders;
+    impl IntoIterator for UnreachableHeaders {
+        type Item = &'static Header;
+        type IntoIter = std::iter::Empty<Self::Item>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            panic!("invalid options must be checked before obtaining an iterator");
+        }
+    }
+    let mut output = TestWriter::new();
+    assert_eq!(
+        anonymize::write_headers_with_options(
+            UnreachableHeaders,
+            &mut output,
+            &HeaderOptions::default(),
+            NewLineFormat::Mixed,
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::InvalidInput,
+    );
+    assert_eq!(output.writes, 0);
+    assert_eq!(output.flushes, 0);
+    let headers = HeaderList::default();
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        anonymize::write_headers_with_options(
+            &headers,
+            &mut output,
+            &HeaderOptions::default(),
+            format,
+        )
+        .unwrap();
+    }
+    assert_eq!(output.writes, 0);
+    assert_eq!(output.flushes, 2);
+    assert!(output.bytes.is_empty());
+    output.fail_flush = true;
+    assert_eq!(
+        anonymize::write_headers(&headers, &mut output)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Other,
+    );
+}
+
+#[test]
+fn masked_writer_propagates_errors_after_exact_prefixes_and_retry_starts_over() {
+    let headers = load(b"Subject: hello\r\nBad Name: private\nY: tail\r");
+    let original = headers.clone();
+    let expected = "Subject: xxxxx\nxxx xxxxx xxxxxxx\nY: xxxx\r";
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        let expected = if format == NewLineFormat::Dos {
+            expected.replace('\n', "\r\n")
+        } else {
+            expected.into()
+        };
+        for fail_after in 0..=expected.len() {
+            let mut output = TestWriter::new();
+            output.interrupt_once = true;
+            output.fail_after = Some(fail_after);
+            let result = anonymize::write_headers_with_options(
+                &headers,
+                &mut output,
+                &HeaderOptions::default(),
+                format,
+            );
+            if fail_after < expected.len() {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                assert_eq!(output.flushes, 0);
+            } else {
+                result.unwrap();
+                assert_eq!(output.flushes, 1);
+            }
+            assert_eq!(output.bytes, expected.as_bytes()[..fail_after]);
+            assert_eq!(headers, original);
+        }
+    }
+    let mut output = TestWriter::new();
+    output.fail_after = Some(3);
+    assert!(anonymize::write_headers(&headers, &mut output).is_err());
+    output.fail_after = None;
+    anonymize::write_headers(&headers, &mut output).unwrap();
+    assert_eq!(
+        output.bytes,
+        format!("Sub{}", expected.replace('\n', "\r\n")).as_bytes()
+    );
+}
+
+#[test]
+fn masked_writer_reports_zero_writes_and_final_flush_errors() {
+    let headers = load(b"X: value\r");
+    let mut output = TestWriter::new();
+    output.zero_write = true;
+    assert_eq!(
+        anonymize::write_headers(&headers, &mut output)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WriteZero,
+    );
+    assert!(output.bytes.is_empty());
+    assert_eq!(output.flushes, 0);
+    output.zero_write = false;
+    output.fail_flush = true;
+    assert_eq!(
+        anonymize::write_headers_with_options(
+            &headers,
+            &mut output,
+            &HeaderOptions::default(),
+            NewLineFormat::Unix,
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::Other,
+    );
+    assert_eq!(output.bytes, b"X: xxxxx\r");
+    assert_eq!(output.flushes, 1);
+}
+
+#[test]
+fn masked_writer_does_not_finalize_the_callers_filter() {
+    use mimecraft::{encodings::Base64Encoder, filters::EncoderFilter, io::FilteredWriter};
+
+    let headers = load(b"X: a");
+    let mut destination = FilteredWriter::new(Vec::new(), EncoderFilter::new(Base64Encoder::new()));
+    anonymize::write_headers(&headers, &mut destination).unwrap();
+    assert_eq!(destination.get_ref(), b"WDog");
+    destination.finish().unwrap();
+    assert_eq!(destination.get_ref(), b"WDogeA==\r\n");
 }
 
 struct ScriptedReader<'a> {

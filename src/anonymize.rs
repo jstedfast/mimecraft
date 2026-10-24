@@ -5,10 +5,11 @@
 //!
 //! [`header`] masks a complete stored record using MimeKit's default field rules.
 //! [`header_with_options`] can preserve additional fields using [`HeaderOptions`].
-//! The value helpers let callers select a grammar explicitly. All return a new
-//! buffer of exactly the input length without decoding, validating, repairing,
-//! folding, or mutating headers. Each call starts fresh state; do not split one
-//! value across calls.
+//! The value helpers let callers select a grammar explicitly. Record and value
+//! helpers return a new buffer of exactly the input length without decoding,
+//! validating, repairing, folding, or mutating headers. Each call starts fresh
+//! state; do not split one value across calls. [`write_headers`] and
+//! [`write_headers_with_options`] mask records and normalize output newlines.
 //!
 //! This is not guaranteed removal of sensitive information. Lengths, selected
 //! syntax, and potential encoded-word charset/encoding labels remain visible;
@@ -20,17 +21,24 @@
 //! Complete-record masking preserves valid field names and copies Date,
 //! MIME-Version, and Content-Transfer-Encoding records verbatim, even when their
 //! values contain private or malformed data. Configured preserved fields also
-//! pass through in their entirety.
+//! pass through in their entirety before any writer newline conversion.
 //! Output may contain non-ASCII bytes, controls, or invalid UTF-8 and is not
 //! necessarily valid MIME or safe display text.
 //!
 //! Pass a [`Header`] to [`header`], or [`Header::raw_value`] to the value helpers.
-//! Output formatting and full-message anonymization are not implemented here.
+//! Writers support CRLF/LF conversion, not value reformatting or full-message
+//! anonymization.
 //! Review output before sharing it. Use [`crate::filters::AnonymizeFilter`] for
 //! simpler byte masking that preserves only SPACE, TAB, CR, and LF.
 
+use std::io::{self, Write};
+
 use crate::{
-    DateTimeOffset, Header, HeaderId, filters::AnonymizeFilter, parse_utils::is_whitespace,
+    DateTimeOffset, Header, HeaderId,
+    encodings::NewLineFormat,
+    filters::{AnonymizeFilter, Dos2UnixFilter, MimeFilter, Unix2DosFilter},
+    io::FilteredWriter,
+    parse_utils::is_whitespace,
 };
 
 const ADDRESS_SPECIALS: &[u8] = b" \t\r\n()<>[]:;@,.";
@@ -49,8 +57,9 @@ const WHITESPACE: &[u8] = b" \t\r\n";
 /// ordering, and duplicates, but order and duplicates do not affect masking.
 /// Matching scans the list without allocating a normalized field name.
 ///
-/// These options affect only [`header_with_options`], not the raw-value helpers.
-/// They do not traverse a message, MIME tree, or structured report body.
+/// These options affect [`header_with_options`] and [`write_headers_with_options`],
+/// not the raw-value helpers. They do not traverse a message, MIME tree, or
+/// structured report body. Writers still normalize preserved records' newlines.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HeaderOptions {
     /// Additional field names whose complete raw records are copied verbatim.
@@ -210,6 +219,110 @@ pub fn header_with_options(record: &Header, options: &HeaderOptions) -> Vec<u8> 
     output.push(b':');
     output.extend_from_slice(&value);
     output
+}
+
+/// Writes masked headers with default preservation rules and CRLF newlines.
+///
+/// Accepts a borrowed [`crate::HeaderList`], slice, or iterator of records.
+/// Retains iteration order and duplicates, without adding a body separator.
+/// See [`write_headers_with_options`] for formatting, buffering, and errors.
+///
+/// # Errors
+///
+/// Propagates destination write and flush errors, possibly after partial output.
+pub fn write_headers<'a, W: Write + ?Sized>(
+    headers: impl IntoIterator<Item = &'a Header>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_headers_with_options(
+        headers,
+        output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+    )
+}
+
+/// Writes masked headers with explicit preservation and output newline settings.
+///
+/// Applies [`header_with_options`] independently to each complete record, then
+/// streams the result through the selected CRLF/LF converter. Even preserved
+/// fields have their newlines converted. No values are decoded, re-encoded,
+/// refolded, or validated. Headers and options remain unchanged.
+///
+/// Like MimeKit's anonymizer, malformed records are byte-masked and newline
+/// converted too. Unlike [`crate::HeaderList::write_to`], there is no exception
+/// for carriage-return-only invalid lines: repeated LF conversion can eventually
+/// turn such a line into a blank separator. Output is for inspection, not a
+/// guaranteed structure-preserving round trip or removal of sensitive data.
+///
+/// Missing record terminators and a header/body separator are not added. Bare
+/// CR bytes survive unless followed by LF. Newline state spans chunks and
+/// adjacent records as one ordered byte stream, including malformed records;
+/// masking state starts fresh per record. An unterminated record can therefore
+/// run into the next record. Only supplied headers are visited, not MIME bodies.
+///
+/// Buffers one masked record at a time, not the entire collection. On success,
+/// finalizes the newline filter and flushes the borrowed destination, even for
+/// empty input; it does not close the destination. If the destination is itself
+/// a filter writer, the caller must still finalize that outer destination.
+///
+/// # Errors
+///
+/// [`NewLineFormat::Mixed`] returns [`io::ErrorKind::InvalidInput`] before
+/// obtaining an iterator or performing any I/O. Write and flush errors propagate
+/// without rollback, possibly after partial or complete output. Interrupted
+/// writes retry; zero writes fail with [`io::ErrorKind::WriteZero`].
+/// Retrying with a fresh iterator starts over, not at the failed output byte.
+///
+/// ```
+/// use mimecraft::{
+///     HeaderList,
+///     anonymize::{self, HeaderOptions},
+///     encodings::NewLineFormat,
+/// };
+///
+/// let headers = HeaderList::load(&mut &b"Subject: private\r\nTo: Alice <a@b.c>\n"[..])?;
+/// let options = HeaderOptions { preserve_headers: vec!["subject".into()] };
+/// let mut output = Vec::new();
+/// anonymize::write_headers_with_options(&headers, &mut output, &options, NewLineFormat::Unix)?;
+/// assert_eq!(output, b"Subject: private\nTo: xxxxx <x@x.x>\n");
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn write_headers_with_options<'a, W: Write + ?Sized>(
+    headers: impl IntoIterator<Item = &'a Header>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+) -> io::Result<()> {
+    match format {
+        NewLineFormat::Dos => {
+            write_filtered_headers(headers, output, options, Unix2DosFilter::new())
+        }
+        NewLineFormat::Unix => {
+            write_filtered_headers(headers, output, options, Dos2UnixFilter::new())
+        }
+        NewLineFormat::Mixed => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "header new-line format must be Dos or Unix",
+        )),
+    }
+}
+
+fn write_filtered_headers<'a, W: Write + ?Sized, F: MimeFilter>(
+    headers: impl IntoIterator<Item = &'a Header>,
+    output: &mut W,
+    options: &HeaderOptions,
+    filter: F,
+) -> io::Result<()> {
+    let mut filtered = FilteredWriter::new(output, filter);
+    for record in headers {
+        // Mask whole values before chunked I/O: keywords, dates, and encoded
+        // words can depend on bytes beyond a writer's buffer boundary.
+        filtered.write_all(&header_with_options(record, options))?;
+    }
+    // MimeKit's filtered Flush finalizes filters; Rust's Write::flush does not.
+    // Finish explicitly so a trailing CR held by Dos2Unix is not lost.
+    filtered.finish()
 }
 
 /// Masks an unstructured raw header value, retaining potential encoded-word syntax.
