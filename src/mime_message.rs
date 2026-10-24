@@ -90,6 +90,38 @@ pub struct MessageAddressIssue {
 }
 
 impl<R> MimeMessage<R> {
+    /// Iterates over every entity in depth-first order, including this message's
+    /// body, multipart containers, and attached message bodies.
+    ///
+    /// [`crate::MimeIterator`] provides current-path, parent, ancestor, containing
+    /// message, and subtree-skipping operations. No source I/O or header parsing
+    /// occurs. The message is immutably borrowed throughout traversal.
+    pub fn iter(&self) -> crate::MimeIterator<'_, R> {
+        crate::MimeIterator::new(self)
+    }
+
+    /// Looks up a MIME entity by its part path without scanning unrelated siblings.
+    ///
+    /// Uses [`crate::MimeIterator::move_to`]'s numbering: `0` denotes a multipart
+    /// message body, while `1` denotes a non-multipart message body or the first
+    /// child of a multipart body. Attached messages continue the path.
+    ///
+    /// Returns `Ok(None)` for a valid but nonexistent path or absent body.
+    /// No header parsing, source I/O, or tree mutation occurs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::MimePathParseError`] for invalid syntax, unlike MimeKit's
+    /// `TryGetEntity`, which conflates invalid and nonexistent paths.
+    pub fn entity_at(
+        &self,
+        path: &str,
+    ) -> Result<Option<&MimeEntity<R>>, crate::MimePathParseError> {
+        let mut iter = self.iter();
+        iter.move_to(path)?;
+        Ok(iter.current())
+    }
+
     /// Creates an empty message with no headers or body, without I/O.
     pub fn new() -> Self {
         Self::from_parts(HeaderList::new(), None)

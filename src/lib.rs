@@ -79,6 +79,9 @@
 //! synthesizing headers; tree writing honors that immediate-parent context.
 //! [`BodyParts`] traverses non-multipart nodes without entering attached messages;
 //! [`Attachments`] filters their dispositions with explicit parse errors.
+//! [`MimeIterator`] visits every entity, including attached-message bodies, with
+//! part paths, ancestry, subtree skipping, and direct depth-proportional navigation.
+//! [`MimeMessage::entity_at`] distinguishes malformed paths from missing parts.
 //! [`MimeMessage::text_body_part`] selects a borrowed body in a [`TextFormat`],
 //! honoring alternative preference, related roots, and mixed-part stopping rules.
 //! Selection performs no stream I/O, decoding, or text-format conversion.
@@ -260,6 +263,7 @@ mod mime_content;
 mod mime_entity;
 mod mime_entity_load;
 mod mime_entity_write;
+mod mime_iterator;
 mod mime_message;
 mod mime_part;
 mod mime_part_write;
@@ -324,6 +328,7 @@ pub use message_priority::{
 pub use mime_content::MimeContent;
 pub use mime_entity::{Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_load::MimeEntityParseOptions;
+pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
 pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};
 pub use mime_part::MimePart;
 pub use mime_part_write::MimePartWriteOptions;

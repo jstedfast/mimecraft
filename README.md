@@ -103,6 +103,8 @@ MimeKit. The crate is not configured for publication.
   checked numeric-prefix parsing, and canonical setters that preserve no-ops.
 - Structured attached-message ownership and iterative writing, with nested
   message traversal and boundary checks across message wrappers.
+- Full-tree MIME iteration with part paths, ancestry, subtree skipping, and
+  direct entity lookup without scanning unrelated siblings.
 - Returned-header containers for text/rfc822-headers and message/global-headers,
   sharing structured-message ownership, loading, and serialization.
 - Partial-message fragments with checked ID/number/total metadata, incremental
@@ -1353,6 +1355,72 @@ themselves are excluded from both body-part and attachment enumeration, but
 their children are visited regardless of the container's disposition.
 Attached-message contents are not inspected; enumerate the contained
 `MimeMessage` explicitly when needed.
+
+### MIME tree navigation
+
+`MimeMessage::iter()` returns a `MimeIterator`, which implements
+`Iterator<Item = &MimeEntity<R>>` and visits every entity in depth-first order.
+Unlike `body_parts()`, it returns multipart containers and enters attached
+messages. Empty containers and message wrappers without bodies are still
+returned. Navigation follows the stored enum variants, not Content-Type
+headers, and never reads or seeks content sources.
+
+After `next()`, query `current()`, `parent()`, `depth()`, `index()`,
+`current_message()`, `ancestor(generation)`, or `path_specifier()`. The root has
+depth zero and no parent. `index()` is the zero-based child index only when the
+parent is a multipart. A wrapper belongs to its outer message; its body belongs
+to the wrapped message. Before iteration or after exhaustion, position queries
+return `None`. An ancestor generation of zero or beyond the depth also returns
+`None`.
+
+Part paths use MimeKit's numbering: multipart children start at `1`, and a
+non-multipart message body is `1`. A multipart message body has no IMAP part
+number; MimeKit's `0` extension identifies it. Thus a root multipart is `0`,
+an attached-message wrapper might be `3`, its multipart body `3.0`, and that
+body's children `3.1` and `3.2`. Ordinary nested multiparts retain their child
+number. Zero cannot precede another component.
+
+```rust
+use mimecraft::{MessagePart, MimeMessage, Multipart, TextPart};
+
+let inner = MimeMessage::with_body(TextPart::new("plain", "hello").unwrap().into());
+let mut mixed = Multipart::new("mixed", "example-boundary").unwrap();
+mixed.children_mut().push(MessagePart::new(inner).into());
+let message = MimeMessage::with_body(mixed.into());
+let mut iter = message.iter();
+let mut paths = Vec::new();
+while iter.next().is_some() {
+    paths.push(iter.path_specifier().unwrap());
+}
+assert_eq!(paths, ["0", "1", "1.1"]);
+assert!(message.entity_at("1.1").unwrap().is_some());
+assert!(message.entity_at("2").unwrap().is_none());
+```
+
+`skip_children()` skips the current subtree on the next advance and reports
+`MimeIteratorPositionError` if there is no current entity. `reset()` restarts
+before the first entity and cancels a pending skip. Ordinary `next()` calls
+remain exhausted after returning `None`.
+
+`move_to(path)` navigates directly without enumerating unrelated siblings.
+It returns `Ok(true)` at the target, with subsequent iteration continuing
+**after** that entity. `Ok(false)` means a valid but nonexistent path and leaves
+the iterator exhausted. Both outcomes cancel pending skips; navigation can
+move backwards or restart an exhausted iterator.
+
+Paths accept only dot-separated ASCII decimal components in `0..=i32::MAX`,
+including leading zeros. Invalid syntax or overflow produces
+`MimePathParseError` with a byte offset, leaving the position and pending skip
+unchanged. `MimeMessage::entity_at(path)` shares these rules and returns
+`Result<Option<&MimeEntity<R>>, MimePathParseError>` rather than conflating
+malformed and missing paths.
+
+Traversal uses a depth-proportional frame stack, without recursion. Path
+formatting allocates only when requested; navigation validates the complete
+path before editing iterator state. The tree remains immutably borrowed, so
+returned references survive iterator advancement but tree edits during
+traversal are not supported. Parsing, body decoding, and mutable cursors are
+separate concerns; ordinary model destruction still recurses.
 
 ### Text-body selection
 
