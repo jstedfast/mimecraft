@@ -4,13 +4,14 @@
 use std::{
     error::Error,
     fmt,
-    io::{Read, Seek},
+    io::{self, Read, Seek},
 };
 
 use crate::{
-    ContentDisposition, ContentEncoding, ContentHeaderParseError, ContentType, Header,
-    HeaderFormatError, HeaderFormatOptions, HeaderList, MimeContent, ParameterParseOptions,
-    UnknownContentEncoding,
+    ContentDisposition, ContentEncoding, ContentHeaderParseError, ContentType, EncodingConstraint,
+    Header, HeaderFormatError, HeaderFormatOptions, HeaderList, MimeContent, ParameterParseOptions,
+    UnknownContentEncoding, encodings::InvalidLineLength, filters::BestEncodingFilter,
+    io::FilteredWriter,
 };
 
 /// A single MIME body stream and its ordered raw headers.
@@ -105,6 +106,43 @@ impl Error for FileNameEditError {
             Self::MissingContentType => None,
             Self::ContentDisposition(error) | Self::ContentType(error) => Some(error),
             Self::HeaderFormat(error) => Some(error),
+        }
+    }
+}
+
+/// A part's content transfer encoding could not be recommended.
+#[derive(Debug)]
+pub enum BestEncodingError {
+    /// Selection requires an explicit Content-Type.
+    MissingContentType,
+    /// The first Content-Type could not be parsed.
+    ContentType(ContentHeaderParseError),
+    /// The requested maximum line length is outside `60..=998`.
+    InvalidLineLength(InvalidLineLength),
+    /// Reading or rewinding the decoded content failed.
+    Io(io::Error),
+}
+
+impl fmt::Display for BestEncodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingContentType => {
+                f.write_str("encoding selection requires a Content-Type header")
+            }
+            Self::ContentType(error) => error.fmt(f),
+            Self::InvalidLineLength(error) => error.fmt(f),
+            Self::Io(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for BestEncodingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MissingContentType => None,
+            Self::ContentType(error) => Some(error),
+            Self::InvalidLineLength(error) => Some(error),
+            Self::Io(error) => Some(error),
         }
     }
 }
@@ -406,6 +444,94 @@ impl<R: Read + Seek> MimePart<R> {
     /// Returns the raw headers and content without copying or repositioning.
     pub fn into_parts(self) -> (HeaderList, MimeContent<R>) {
         (self.headers, self.content)
+    }
+
+    /// Recommends a transfer encoding with a default maximum line length of 78.
+    ///
+    /// For `text/*` and `message/*`, incrementally analyzes decoded content with
+    /// [`BestEncodingFilter`], using the stored [`MimeContent::encoding`], not
+    /// the requested Content-Transfer-Encoding header. This is MimeKit's
+    /// heuristic, not a comparison of every encoder's output size.
+    ///
+    /// Other media types return [`ContentEncoding::Binary`] for
+    /// [`EncodingConstraint::None`], or [`ContentEncoding::Base64`] otherwise,
+    /// without reading or seeking the source, even for an empty body.
+    /// Empty text/message content recommends [`ContentEncoding::SevenBit`].
+    ///
+    /// Does not change headers, stored encoding, or newline metadata, decode
+    /// character sets, or normalize newlines. A successful content scan rewinds
+    /// to zero; it does not restore the original source position. Each call
+    /// starts a fresh scan rather than caching a recommendation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BestEncodingError`] for missing or invalid first Content-Type
+    /// or source I/O failures. Metadata errors occur before source I/O. Failed
+    /// reads are not followed by a cleanup seek; a final rewind may fail after
+    /// all content has been analyzed. No partial recommendation is returned.
+    ///
+    /// ```
+    /// use mimecraft::{ContentEncoding, EncodingConstraint, TextPart};
+    ///
+    /// let mut text = TextPart::new("plain", "From someone\n")?;
+    /// let encoding = text.part_mut().best_encoding(EncodingConstraint::SevenBit)?;
+    /// assert_eq!(encoding, ContentEncoding::QuotedPrintable);
+    /// // Selection is separate from changing the requested wire encoding.
+    /// text.part_mut().set_content_transfer_encoding(encoding);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn best_encoding(
+        &mut self,
+        constraint: EncodingConstraint,
+    ) -> Result<ContentEncoding, BestEncodingError> {
+        self.best_encoding_with_line_length(constraint, 78)
+    }
+
+    /// Recommends an encoding with an explicit maximum content-line length.
+    ///
+    /// The limit excludes CRLF/LF, includes an unterminated final line, and is
+    /// in `60..=998`, matching [`BestEncodingFilter`]. It is not an encoder width
+    /// setting or a transport-preparation operation. A line exactly at the limit
+    /// fits; other heuristic rules, such as NUL or `From ` lines, still apply.
+    ///
+    /// # Errors
+    ///
+    /// Like [`Self::best_encoding`], plus invalid line-limit errors. The limit is
+    /// checked before metadata or I/O, including for non-text/message parts.
+    pub fn best_encoding_with_line_length(
+        &mut self,
+        constraint: EncodingConstraint,
+        max_line_length: usize,
+    ) -> Result<ContentEncoding, BestEncodingError> {
+        let filter = BestEncodingFilter::new();
+        // Validate with the analyzer before source I/O, even on the shortcut
+        // path where MimeKit itself does not consult the line-length limit.
+        filter
+            .best_encoding_with_line_length(constraint, max_line_length)
+            .map_err(BestEncodingError::InvalidLineLength)?;
+        let content_type = self
+            .content_type()
+            .map_err(BestEncodingError::ContentType)?
+            .ok_or(BestEncodingError::MissingContentType)?;
+        if !content_type.is_mime_type("text", "*") && !content_type.is_mime_type("message", "*") {
+            return Ok(if constraint == EncodingConstraint::None {
+                ContentEncoding::Binary
+            } else {
+                ContentEncoding::Base64
+            });
+        }
+
+        // MimeKit measures decoded text/message data through a pass-through
+        // filter. Discard its output without collecting the body in memory.
+        let mut analyzer = FilteredWriter::new(io::sink(), filter);
+        self.content
+            .decode_to(&mut analyzer)
+            .map_err(BestEncodingError::Io)?;
+        analyzer.finish().map_err(BestEncodingError::Io)?;
+        analyzer
+            .filter()
+            .best_encoding_with_line_length(constraint, max_line_length)
+            .map_err(BestEncodingError::InvalidLineLength)
     }
 }
 

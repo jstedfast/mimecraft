@@ -758,6 +758,30 @@ without changing headers or either source's position. `into_parts()` extracts
 both components. Sources may be owned or borrowed; use an empty stream for an
 empty body.
 
+`best_encoding(constraint)` recommends a transfer encoding using MimeKit's
+heuristic and a 78-byte maximum content-line length. For `text/*` and
+`message/*`, it incrementally analyzes decoded content with `BestEncodingFilter`.
+The stored `MimeContent` encoding controls decoding; the requested
+Content-Transfer-Encoding header is not consulted. Charset decoding and newline
+conversion are not performed. Empty text/message content recommends `SevenBit`.
+
+Other media types, including `application/rtf`, recommend `Binary` for
+`EncodingConstraint::None` or `Base64` for either restricted constraint,
+without reading or seeking content, even for empty bodies. This is a media-type
+shortcut, not an exact comparison of every possible encoded output size.
+`best_encoding_with_line_length(constraint, limit)` accepts `60..=998`, excluding
+line terminators. Exact-width lines fit; unterminated final lines still count.
+The limit is checked before metadata or I/O on every path.
+
+`BestEncodingError` distinguishes invalid limits, missing or malformed first
+Content-Type, and source I/O failures. A successful scan rewinds to zero rather
+than restoring the initial position; the media-type shortcut leaves it untouched.
+Read failures do not trigger a cleanup seek, and a final rewind failure is
+reported even after the whole body was analyzed. Selection is never cached.
+No headers, stored encoding, or newline hints change: explicitly call
+`set_content_transfer_encoding` to apply a recommendation. Text parts expose
+selection through `part_mut()`; full transport preparation remains deferred.
+
 Complete entity loading is available through `MimeEntity::load`, and message
 loading through `MimeMessage::load`, including transparent attached messages.
 Encoded message-wrapper interpretation and truncated-entity recovery remain deferred.
@@ -5191,6 +5215,11 @@ with explicit errors replacing the duration getter's implicit null fallback.
 Unstructured formatting is shared with Subject; the numeric parser retains
 the source runtime's trailing-NUL compatibility behavior. Cache-dependent
 setter no-ops are replaced by deterministic canonical header replacement.
+Part-level encoding recommendation follows `MimePart.GetBestEncoding`, reusing
+the existing analyzer through a bounded streaming writer over a discard sink.
+It retains decoded text/message analysis and the non-text media-type shortcut,
+but validates line limits before any source access, including shortcut cases.
+Missing raw Content-Type is an explicit error rather than an implicit default.
 Single-part writing follows `MimePart.WriteContent` and `MimeWriter.cs`, reusing
 the existing transfer codecs, newline filters, and normalized header writer.
 Stored/requested encoding comparisons, binary pass-through, UU wrappers, and

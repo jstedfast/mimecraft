@@ -33,6 +33,9 @@
 //! [`MimePart::file_name`] reads disposition-first decoded filenames, and
 //! [`MimePart::set_file_name`] atomically updates both MIME filename parameters.
 //! [`FileNameEditError`] reports missing metadata, parse, and formatting failures.
+//! [`MimePart::best_encoding`] recommends an encoding using decoded text/message
+//! analysis or MimeKit's non-text shortcut, without changing headers or content.
+//! [`BestEncodingError`] retains metadata, line-limit, and source I/O failures.
 //! Its synchronous writer serializes complete single parts with streaming
 //! transfer conversion, UU wrappers, and [`MimePartWriteOptions`] newline settings.
 //! [`TextPart`] adds strict charset-aware text reads and atomic in-memory text
@@ -346,7 +349,7 @@ pub use mime_entity::{AttachmentEditError, Attachments, BodyParts, LeafParts, Mi
 pub use mime_entity_load::MimeEntityParseOptions;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
 pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};
-pub use mime_part::{FileNameEditError, InvalidContentDuration, MimePart};
+pub use mime_part::{BestEncodingError, FileNameEditError, InvalidContentDuration, MimePart};
 pub use mime_part_write::MimePartWriteOptions;
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};
 pub use mime_version::{MimeVersion, MimeVersionParseError, MimeVersionParseErrorKind};

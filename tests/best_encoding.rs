@@ -1,10 +1,17 @@
 // Includes cases adapted from MimeKit's IO/Filters/FilterTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
+use std::{
+    error::Error,
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
+};
+
 use mimecraft::{
+    BestEncodingError,
     ContentEncoding::{self, Base64, Binary, EightBit, QuotedPrintable, SevenBit},
-    EncodingConstraint,
-    filters::{BestEncodingFilter, MimeFilter},
+    EncodingConstraint, Header, HeaderList, MimeContent, MimePart,
+    filters::{BestEncodingFilter, MimeFilter, encoder_filter},
+    io::FilteredWriter,
 };
 
 const CONSTRAINTS: [EncodingConstraint; 3] = [
@@ -19,6 +26,429 @@ fn decisions(filter: &BestEncodingFilter, width: usize) -> [ContentEncoding; 3] 
             .best_encoding_with_line_length(constraint, width)
             .unwrap()
     })
+}
+
+struct PartSource {
+    cursor: Cursor<Vec<u8>>,
+    chunk: usize,
+    reads: usize,
+    seeks: usize,
+    fail_read: Option<usize>,
+    fail_seek: Option<usize>,
+    interrupt_next: bool,
+}
+
+impl Read for PartSource {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.reads += 1;
+        if self.interrupt_next {
+            self.interrupt_next = false;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        if self.fail_read == Some(self.reads) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "source read failure",
+            ));
+        }
+        let length = output.len().min(self.chunk);
+        self.cursor.read(&mut output[..length])
+    }
+}
+
+impl Seek for PartSource {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.seeks += 1;
+        if self.fail_seek == Some(self.seeks) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "source rewind failure",
+            ));
+        }
+        self.cursor.seek(position)
+    }
+}
+
+fn analysis_part(media_type: &str, input: &[u8], chunk: usize) -> MimePart<PartSource> {
+    let raw = format!("Content-Type: {media_type}\r\nContent-Transfer-Encoding: invalid\r\n");
+    let headers = HeaderList::load(&mut raw.as_bytes()).unwrap();
+    let mut cursor = Cursor::new(input.to_vec());
+    cursor.set_position(3);
+    MimePart::from_parts(
+        headers,
+        MimeContent::new(PartSource {
+            cursor,
+            chunk,
+            reads: 0,
+            seeks: 0,
+            fail_read: None,
+            fail_seek: None,
+            interrupt_next: false,
+        }),
+    )
+}
+
+#[test]
+fn part_text_and_message_recommendations_match_the_content_heuristic() {
+    for media_type in [
+        "text/plain",
+        "TEXT/HTML; charset=unknown",
+        "message/rfc822",
+        "message/x-custom",
+    ] {
+        for input in [
+            b"".as_slice(),
+            b"plain ASCII\r\n",
+            b"\0",
+            b"\xff",
+            b"mostly ascii with \xff",
+            b"From x\r\n",
+            b"From x",
+            b"From \xff\xff\n",
+        ] {
+            for chunk in [1, 2, 4096] {
+                let mut part = analysis_part(media_type, input, chunk);
+                let headers = part.headers().clone();
+                for (constraint, expected) in CONSTRAINTS.into_iter().zip(reference(input, 78)) {
+                    assert_eq!(part.best_encoding(constraint).unwrap(), expected);
+                    assert_eq!(part.headers(), &headers);
+                    assert_eq!(part.content().get_ref().cursor.position(), 0);
+                }
+                assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+                assert_eq!(part.content().get_ref().seeks, 6);
+            }
+        }
+    }
+}
+
+#[test]
+fn part_line_boundaries_count_decoded_bytes_without_newline_conversion() {
+    for width in [60, 78, 998] {
+        for length in [width, width + 1] {
+            for suffix in [b"".as_slice(), b"\n", b"\r\n", b"\r"] {
+                let mut input = vec![b'x'; length];
+                input.extend_from_slice(suffix);
+                for chunk in [1, 4096] {
+                    let mut part = analysis_part("text/plain", &input, chunk);
+                    for (constraint, expected) in
+                        CONSTRAINTS.into_iter().zip(reference(&input, width))
+                    {
+                        assert_eq!(
+                            part.best_encoding_with_line_length(constraint, width)
+                                .unwrap(),
+                            expected
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for high in [16, 17, 18] {
+        let mut input = vec![b'a'; 100];
+        input[5..5 + high].fill(0xff);
+        let mut part = analysis_part("text/plain", &input, 3);
+        for width in [78, 998] {
+            for (constraint, expected) in CONSTRAINTS.into_iter().zip(reference(&input, width)) {
+                assert_eq!(
+                    part.best_encoding_with_line_length(constraint, width)
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn part_nontext_media_use_the_source_free_shortcut_even_for_empty_content() {
+    for media_type in [
+        "application/octet-stream",
+        "application/rtf",
+        "image/png",
+        "multipart/mixed",
+    ] {
+        for input in [b"".as_slice(), b"plain ASCII", b"\0\xff"] {
+            let mut part = analysis_part(media_type, input, 1);
+            let before = part.headers().clone();
+            part.content_mut().get_mut().fail_read = Some(1);
+            part.content_mut().get_mut().fail_seek = Some(1);
+            for constraint in CONSTRAINTS {
+                let expected = if constraint == EncodingConstraint::None {
+                    Binary
+                } else {
+                    Base64
+                };
+                assert_eq!(part.best_encoding(constraint).unwrap(), expected);
+                assert_eq!(
+                    part.best_encoding_with_line_length(constraint, 60).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(part.headers(), &before);
+            assert_eq!(part.content().get_ref().reads, 0);
+            assert_eq!(part.content().get_ref().seeks, 0);
+            assert_eq!(part.content().get_ref().cursor.position(), 3);
+        }
+    }
+}
+
+#[test]
+fn part_selection_decodes_every_stored_encoding_but_ignores_requested_wire_encoding() {
+    for encoding in [
+        ContentEncoding::Unspecified,
+        SevenBit,
+        EightBit,
+        Binary,
+        Base64,
+        QuotedPrintable,
+        ContentEncoding::UuEncode,
+    ] {
+        for input in [
+            b"".as_slice(),
+            b"mostly ascii with \xff\r\n",
+            b"From \0\r\n",
+        ] {
+            let mut encoder = FilteredWriter::new(Vec::new(), encoder_filter(encoding));
+            encoder.write_all(input).unwrap();
+            encoder.finish().unwrap();
+            let (mut stored, _, _) = encoder.into_parts();
+            if encoding == ContentEncoding::UuEncode {
+                let mut wrapped = b"begin 0644 file.txt\r\n".to_vec();
+                wrapped.extend_from_slice(&stored);
+                wrapped.extend_from_slice(b"end\r\n");
+                stored = wrapped;
+            }
+            for chunk in [1, 7, 4096] {
+                let mut part = analysis_part("text/plain", &stored, chunk);
+                let (headers, source) = part.into_parts();
+                part = MimePart::from_parts(
+                    headers,
+                    MimeContent::with_encoding(source.into_inner(), encoding),
+                );
+                part.content_mut()
+                    .set_new_line_format(Some(mimecraft::encodings::NewLineFormat::Mixed));
+                for (constraint, expected) in CONSTRAINTS.into_iter().zip(reference(input, 78)) {
+                    assert_eq!(
+                        part.best_encoding(constraint).unwrap(),
+                        expected,
+                        "{encoding:?}"
+                    );
+                    assert_eq!(part.content().get_ref().cursor.position(), 0);
+                }
+                assert_eq!(part.content().get_ref().cursor.get_ref(), &stored);
+                assert_eq!(part.content().encoding(), encoding);
+                assert_eq!(
+                    part.content().new_line_format(),
+                    Some(mimecraft::encodings::NewLineFormat::Mixed)
+                );
+                assert_eq!(
+                    part.headers()
+                        .get("Content-Transfer-Encoding")
+                        .unwrap()
+                        .raw_value(),
+                    b" invalid\r\n"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn part_analysis_preserves_tolerant_decoding_of_incomplete_payloads() {
+    for (encoding, stored) in [
+        (Base64, b"Q".as_slice()),
+        (QuotedPrintable, b"abc="),
+        (ContentEncoding::UuEncode, b"#0V%T\n"),
+    ] {
+        let original = analysis_part("text/plain", stored, 1);
+        let (headers, content) = original.into_parts();
+        let mut part = MimePart::from_parts(
+            headers,
+            MimeContent::with_encoding(content.into_inner(), encoding),
+        );
+        for constraint in CONSTRAINTS {
+            assert_eq!(part.best_encoding(constraint).unwrap(), SevenBit);
+        }
+    }
+}
+
+#[test]
+fn part_selection_validates_limits_and_first_type_before_source_io() {
+    for media_type in ["text/plain", "image/png", "invalid"] {
+        let mut part = analysis_part(media_type, b"body", 1);
+        let headers = part.headers().clone();
+        for width in [0, 59, 999, usize::MAX] {
+            for constraint in CONSTRAINTS {
+                let error = part
+                    .best_encoding_with_line_length(constraint, width)
+                    .unwrap_err();
+                let BestEncodingError::InvalidLineLength(inner) = &error else {
+                    panic!("{error}");
+                };
+                assert_eq!(inner.requested(), width);
+                assert_eq!(error.source().unwrap().to_string(), error.to_string());
+            }
+        }
+        assert_eq!(part.content().get_ref().reads, 0);
+        assert_eq!(part.content().get_ref().seeks, 0);
+        assert_eq!(part.headers(), &headers);
+    }
+    let mut part = analysis_part("invalid", b"body", 1);
+    part.headers_mut()
+        .add(Header::parse(b"Content-Type: text/plain").unwrap());
+    let expected = part.content_type().unwrap_err();
+    let error = part
+        .best_encoding(EncodingConstraint::SevenBit)
+        .unwrap_err();
+    assert!(matches!(error, BestEncodingError::ContentType(actual) if actual == expected));
+    assert_eq!(error.source().unwrap().to_string(), error.to_string());
+    part.headers_mut().remove_all("Content-Type");
+    let error = part
+        .best_encoding(EncodingConstraint::SevenBit)
+        .unwrap_err();
+    assert!(matches!(error, BestEncodingError::MissingContentType));
+    assert!(error.source().is_none());
+    assert!(!error.to_string().is_empty());
+    assert_eq!(part.content().get_ref().reads, 0);
+    assert_eq!(part.content().get_ref().seeks, 0);
+}
+
+#[test]
+fn part_source_failures_return_errors_not_partial_recommendations_and_retry_starts_over() {
+    for failed_seek in [1, 2] {
+        let mut part = analysis_part("text/plain", b"From x\r\n", 2);
+        let before = part.headers().clone();
+        part.content_mut().get_mut().fail_seek = Some(failed_seek);
+        let error = part
+            .best_encoding(EncodingConstraint::SevenBit)
+            .unwrap_err();
+        let BestEncodingError::Io(inner) = &error else {
+            panic!("{error}");
+        };
+        assert_eq!(inner.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(inner.to_string(), "source rewind failure");
+        assert_eq!(error.source().unwrap().to_string(), error.to_string());
+        let source = part.content().get_ref();
+        assert_eq!(source.seeks, failed_seek);
+        assert_eq!(
+            source.cursor.position(),
+            if failed_seek == 1 { 3 } else { 8 }
+        );
+        if failed_seek == 1 {
+            assert_eq!(source.reads, 0);
+        }
+        assert_eq!(part.headers(), &before);
+        part.content_mut().get_mut().fail_seek = None;
+        assert_eq!(
+            part.best_encoding(EncodingConstraint::SevenBit).unwrap(),
+            QuotedPrintable
+        );
+        assert_eq!(part.content().get_ref().cursor.position(), 0);
+    }
+    let mut part = analysis_part("text/plain", b"From x\r\n", 2);
+    part.content_mut().get_mut().fail_read = Some(2);
+    part.content_mut().get_mut().fail_seek = Some(2);
+    let error = part
+        .best_encoding(EncodingConstraint::SevenBit)
+        .unwrap_err();
+    assert!(
+        matches!(error, BestEncodingError::Io(ref inner) if inner.to_string() == "source read failure")
+    );
+    assert_eq!(part.content().get_ref().seeks, 1);
+    assert_eq!(part.content().get_ref().cursor.position(), 2);
+    part.content_mut().get_mut().fail_read = None;
+    part.content_mut().get_mut().fail_seek = None;
+    part.content_mut().get_mut().interrupt_next = true;
+    assert_eq!(
+        part.best_encoding(EncodingConstraint::SevenBit).unwrap(),
+        QuotedPrintable
+    );
+    assert_eq!(part.content().get_ref().cursor.position(), 0);
+}
+
+#[test]
+fn part_recommendations_are_not_cached_or_automatically_applied() {
+    let mut part = analysis_part("text/plain", b"From x\r\n", 1);
+    let before = part.headers().clone();
+    assert_eq!(
+        part.best_encoding(EncodingConstraint::SevenBit).unwrap(),
+        QuotedPrintable
+    );
+    *part.content_mut().get_mut().cursor.get_mut() = b"plain".to_vec();
+    assert_eq!(
+        part.best_encoding(EncodingConstraint::SevenBit).unwrap(),
+        SevenBit
+    );
+    assert_eq!(part.headers(), &before);
+    part.headers_mut()
+        .replace_all(Header::parse(b"Content-Type: image/png").unwrap())
+        .unwrap();
+    let reads = part.content().get_ref().reads;
+    assert_eq!(
+        part.best_encoding(EncodingConstraint::SevenBit).unwrap(),
+        Base64
+    );
+    assert_eq!(part.content().get_ref().reads, reads);
+}
+
+#[test]
+fn part_analysis_streams_large_borrowed_content_in_bounded_reads() {
+    struct Generated {
+        position: u64,
+        length: u64,
+        seeks: usize,
+        reads: usize,
+        max_request: usize,
+    }
+    impl Read for Generated {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            self.max_request = self.max_request.max(output.len());
+            let count = (self.length - self.position).min(output.len() as u64) as usize;
+            for (index, byte) in output[..count].iter_mut().enumerate() {
+                *byte = if (self.position + index as u64) % 65 == 64 {
+                    b'\n'
+                } else {
+                    b'a'
+                };
+            }
+            self.position += count as u64;
+            Ok(count)
+        }
+    }
+    impl Seek for Generated {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            assert_eq!(position, SeekFrom::Start(0));
+            self.seeks += 1;
+            self.position = 0;
+            Ok(0)
+        }
+    }
+    let mut source = Generated {
+        position: 17,
+        length: 2_000_000,
+        seeks: 0,
+        reads: 0,
+        max_request: 0,
+    };
+    {
+        let headers = HeaderList::load(&mut &b"Content-Type: text/plain\r\n"[..]).unwrap();
+        let mut part = MimePart::from_parts(headers, MimeContent::new(&mut source));
+        assert_eq!(
+            part.best_encoding_with_line_length(EncodingConstraint::SevenBit, 64)
+                .unwrap(),
+            SevenBit
+        );
+        assert_eq!(
+            part.best_encoding_with_line_length(EncodingConstraint::SevenBit, 60)
+                .unwrap(),
+            QuotedPrintable
+        );
+    }
+    assert_eq!(source.position, 0);
+    assert_eq!(source.seeks, 4);
+    assert!(source.reads > 2);
+    assert!(source.max_request <= 8192);
 }
 
 fn analyze(input: &[u8], size: usize) -> BestEncodingFilter {
