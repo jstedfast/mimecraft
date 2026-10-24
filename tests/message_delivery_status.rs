@@ -530,6 +530,41 @@ fn masked_content_source_failures_produce_no_output_or_fallback() {
 }
 
 #[test]
+fn complete_masking_source_failures_leave_only_outer_headers() {
+    for (fail_read, fail_seek) in [(true, None), (false, Some(1)), (false, Some(2))] {
+        let mut source = Source {
+            fail_read,
+            fail_seek,
+            ..Source::new()
+        };
+        let mut delivery =
+            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
+                .unwrap();
+        let mut output = b"prefix".to_vec();
+        io_error(
+            anonymize::write_delivery_status(&mut delivery, &mut output).unwrap_err(),
+            io::ErrorKind::Other,
+        );
+        assert_eq!(
+            output,
+            b"prefixContent-Type: message/delivery-status\r\n\r\n"
+        );
+    }
+    let mut source = Source {
+        interrupt_once: true,
+        ..Source::new()
+    };
+    let mut delivery =
+        MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
+            .unwrap();
+    let mut output = Vec::new();
+    anonymize::write_delivery_status(&mut delivery, &mut output).unwrap();
+    assert_eq!(output, b"Content-Type: message/delivery-status\r\n\r\nReporting-MTA: xxxx xxxxxxxxxxx\r\n\r\nAction: xxxxxx\r\n");
+    assert_eq!(source.bytes.position(), 0);
+    assert_eq!(source.seeks, 2);
+}
+
+#[test]
 fn invalid_options_and_raw_media_edits_fail_before_source_io() {
     let mut source = Source::new();
     {
@@ -561,6 +596,19 @@ fn invalid_options_and_raw_media_edits_fail_before_source_io() {
                 .unwrap_err(),
                 io::ErrorKind::InvalidInput,
             );
+            let mut output = Vec::new();
+            io_error(
+                anonymize::write_delivery_status_with_options(
+                    &mut delivery,
+                    &mut output,
+                    &HeaderOptions::default(),
+                    NewLineFormat::Dos,
+                    &options,
+                )
+                .unwrap_err(),
+                io::ErrorKind::InvalidInput,
+            );
+            assert_eq!(output, b"Content-Type: message/delivery-status\r\n\r\n");
         }
         io_error(
             anonymize::write_delivery_status_content_with_options(
@@ -573,6 +621,19 @@ fn invalid_options_and_raw_media_edits_fail_before_source_io() {
             .unwrap_err(),
             io::ErrorKind::InvalidInput,
         );
+        let mut output = Vec::new();
+        io_error(
+            anonymize::write_delivery_status_with_options(
+                &mut delivery,
+                &mut output,
+                &HeaderOptions::default(),
+                NewLineFormat::Mixed,
+                &DeliveryStatusParseOptions::default(),
+            )
+            .unwrap_err(),
+            io::ErrorKind::InvalidInput,
+        );
+        assert!(output.is_empty());
         delivery
             .part_mut()
             .headers_mut()
@@ -586,6 +647,11 @@ fn invalid_options_and_raw_media_edits_fail_before_source_io() {
             anonymize::write_delivery_status_content(&mut delivery, &mut Vec::new()),
             Err(DeliveryStatusError::NotDeliveryStatus(_))
         ));
+        assert!(matches!(
+            anonymize::write_delivery_status(&mut delivery, &mut output),
+            Err(DeliveryStatusError::NotDeliveryStatus(_))
+        ));
+        assert_eq!(output, b"Content-Type: text/plain\r\n\r\n");
     }
     assert_eq!(source.reads, 0);
     assert_eq!(source.seeks, 0);

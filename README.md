@@ -699,7 +699,23 @@ the documented resource limits.
 Invalid newlines, limits, and media metadata fail before I/O. Source and parse
 errors occur before any destination I/O; unlike MimeKit's fallback, failures do
 not silently switch to byte masking. Destination errors can leave partial
-output; retrying starts over. Full-message/tree masking remains deferred.
+output; retrying starts over.
+
+`anonymize::write_delivery_status(&mut status, output)` and
+`write_disposition_notification(&mut notification, output)` add masked outer
+headers and one separator newline to the corresponding decoded-field path.
+Their `_with_options` variants accept the same header options, newline format,
+and parse limits as the content-only helpers. Preservation applies to both
+outer headers and parsed body fields. Empty reports still include the outer
+header section; missing terminators are not repaired.
+
+These complete-report writers retain MimeKit's headers-before-content order:
+invalid newline formats fail before I/O, but invalid report metadata, zero or
+exceeded parse limits, and source errors can leave the outer header prefix.
+Report fields are only emitted after successful parsing, without an opaque
+masking fallback. Retained transfer-encoding headers may disagree with the
+decoded output; neither metadata nor stored content is rewritten.
+Full-message/tree masking remains deferred.
 
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header

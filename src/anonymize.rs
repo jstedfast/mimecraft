@@ -18,6 +18,8 @@
 //! ordinary part, without interpreting reports or attached messages.
 //! [`write_delivery_status_content`] and [`write_disposition_notification_content`]
 //! instead parse report bodies and mask their decoded header fields.
+//! [`write_delivery_status`] and [`write_disposition_notification`] add masked
+//! outer headers and a separator to those specialized report-content paths.
 //! [`write_bytes`] and [`write_bytes_with_options`] mask raw bytes with newline
 //! conversion, as used for multipart preambles and epilogues in MimeKit.
 //!
@@ -689,6 +691,81 @@ pub fn write_part_content_with_options<R: Read + Seek, W: Write + ?Sized>(
     filtered.finish()
 }
 
+/// Writes a complete masked delivery-status part using default limits and CRLF.
+///
+/// See [`write_delivery_status_with_options`] for framing, decoding, and errors.
+///
+/// # Errors
+///
+/// Propagates report metadata, parse-limit, and source/destination I/O errors.
+pub fn write_delivery_status<R: Read + Seek, W: Write + ?Sized>(
+    status: &mut MessageDeliveryStatus<R>,
+    output: &mut W,
+) -> Result<(), DeliveryStatusError> {
+    write_delivery_status_with_options(
+        status,
+        output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+        &DeliveryStatusParseOptions::default(),
+    )
+}
+
+/// Writes masked outer headers, a separator, and decoded delivery-status groups.
+///
+/// Combines [`write_headers_with_options`] with
+/// [`write_delivery_status_content_with_options`]. The same preservation rules
+/// and newline format apply to outer headers and every parsed group. Supports
+/// both delivery-status subtypes and the one-time Office365 encoded remainder.
+/// Unlike [`write_part`], masks parsed fields rather than opaque encoded bytes.
+///
+/// Adds one separator newline after outer headers, even for an empty body.
+/// Missing header terminators are not repaired. Groups have one newline between
+/// them, without an added trailing blank separator or forced final newline.
+/// Output is decoded field text, not re-encoded to match retained outer or group
+/// transfer-encoding headers. Even inconsistent or unknown outer encoding
+/// values remain unchanged; decoding uses the content's stored encoding.
+///
+/// Headers and content are unchanged; successful decoding rewinds the source
+/// to zero. Parsing buffers decoded data and groups within `parse_options`.
+/// The destination is flushed, not closed or finalized if it is another filter.
+/// This is diagnostic output, not guaranteed valid MIME or safe anonymization.
+///
+/// # Errors
+///
+/// `Mixed` newlines fail before any I/O. Headers and the separator are written
+/// before checking report metadata and parse limits or reading the source.
+/// Those failures leave the header prefix but no report fields. No error falls
+/// back to opaque masking. Destination errors can leave partial output; errors
+/// propagate without rollback, and retrying starts over.
+///
+/// ```
+/// use mimecraft::{Header, MessageDeliveryStatus, anonymize};
+///
+/// let mut status = MessageDeliveryStatus::new();
+/// status.set_status_groups(&[vec![Header::parse(b"Action: failed")?].into()])?;
+/// let mut output = Vec::new();
+/// anonymize::write_delivery_status(&mut status, &mut output)?;
+/// assert_eq!(output,
+///     b"Content-Type: message/delivery-status\r\n\r\nAction: xxxxxx\r\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_delivery_status_with_options<R: Read + Seek, W: Write + ?Sized>(
+    status: &mut MessageDeliveryStatus<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+    parse_options: &DeliveryStatusParseOptions,
+) -> Result<(), DeliveryStatusError> {
+    let newline = header_new_line_bytes(format).map_err(DeliveryStatusError::Io)?;
+    // MimeKit emits the entity's header section before its specialized report
+    // body. Keep the group parser's explicit errors instead of masking a fallback.
+    write_headers_with_options(status.part().headers(), output, options, format)
+        .map_err(DeliveryStatusError::Io)?;
+    output.write_all(newline).map_err(DeliveryStatusError::Io)?;
+    write_delivery_status_content_with_options(status, output, options, format, parse_options)
+}
+
 /// Writes masked delivery-status groups using default limits, rules, and CRLF.
 ///
 /// See [`write_delivery_status_content_with_options`] for decoded-body framing,
@@ -778,6 +855,89 @@ pub fn write_delivery_status_content_with_options<R: Read + Seek, W: Write + ?Si
         output.flush().map_err(DeliveryStatusError::Io)?;
     }
     Ok(())
+}
+
+/// Writes a complete masked disposition notification using default limits and CRLF.
+///
+/// See [`write_disposition_notification_with_options`] for framing and errors.
+///
+/// # Errors
+///
+/// Propagates report metadata, parse-limit, and source/destination I/O errors.
+pub fn write_disposition_notification<R: Read + Seek, W: Write + ?Sized>(
+    notification: &mut MessageDispositionNotification<R>,
+    output: &mut W,
+) -> Result<(), DispositionNotificationError> {
+    write_disposition_notification_with_options(
+        notification,
+        output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+        &DispositionNotificationParseOptions::default(),
+    )
+}
+
+/// Writes masked outer headers, a separator, and decoded notification fields.
+///
+/// Combines [`write_headers_with_options`] with
+/// [`write_disposition_notification_content_with_options`]. Both outer headers
+/// and the first decoded field block use the same preservation and newline
+/// settings. Supports both disposition-notification subtypes. Unlike
+/// [`write_part`], applies field-aware masking inside the report body.
+///
+/// Adds one separator newline after outer headers, even for an empty body or
+/// initial empty field block. Missing record terminators are not repaired and
+/// no trailing blank separator or final newline is added to the fields.
+/// Later blocks are not emitted, but the entire decoded body counts toward
+/// limits. Retained transfer-encoding fields do not cause re-encoding: output
+/// is decoded text and can be inconsistent with its outer metadata.
+///
+/// Headers and content are unchanged; decoding uses stored encoding and rewinds
+/// the source to zero on success. Parsing buffers data within `parse_options`.
+/// The destination is flushed, not closed or finalized if it is another filter.
+/// This is diagnostic output, not guaranteed valid MIME or safe anonymization.
+///
+/// # Errors
+///
+/// `Mixed` newlines fail before any I/O. Report metadata, parse limits, and source
+/// errors are checked after writing outer headers and the separator, but before
+/// any fields are emitted. Failures never fall back to opaque masking. Write
+/// and flush errors may leave partial output; no rollback occurs. Retry starts
+/// over.
+///
+/// ```
+/// use mimecraft::{Header, MessageDispositionNotification, anonymize};
+///
+/// let mut notification = MessageDispositionNotification::new();
+/// notification.set_fields(&vec![Header::parse(b"Disposition: displayed")?].into())?;
+/// let mut output = Vec::new();
+/// anonymize::write_disposition_notification(&mut notification, &mut output)?;
+/// assert_eq!(output,
+///     b"Content-Type: message/disposition-notification\r\n\r\nDisposition: xxxxxxxxx\r\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_disposition_notification_with_options<R: Read + Seek, W: Write + ?Sized>(
+    notification: &mut MessageDispositionNotification<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+    parse_options: &DispositionNotificationParseOptions,
+) -> Result<(), DispositionNotificationError> {
+    let newline = header_new_line_bytes(format).map_err(DispositionNotificationError::Io)?;
+    // Keep outer headers separate from the decoded field block, as in MimeKit:
+    // blanket body masking would hide field names and configured preserved data.
+    write_headers_with_options(notification.part().headers(), output, options, format)
+        .map_err(DispositionNotificationError::Io)?;
+    output
+        .write_all(newline)
+        .map_err(DispositionNotificationError::Io)?;
+    write_disposition_notification_content_with_options(
+        notification,
+        output,
+        options,
+        format,
+        parse_options,
+    )
 }
 
 /// Writes masked disposition-notification fields using default limits and CRLF.

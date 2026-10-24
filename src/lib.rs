@@ -39,6 +39,9 @@
 //! path for complete ordinary parts, without report parsing or tree traversal.
 //! Specialized delivery-status and disposition-notification masking in
 //! [`anonymize`] instead parses decoded report fields with explicit limits.
+//! [`anonymize::write_delivery_status`] and
+//! [`anonymize::write_disposition_notification`] include masked outer headers
+//! and a separator, while their content-only variants omit that section.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

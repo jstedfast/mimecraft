@@ -815,6 +815,13 @@ fn report_masking_decodes_stored_and_office365_encodings_without_reencoding() {
     anonymize::write_delivery_status_content(&mut delivery, &mut output).unwrap();
     assert_eq!(output, b"Action: xxxxxx\r\n");
     assert_eq!(delivery.part().content().get_ref().get_ref(), encoded);
+    output.clear();
+    anonymize::write_delivery_status(&mut delivery, &mut output).unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: message/delivery-status\r\n\r\nAction: xxxxxx\r\n"
+    );
+    assert_eq!(delivery.part().content().get_ref().get_ref(), encoded);
 
     let mut notification = disposition_notification(b"");
     notification
@@ -826,6 +833,13 @@ fn report_masking_decodes_stored_and_office365_encodings_without_reencoding() {
     output.clear();
     anonymize::write_disposition_notification_content(&mut notification, &mut output).unwrap();
     assert_eq!(output, b"Action: xxxxxx\r\n");
+    assert_eq!(notification.part().content().get_ref().get_ref(), encoded);
+    output.clear();
+    anonymize::write_disposition_notification(&mut notification, &mut output).unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: message/disposition-notification\r\n\r\nAction: xxxxxx\r\n"
+    );
     assert_eq!(notification.part().content().get_ref().get_ref(), encoded);
 
     let raw = b"Content-Transfer-Encoding: base64\r\n\r\nQWN0aW9uOiBmYWlsZWQNCg0K";
@@ -848,6 +862,16 @@ fn report_masking_decodes_stored_and_office365_encodings_without_reencoding() {
         output,
         b"Content-Transfer-Encoding: base64\r\n\r\nAction: xxxxxx\r\n"
     );
+    output.clear();
+    anonymize::write_delivery_status_with_options(
+        &mut delivery,
+        &mut output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+        &parse,
+    )
+    .unwrap();
+    assert_eq!(output, b"Content-Type: message/delivery-status\r\n\r\nContent-Transfer-Encoding: base64\r\n\r\nAction: xxxxxx\r\n");
     parse.max_decoded_bytes -= 1;
     let mut untouched = TestWriter::new();
     assert!(matches!(
@@ -857,6 +881,16 @@ fn report_masking_decodes_stored_and_office365_encodings_without_reencoding() {
         Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
     ));
     assert_eq!(untouched.writes + untouched.flushes, 0);
+    assert!(matches!(
+        anonymize::write_delivery_status_with_options(
+            &mut delivery, &mut untouched, &HeaderOptions::default(), NewLineFormat::Dos, &parse,
+        ),
+        Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+    ));
+    assert_eq!(
+        untouched.bytes,
+        b"Content-Type: message/delivery-status\r\n\r\n"
+    );
     assert_eq!(delivery.part().content().get_ref().position(), 0);
 }
 
@@ -997,6 +1031,14 @@ fn report_masking_validates_the_entire_parsed_report_before_destination_io() {
             Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
         ));
         assert_eq!(output.writes + output.flushes, 0);
+        assert!(matches!(
+            anonymize::write_delivery_status_with_options(
+                &mut report, &mut output, &HeaderOptions::default(), NewLineFormat::Unix,
+                &DeliveryStatusParseOptions { max_header_length: limit, ..Default::default() },
+            ),
+            Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(output.bytes, b"Content-Type: message/delivery-status\n\n");
         assert_eq!(report.part().content().get_ref().position(), 0);
     }
     let raw = b"X: a\r\n b\r\n\r\nignored tail";
@@ -1019,6 +1061,16 @@ fn report_masking_validates_the_entire_parsed_report_before_destination_io() {
             Err(DispositionNotificationError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
         ));
         assert_eq!(output.writes + output.flushes, 0);
+        assert!(matches!(
+            anonymize::write_disposition_notification_with_options(
+                &mut report, &mut output, &HeaderOptions::default(), NewLineFormat::Unix, &parse,
+            ),
+            Err(DispositionNotificationError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(
+            output.bytes,
+            b"Content-Type: message/disposition-notification\n\n"
+        );
     }
     let mut report = disposition_notification(raw);
     let mut output = Vec::new();
@@ -1034,6 +1086,269 @@ fn report_masking_validates_the_entire_parsed_report_before_destination_io() {
     )
     .unwrap();
     assert_eq!(output, b"X: x\n x\n");
+    output.clear();
+    anonymize::write_disposition_notification_with_options(
+        &mut report,
+        &mut output,
+        &HeaderOptions::default(),
+        NewLineFormat::Unix,
+        &DispositionNotificationParseOptions {
+            max_decoded_bytes: raw.len(),
+            max_header_length: b"X: a\r\n b\r\n".len(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: message/disposition-notification\n\nX: x\n x\n"
+    );
+}
+
+#[test]
+fn complete_report_masking_leaves_destination_filters_unfinished() {
+    use mimecraft::{filters::Unix2DosFilter, io::FilteredWriter};
+
+    let mut delivery = delivery_status(b"X: a");
+    let mut notification = disposition_notification(b"X: a");
+    let mut delivery_output =
+        FilteredWriter::new(Vec::new(), Unix2DosFilter::with_ensure_new_line(true));
+    let mut notification_output =
+        FilteredWriter::new(Vec::new(), Unix2DosFilter::with_ensure_new_line(true));
+    anonymize::write_delivery_status(&mut delivery, &mut delivery_output).unwrap();
+    anonymize::write_disposition_notification(&mut notification, &mut notification_output).unwrap();
+    for (mut output, subtype) in [
+        (delivery_output, "delivery-status"),
+        (notification_output, "disposition-notification"),
+    ] {
+        let expected = format!("Content-Type: message/{subtype}\r\n\r\nX: x");
+        assert_eq!(output.get_ref(), expected.as_bytes());
+        output.finish().unwrap();
+        assert_eq!(output.get_ref(), format!("{expected}\r\n").as_bytes());
+    }
+}
+
+#[test]
+fn complete_report_masking_shares_outer_and_inner_rules_without_changing_content() {
+    let raw = b"X-Keep: inside\nOriginal-Message-ID: <a@b>\nBad Name: secret\n\nX-Keep: recipient\nStatus: 5.1.1";
+    let first = "X-Keep: inside\nOriginal-Message-ID: <x@x>\nxxx xxxxx xxxxxx\n";
+    let options = HeaderOptions {
+        preserve_headers: vec!["x-KEEP".into(), "Bad Name".into()],
+    };
+    for global in ["", "global-"] {
+        for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+            let mut delivery = delivery_status(raw);
+            let mut notification = disposition_notification(raw);
+            for (part, subtype) in [
+                (delivery.part_mut(), "delivery-status"),
+                (notification.part_mut(), "disposition-notification"),
+            ] {
+                *part.headers_mut() = load(
+                    format!("Content-Type: message/{global}{subtype}\nX-Keep: outside\nX-Private: secret\nContent-Transfer-Encoding: unknown\n").as_bytes(),
+                );
+                part.content_mut().get_mut().set_position(3);
+                part.content_mut()
+                    .set_new_line_format(Some(NewLineFormat::Mixed));
+            }
+            let headers = [
+                delivery.part().headers().clone(),
+                notification.part().headers().clone(),
+            ];
+            let mut delivery_output = Vec::new();
+            let mut notification_output = Vec::new();
+            anonymize::write_delivery_status_with_options(
+                &mut delivery,
+                &mut delivery_output,
+                &options,
+                format,
+                &DeliveryStatusParseOptions::default(),
+            )
+            .unwrap();
+            anonymize::write_disposition_notification_with_options(
+                &mut notification,
+                &mut notification_output,
+                &options,
+                format,
+                &DispositionNotificationParseOptions::default(),
+            )
+            .unwrap();
+            for (output, subtype, body) in [
+                (
+                    delivery_output,
+                    "delivery-status",
+                    format!("{first}\nX-Keep: recipient\nStatus: xxxxx"),
+                ),
+                (
+                    notification_output,
+                    "disposition-notification",
+                    first.to_owned(),
+                ),
+            ] {
+                let expected = format!(
+                    "Content-Type: message/{global}{subtype}\nX-Keep: outside\nX-Private: xxxxxx\nContent-Transfer-Encoding: unknown\n\n{body}"
+                );
+                assert_eq!(
+                    output,
+                    if format == NewLineFormat::Dos {
+                        expected.replace('\n', "\r\n").into_bytes()
+                    } else {
+                        expected.into_bytes()
+                    }
+                );
+            }
+            for (part, before) in [delivery.part(), notification.part()]
+                .into_iter()
+                .zip(headers)
+            {
+                assert_eq!(part.headers(), &before);
+                assert_eq!(part.content().get_ref().get_ref(), raw);
+                assert_eq!(part.content().get_ref().position(), 0);
+                assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+                assert_eq!(part.content().new_line_format(), Some(NewLineFormat::Mixed));
+            }
+        }
+    }
+}
+
+#[test]
+fn complete_report_masking_keeps_empty_and_truncated_framing() {
+    for (raw, body) in [
+        (b"".as_slice(), b"".as_slice()),
+        (b"\r", b""),
+        (b"\r\n", b""),
+        (b"X: a", b"X: x"),
+        (b"X: a\r", b"X: x\r"),
+    ] {
+        for (ending, normalized) in [("", ""), ("\r", "\r"), ("\n", "\r\n")] {
+            let mut delivery = delivery_status(raw);
+            let mut notification = disposition_notification(raw);
+            for part in [delivery.part_mut(), notification.part_mut()] {
+                // Standalone Header::parse would append a missing terminator.
+                let parsed = load(format!("X-Private: secret{ending}").as_bytes());
+                part.headers_mut().add(parsed.as_slice()[0].clone());
+            }
+            let mut delivery_output = TestWriter::new();
+            let mut notification_output = TestWriter::new();
+            anonymize::write_delivery_status(&mut delivery, &mut delivery_output).unwrap();
+            anonymize::write_disposition_notification(&mut notification, &mut notification_output)
+                .unwrap();
+            for (output, subtype) in [
+                (delivery_output, "delivery-status"),
+                (notification_output, "disposition-notification"),
+            ] {
+                let prefix =
+                    format!("Content-Type: message/{subtype}\r\nX-Private: xxxxxx{normalized}\r\n");
+                assert_eq!(output.bytes, [prefix.as_bytes(), body].concat());
+                assert_eq!(output.flushes, 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn complete_report_masking_write_failures_cover_headers_separators_and_body() {
+    let raw = b"X: first\n\nY: second\r";
+    let expected = b"Content-Type: message/delivery-status\r\n\r\nX: xxxxx\r\n\r\nY: xxxxxx\r";
+    for limit in 0..expected.len() {
+        let mut report = delivery_status(raw);
+        report.part_mut().content_mut().get_mut().set_position(3);
+        let mut output = TestWriter::new();
+        output.fail_after = Some(limit);
+        output.interrupt_once = true;
+        assert!(matches!(
+            anonymize::write_delivery_status(&mut report, &mut output),
+            Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(output.bytes, expected[..limit]);
+        assert_eq!(
+            report.part().content().get_ref().position(),
+            if limit < b"Content-Type: message/delivery-status\r\n\r\n".len() {
+                3
+            } else {
+                0
+            }
+        );
+        let mut retry = Vec::new();
+        anonymize::write_delivery_status(&mut report, &mut retry as &mut dyn Write).unwrap();
+        assert_eq!(retry, expected);
+    }
+    let expected = b"Content-Type: message/disposition-notification\r\n\r\nX: xxxxx\r\n";
+    for limit in 0..expected.len() {
+        let mut report = disposition_notification(raw);
+        report.part_mut().content_mut().get_mut().set_position(3);
+        let mut output = TestWriter::new();
+        output.fail_after = Some(limit);
+        output.interrupt_once = true;
+        assert!(matches!(
+            anonymize::write_disposition_notification(&mut report, &mut output),
+            Err(DispositionNotificationError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(output.bytes, expected[..limit]);
+        assert_eq!(
+            report.part().content().get_ref().position(),
+            if limit < b"Content-Type: message/disposition-notification\r\n\r\n".len() {
+                3
+            } else {
+                0
+            }
+        );
+        let mut retry = Vec::new();
+        anonymize::write_disposition_notification(&mut report, &mut retry as &mut dyn Write)
+            .unwrap();
+        assert_eq!(retry, expected);
+    }
+}
+
+#[test]
+fn complete_report_masking_propagates_zero_writes_and_each_flush_failure() {
+    for (zero_write, fail_flush_at, kind) in [
+        (true, None, io::ErrorKind::WriteZero),
+        (false, Some(1), io::ErrorKind::Other),
+        (false, Some(2), io::ErrorKind::Other),
+    ] {
+        let mut delivery = delivery_status(b"X: a");
+        let mut notification = disposition_notification(b"X: a");
+        delivery.part_mut().content_mut().get_mut().set_position(2);
+        notification
+            .part_mut()
+            .content_mut()
+            .get_mut()
+            .set_position(2);
+        let mut delivery_output = TestWriter::new();
+        delivery_output.zero_write = zero_write;
+        delivery_output.fail_flush_at = fail_flush_at;
+        let mut notification_output = TestWriter::new();
+        notification_output.zero_write = zero_write;
+        notification_output.fail_flush_at = fail_flush_at;
+        assert!(matches!(
+            anonymize::write_delivery_status(&mut delivery, &mut delivery_output),
+            Err(DeliveryStatusError::Io(error)) if error.kind() == kind
+        ));
+        assert!(matches!(
+            anonymize::write_disposition_notification(&mut notification, &mut notification_output),
+            Err(DispositionNotificationError::Io(error)) if error.kind() == kind
+        ));
+        for (output, subtype, part) in [
+            (delivery_output, "delivery-status", delivery.part()),
+            (
+                notification_output,
+                "disposition-notification",
+                notification.part(),
+            ),
+        ] {
+            let expected = if zero_write {
+                String::new()
+            } else if fail_flush_at == Some(1) {
+                format!("Content-Type: message/{subtype}\r\n")
+            } else {
+                format!("Content-Type: message/{subtype}\r\n\r\nX: x")
+            };
+            assert_eq!(output.bytes, expected.as_bytes());
+            assert_eq!(
+                part.content().get_ref().position(),
+                if fail_flush_at == Some(2) { 0 } else { 2 }
+            );
+        }
+    }
 }
 
 #[test]

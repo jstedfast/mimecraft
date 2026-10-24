@@ -447,6 +447,51 @@ fn masked_content_source_and_trailing_read_failures_do_not_emit_fields() {
 }
 
 #[test]
+fn complete_masking_source_and_trailing_read_failures_leave_only_outer_headers() {
+    for (fail_after, fail_seek) in [
+        (Some(0), None),
+        (Some(8), None),
+        (None, Some(1)),
+        (None, Some(2)),
+    ] {
+        let mut source = Source {
+            fail_after,
+            fail_seek,
+            ..Source::new()
+        };
+        let mut mdn = MessageDispositionNotification::from_part(part(
+            &mut source,
+            ContentEncoding::Unspecified,
+        ))
+        .unwrap();
+        let mut output = b"prefix".to_vec();
+        io_error(
+            anonymize::write_disposition_notification(&mut mdn, &mut output).unwrap_err(),
+            io::ErrorKind::Other,
+        );
+        assert_eq!(
+            output,
+            b"prefixContent-Type: message/disposition-notification\r\n\r\n"
+        );
+    }
+    let mut source = Source {
+        interrupt_once: true,
+        ..Source::new()
+    };
+    let mut mdn =
+        MessageDispositionNotification::from_part(part(&mut source, ContentEncoding::Unspecified))
+            .unwrap();
+    let mut output = Vec::new();
+    anonymize::write_disposition_notification(&mut mdn, &mut output).unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: message/disposition-notification\r\n\r\nX: x\r\n"
+    );
+    assert_eq!(source.bytes.position(), 0);
+    assert_eq!(source.seeks, 2);
+}
+
+#[test]
 fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
     let mut source = Source::new();
     {
@@ -480,6 +525,22 @@ fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
                 .unwrap_err(),
                 io::ErrorKind::InvalidInput,
             );
+            let mut output = Vec::new();
+            io_error(
+                anonymize::write_disposition_notification_with_options(
+                    &mut mdn,
+                    &mut output,
+                    &HeaderOptions::default(),
+                    NewLineFormat::Dos,
+                    &options,
+                )
+                .unwrap_err(),
+                io::ErrorKind::InvalidInput,
+            );
+            assert_eq!(
+                output,
+                b"Content-Type: message/disposition-notification\r\n\r\n"
+            );
         }
         io_error(
             anonymize::write_disposition_notification_content_with_options(
@@ -492,6 +553,19 @@ fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
             .unwrap_err(),
             io::ErrorKind::InvalidInput,
         );
+        let mut output = Vec::new();
+        io_error(
+            anonymize::write_disposition_notification_with_options(
+                &mut mdn,
+                &mut output,
+                &HeaderOptions::default(),
+                NewLineFormat::Mixed,
+                &DispositionNotificationParseOptions::default(),
+            )
+            .unwrap_err(),
+            io::ErrorKind::InvalidInput,
+        );
+        assert!(output.is_empty());
         mdn.part_mut()
             .headers_mut()
             .replace_all(Header::parse(b"Content-Type: text/plain").unwrap())
@@ -504,6 +578,11 @@ fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
             anonymize::write_disposition_notification_content(&mut mdn, &mut Vec::new()),
             Err(DispositionNotificationError::NotDispositionNotification(_))
         ));
+        assert!(matches!(
+            anonymize::write_disposition_notification(&mut mdn, &mut output),
+            Err(DispositionNotificationError::NotDispositionNotification(_))
+        ));
+        assert_eq!(output, b"Content-Type: text/plain\r\n\r\n");
     }
     assert_eq!(source.reads, 0);
     assert_eq!(source.seeks, 0);
