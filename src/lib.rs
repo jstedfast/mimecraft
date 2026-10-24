@@ -54,6 +54,8 @@
 //! [`MimeMessage`] owns message headers and an optional body tree. Loading
 //! partitions root Content-* headers onto the body, preserving raw records;
 //! writing groups message headers before body headers without generating fields.
+//! [`MimeMessage::write_headers_to`] writes only that header section and separator
+//! with an immutable borrow, without inspecting body metadata or reading sources.
 //! Original header interleaving and automatic transport preparation are deferred.
 //! [`MessageImportance`], [`MessagePriority`], and [`XMessagePriority`] add
 //! independent typed header access with checked parsing and canonical setters.

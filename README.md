@@ -91,6 +91,8 @@ MimeKit. The crate is not configured for publication.
   with raw headers, stored transfer encodings, and input/header/depth limits.
 - Message ownership, buffered loading, and synchronous writing, with separate
   message/body headers, optional bodies, and no generated metadata.
+- Headers-only message serialization, including root-body headers and the
+  separator without reading content or traversing descendants.
 - Typed Date, Resent-Date, and MIME-Version accessors with explicit absence,
   parse errors, and canonical setters backed by current raw headers.
 - Sender and Resent-Sender mailbox accessors with configurable prefix parsing,
@@ -1022,10 +1024,24 @@ message writes one newline. Options fail before I/O; later metadata or I/O
 errors can leave partial output. Sinks are flushed, not closed, and successful
 body copying rewinds sources. Headers and stored bytes are not mutated.
 
+`write_headers_to` and `write_headers_to_with_options` write only that header
+section: message headers, root-body headers, then the blank separator. They take
+`&self` and need no source `Read`/`Seek` bounds. Multipart children, attached
+message contents, preambles, epilogues, and delimiters are never visited or
+written. An attached-message root contributes its wrapper headers only.
+
+Headers-only output uses the same newline conversion and missing-terminator
+repair without decoding or refolding values. It does not validate body metadata,
+so an invalid boundary or transfer encoding does not prevent header output.
+All `MimePartWriteOptions` are validated before destination I/O; valid encoder
+widths and `ensure_new_line` have no additional effect without a body. Write
+and flush failures propagate, potentially after partial output, while source
+positions and raw headers remain unchanged. Retrying restarts at the beginning.
+
 No Date, Message-Id, From, Subject, or MIME-Version is generated. This is not
 transport preparation: **Bcc and Resent-Bcc are written as supplied**.
 Other message-specific typed convenience setters, offset-based header merging,
-and automatic transport preparation remain deferred.
+hidden-header filtering, and automatic transport preparation remain deferred.
 
 ### Message subjects and unstructured headers
 

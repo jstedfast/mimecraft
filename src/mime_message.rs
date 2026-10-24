@@ -151,6 +151,79 @@ impl<R> MimeMessage<R> {
         &mut self.headers
     }
 
+    /// Writes just the message's complete header section using default CRLF options.
+    ///
+    /// Includes root-body headers and the blank header/body separator, but no
+    /// content. See [`Self::write_headers_to_with_options`] for framing and errors.
+    ///
+    /// # Errors
+    ///
+    /// Propagates destination write and flush errors, possibly after partial output.
+    pub fn write_headers_to<W: Write + ?Sized>(&self, output: &mut W) -> io::Result<()> {
+        self.write_headers_to_with_options(output, &MimePartWriteOptions::default())
+    }
+
+    /// Writes message headers, root-body headers, and one blank separator.
+    ///
+    /// This is the headers-only form of [`Self::write_to_with_options`]. Message
+    /// headers precede root-body headers, retaining order within each list, not
+    /// original interleaving. The existing header writer normalizes newlines and
+    /// adds missing record terminators without decoding, refolding, or changing
+    /// stored bytes. An entirely empty message writes one newline.
+    ///
+    /// Does not traverse descendants, inspect multipart boundaries or transfer
+    /// encodings, write preambles/epilogues, or read/seek content sources. An
+    /// attached-message root contributes only its wrapper headers, not headers
+    /// from the enclosed message. Requires neither mutable access nor source I/O
+    /// trait bounds; malformed body metadata does not prevent header output.
+    ///
+    /// No headers are generated, filtered, or repartitioned. In particular,
+    /// **Bcc and Resent-Bcc remain visible** and MIME-Version is not synthesized.
+    /// Raw header output is not transport validation or sanitization.
+    ///
+    /// Validates the same options as full serialization. The newline choice
+    /// applies to headers and the separator; `ensure_new_line` and valid encoder
+    /// line widths have no further effect because no body is written.
+    /// The destination is flushed, never closed; nested encoding sinks still
+    /// require their own finalization.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options return `InvalidInput` before any output or flush. Write
+    /// and flush failures propagate, possibly after partial or complete output.
+    /// Retrying starts from the beginning; source positions are always unchanged.
+    ///
+    /// ```
+    /// use mimecraft::{MimeMessage, TextPart};
+    ///
+    /// let mut message = MimeMessage::with_body(TextPart::new("plain", "body")?.into());
+    /// message.set_subject("hello")?;
+    /// let mut headers = Vec::new();
+    /// message.write_headers_to(&mut headers)?;
+    /// assert!(headers.starts_with(b"Subject: hello\r\n"));
+    /// assert!(headers.ends_with(b"\r\n\r\n"));
+    /// assert!(!headers.ends_with(b"body"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn write_headers_to_with_options<W: Write + ?Sized>(
+        &self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+    ) -> io::Result<()> {
+        let newline = options.validate()?;
+        // Write message headers together with the body's headers, if any, and
+        // the blank line separating them from content. Use our existing grouped
+        // ordering rather than MimeKit's offset-based merge; do not enter bodies.
+        self.headers
+            .write_terminated(output, options.new_line_format)?;
+        if let Some(body) = &self.body {
+            body.headers()
+                .write_terminated(output, options.new_line_format)?;
+        }
+        output.write_all(newline)?;
+        output.flush()
+    }
+
     /// Decodes the first Subject header with default RFC 2047 options.
     ///
     /// Returns `None` only when absent. An empty Subject is present empty text.
