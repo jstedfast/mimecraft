@@ -4,11 +4,18 @@
 use mimecraft::text::{FlowedToHtml, HeaderFooterFormat, TextToHtml, html_encode};
 
 fn fragment(text: &str) -> String {
-    TextToHtml {
+    let converter = TextToHtml {
         output_html_fragment: true,
         ..TextToHtml::new()
-    }
-    .convert(text)
+    };
+    let html = converter.convert(text);
+    assert_eq!(
+        converter.convert_with_tag_callback(text, |context, writer| {
+            context.write_tag(writer, true).unwrap();
+        }),
+        html
+    );
+    html
 }
 
 #[test]

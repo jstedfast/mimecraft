@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use super::{
-    HeaderFooterFormat, HtmlAttributeQuote, html_utils::encode_into, next_line, unquote,
-    url_scanner,
+    HeaderFooterFormat, HtmlAttributeQuote, HtmlTagContext, HtmlWriter, html_utils::encode_into,
+    next_line, text_html_callbacks::TextHtmlCallbacks, unquote, url_scanner,
 };
 
 /// Converts decoded plain text into HTML, with automatic links and quotations.
@@ -39,7 +39,8 @@ use super::{
 /// Source heuristics such as partial-word prefix matches and unrestricted
 /// numeric ports remain. Targets are not canonicalized or checked for trust.
 ///
-/// No MIME modification, charset conversion, stream I/O, or tag callbacks occur.
+/// Optional tag callbacks customize body links, quotations, and line breaks.
+/// No MIME modification, charset conversion, or stream I/O occurs.
 /// This is not an HTML sanitizer: HTML-format headers and footers are trusted
 /// caller-provided markup and are emitted verbatim.
 ///
@@ -77,12 +78,61 @@ impl TextToHtml {
 
     /// Converts a complete Unicode string without changing the converter.
     pub fn convert(&self, text: &str) -> String {
+        self.convert_core(text, None::<fn(&mut HtmlTagContext, &mut HtmlWriter)>)
+    }
+
+    /// Converts text with a callback that writes, replaces, or omits body tags.
+    ///
+    /// Receives `blockquote`, `a`, and `br` contexts. The callback is responsible
+    /// for writing start tags; [`HtmlTagContext::write_tag`] preserves them.
+    /// End tags are automatic unless deleted or an end callback is requested.
+    /// Suppressing a quotation skips all descendant content and callbacks.
+    /// Suppressing a link hides its label, not surrounding text.
+    ///
+    /// Document wrappers, headers, footers, and callback-written markup bypass
+    /// the callback. Custom markup is trusted and is not parsed or sanitized.
+    /// Contexts are retained for callback-visible open quote levels; suppressed
+    /// descendants need no additional contexts. Callback-free conversion keeps
+    /// its constant-space quote counter instead.
+    ///
+    /// ```
+    /// use mimecraft::text::{HtmlTagId, TextToHtml};
+    ///
+    /// let converter = TextToHtml { output_html_fragment: true, ..TextToHtml::new() };
+    /// let html = converter.convert_with_tag_callback("Visit www.example.com", |context, writer| {
+    ///     if context.tag_id() == HtmlTagId::A {
+    ///         context.delete_end_tag = true;
+    ///     } else {
+    ///         context.write_tag(writer, true).unwrap();
+    ///     }
+    /// });
+    /// assert_eq!(html, "Visit www.example.com<br/>");
+    /// ```
+    pub fn convert_with_tag_callback(
+        &self,
+        text: &str,
+        callback: impl FnMut(&mut HtmlTagContext, &mut HtmlWriter),
+    ) -> String {
+        self.convert_core(text, Some(callback))
+    }
+
+    fn convert_core<F: FnMut(&mut HtmlTagContext, &mut HtmlWriter)>(
+        &self,
+        text: &str,
+        callback: Option<F>,
+    ) -> String {
         let mut output = String::new();
         if !self.output_html_fragment {
             output.push_str("<html><body>");
         }
         write_decoration(&mut output, self.header.as_deref(), self.header_format);
-        write_fragment(&mut output, text);
+        if let Some(callback) = callback {
+            let mut renderer = TextHtmlCallbacks::new(output, callback);
+            renderer.write_plain_text(text);
+            output = renderer.finish();
+        } else {
+            write_fragment(&mut output, text);
+        }
         write_decoration(&mut output, self.footer.as_deref(), self.footer_format);
         if !self.output_html_fragment {
             output.push_str("</body></html>");

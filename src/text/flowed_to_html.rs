@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use super::{
-    HeaderFooterFormat, next_line, output_newline,
+    HeaderFooterFormat, HtmlTagContext, HtmlWriter, next_line, output_newline,
+    text_html_callbacks::TextHtmlCallbacks,
     text_to_html::{write_decoration, write_quote_depth, write_text},
     unquote_flowed,
 };
@@ -29,7 +30,8 @@ use crate::encodings::{EncoderOptionsError, NewLineFormat};
 ///
 /// Output defaults to a complete HTML document and CRLF paragraph newlines,
 /// independent of the platform. No MIME modification, charset decoding,
-/// stream I/O, or tag callbacks occur. Each conversion starts fresh.
+/// or stream I/O occurs. Optional tag callbacks customize generated body tags.
+/// Each conversion starts fresh.
 ///
 /// ```
 /// use mimecraft::text::FlowedToHtml;
@@ -95,12 +97,68 @@ impl FlowedToHtml {
 
     /// Converts a complete Unicode string without changing the converter.
     pub fn convert(&self, text: &str) -> String {
+        self.convert_core(text, None::<fn(&mut HtmlTagContext, &mut HtmlWriter)>)
+    }
+
+    /// Converts flowed text with a callback for generated body tags.
+    ///
+    /// Receives `blockquote`, `p`, `a`, and `br` contexts after flowed lines
+    /// have been joined. Writing, end-tag callbacks, quote suppression, and
+    /// decoration bypass follow [`super::TextToHtml::convert_with_tag_callback`].
+    /// A suppressed paragraph hides its contents, including link callbacks.
+    ///
+    /// [`HtmlTagContext::delete_tag`] additionally suppresses the paragraph's
+    /// generated newline, including for an empty `br` paragraph. This flag is
+    /// checked after any end callback. Deleting only the end tag does not omit
+    /// the newline. Custom callback markup is trusted, not sanitized.
+    ///
+    /// ```
+    /// use mimecraft::text::{FlowedToHtml, HtmlTagId};
+    ///
+    /// let mut converter = FlowedToHtml::new();
+    /// converter.output_html_fragment = true;
+    /// let html = converter.convert_with_tag_callback("soft \nbreak", |context, writer| {
+    ///     if context.tag_id() == HtmlTagId::P {
+    ///         if context.is_end_tag() {
+    ///             writer.write_end_tag("div").unwrap();
+    ///         } else {
+    ///             writer.write_start_tag("div").unwrap();
+    ///             context.invoke_callback_for_end_tag = true;
+    ///         }
+    ///     } else {
+    ///         context.write_tag(writer, true).unwrap();
+    ///     }
+    /// });
+    /// assert_eq!(html, "<div>soft break</div>\r\n");
+    /// ```
+    pub fn convert_with_tag_callback(
+        &self,
+        text: &str,
+        callback: impl FnMut(&mut HtmlTagContext, &mut HtmlWriter),
+    ) -> String {
+        self.convert_core(text, Some(callback))
+    }
+
+    fn convert_core<F: FnMut(&mut HtmlTagContext, &mut HtmlWriter)>(
+        &self,
+        text: &str,
+        callback: Option<F>,
+    ) -> String {
         let mut output = String::new();
         if !self.output_html_fragment {
             output.push_str("<html><body>");
         }
         write_decoration(&mut output, self.header.as_deref(), self.header_format);
-        self.write_fragment(&mut output, text);
+        if let Some(callback) = callback {
+            let mut renderer = TextHtmlCallbacks::new(output, callback);
+            let newline = output_newline(self.new_line_format);
+            self.for_each_paragraph(text, |paragraph, depth| {
+                renderer.write_paragraph(paragraph, depth, newline);
+            });
+            output = renderer.finish();
+        } else {
+            self.write_fragment(&mut output, text);
+        }
         write_decoration(&mut output, self.footer.as_deref(), self.footer_format);
         if !self.output_html_fragment {
             output.push_str("</body></html>");
@@ -108,9 +166,16 @@ impl FlowedToHtml {
         output
     }
 
-    fn write_fragment(&self, output: &mut String, mut text: &str) {
+    fn write_fragment(&self, output: &mut String, text: &str) {
         let newline = output_newline(self.new_line_format);
         let mut current_depth = 0;
+        self.for_each_paragraph(text, |paragraph, depth| {
+            write_paragraph(output, paragraph, depth, &mut current_depth, newline);
+        });
+        write_quote_depth(output, &mut current_depth, 0);
+    }
+
+    fn for_each_paragraph(&self, mut text: &str, mut emit: impl FnMut(&str, usize)) {
         let mut paragraph_depth = 0;
         let mut paragraph = String::new();
         while let Some(line) = next_line(&mut text) {
@@ -120,13 +185,7 @@ impl FlowedToHtml {
             } else if depth != paragraph_depth {
                 // RFC 3676: if a folded line changes quote depth, quote-depth
                 // rules win over the soft break and start a new paragraph.
-                write_paragraph(
-                    output,
-                    &paragraph,
-                    paragraph_depth,
-                    &mut current_depth,
-                    newline,
-                );
+                emit(&paragraph, paragraph_depth);
                 paragraph_depth = depth;
                 paragraph.clear();
             }
@@ -134,13 +193,7 @@ impl FlowedToHtml {
             if !unquoted.ends_with(' ') {
                 // The line did not end with a space, so the next line starts
                 // a new paragraph.
-                write_paragraph(
-                    output,
-                    &paragraph,
-                    paragraph_depth,
-                    &mut current_depth,
-                    newline,
-                );
+                emit(&paragraph, paragraph_depth);
                 paragraph_depth = 0;
                 paragraph.clear();
             } else if self.delete_space {
@@ -152,15 +205,8 @@ impl FlowedToHtml {
         // Flush remaining paragraph text, even when the last line was flowed
         // (MimeKit issue #1130). Unlike FlowedToText, HTML still ends the paragraph.
         if !paragraph.is_empty() {
-            write_paragraph(
-                output,
-                &paragraph,
-                paragraph_depth,
-                &mut current_depth,
-                newline,
-            );
+            emit(&paragraph, paragraph_depth);
         }
-        write_quote_depth(output, &mut current_depth, 0);
     }
 }
 

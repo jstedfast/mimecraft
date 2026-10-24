@@ -2173,9 +2173,50 @@ IPvFuture and scoped IPv6 hosts are not recognized. These are source heuristics,
 not full URL/address validation: partial-word matches and unrestricted numeric
 ports are preserved.
 Targets are escaped, not canonicalized, resolved, or checked for trustworthiness.
-Conversion does not change MIME parts or decode charsets. HTML-input conversion,
-custom tag callbacks and streaming adapters remain deferred; `HtmlWriter`
-provides a separate in-memory markup construction API.
+
+`convert_with_tag_callback(text, callback)` passes generated body `blockquote`,
+`a`, and `br` tags to a closure receiving
+`(&mut HtmlTagContext, &mut HtmlWriter)`. The callback must write each start tag
+it wants to keep; nothing is written automatically after it returns.
+
+```rust
+use mimecraft::text::{HtmlTagId, TextToHtml};
+
+let converter = TextToHtml {
+    output_html_fragment: true,
+    ..TextToHtml::new()
+};
+let html = converter.convert_with_tag_callback("Visit www.example.com", |context, writer| {
+    if context.tag_id() == HtmlTagId::A {
+        // Keep the label but omit both link tags.
+        context.delete_end_tag = true;
+    } else {
+        context.write_tag(writer, true).unwrap();
+    }
+});
+assert_eq!(html, "Visit www.example.com<br/>");
+```
+
+The context exposes the original tag identity and read-only attributes,
+including the decoded `href`. Use `write_tag(writer, false)` followed by writer
+attribute methods to replace attributes. End tags are automatic unless
+`invoke_callback_for_end_tag` requests a callback or `delete_end_tag` omits both
+the end tag and its callback. Requested end callbacks retain the original
+attributes and flags, including when quotes close at EOF. Empty `br` elements
+never receive end callbacks. `delete_tag` is bookkeeping only for plain text;
+it does not undo written markup or omit an end tag.
+
+`suppress_inner_content` hides a link's label or all content and descendant
+callbacks inside a quotation, without hiding the element's own end tag.
+The renderer stores one context per callback-visible open quote level through
+the first suppressing quote; hidden descendants require no additional contexts.
+There is no quote-depth cap. Callback-free conversion retains its constant-space
+quote counter and unchanged output.
+
+Wrappers, text/HTML decorations, and callback-written markup bypass callbacks.
+Custom markup is trusted, not parsed, stack-tracked, or sanitized.
+Conversion does not change MIME parts or decode charsets. HTML-input conversion
+and streaming adapters remain deferred.
 
 ### Converting flowed text to HTML
 
@@ -2216,8 +2257,24 @@ paragraph markup newlines, not wrappers, quotation tags, or decorations.
 text decorations are converted as independent **plain-text**, not flowed,
 fragments, while HTML decorations are trusted markup copied verbatim.
 Each fragment closes its own quotes; no separators are inserted between them.
+
+`convert_with_tag_callback(text, callback)` uses the same `HtmlTagContext` and
+`HtmlWriter` contract as plain-text conversion, adding `p` contexts for nonempty
+paragraphs. Links are detected after flowed joining and optional space deletion.
+Suppressing a paragraph also skips its link callbacks; its own end tag is still
+handled normally. Quote suppression and callback-visible context storage follow
+the same rules as `TextToHtml`. Wrappers, decorations, and custom markup bypass
+callbacks.
+
+Unlike plain-text conversion, `delete_tag` suppresses a flowed paragraph's
+generated newline, including for an empty `br` paragraph. It is checked **after**
+any end-tag callback. Deleting only the end tag does not suppress the newline,
+and neither flag removes markup already written by a callback. To rename a
+paragraph, write a replacement start tag and set `invoke_callback_for_end_tag`
+so the callback can write its matching closing tag.
+
 Conversion does not modify MIME parts, decode charsets, sanitize trusted HTML,
-or expose the C# tag callbacks and stream APIs.
+or expose stream APIs.
 
 ### Delivery-status groups
 
@@ -4840,7 +4897,13 @@ classifications used by the scanner; existing IDNA helpers validate A-label
 top-level domains. HTML encoding reuses the existing append helper, and
 plain-text quote-prefix parsing is shared with
 `TextToFlowed`. Document/fragment output and independent text/HTML decorations
-are retained without the C# writer state machine, tag callbacks, or stream APIs.
+are retained without stream APIs. Generated-tag callbacks share `HtmlTagContext`
+and `HtmlWriter` with RTF rendering, with per-conversion Rust closures replacing
+stored C# delegates. A shared renderer handles plain/flowed link callbacks,
+quotation contexts, end-tag decisions, and content suppression. Applicable
+comments and canonical regressions cover deleted quote endings at EOF and
+suppressed nested quotations. Absolute input quote depths let the Rust renderer
+avoid storing contexts for hidden descendants.
 Flowed HTML rendering adapts `Text/FlowedToHtml.cs` and
 `UnitTests/Text/FlowedToHtmlTests.cs`, including applicable inline comments.
 It shares HTML link/decoration/quotation output with `TextToHtml` and

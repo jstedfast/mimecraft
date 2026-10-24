@@ -116,6 +116,8 @@
 //! automatic links, and optional text or trusted-HTML headers and footers.
 //! [`text::FlowedToHtml`] joins flowed lines into HTML paragraphs with the same
 //! links and decorations, preserving quote-depth boundaries and `delsp` behavior.
+//! Both converters accept per-conversion [`text::HtmlTagContext`] callbacks
+//! to customize body tags and suppress link labels, paragraphs, or quotations.
 //! [`io::BoundedStream`] exposes a seekable source range without copying it,
 //! suitable for storing a MIME body's subrange in [`MimeContent`].
 //! [`io::ChainedStream`] joins seekable sources into one logical stream with

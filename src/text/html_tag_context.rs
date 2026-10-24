@@ -15,7 +15,7 @@ use super::{HtmlAttributeCollection, HtmlTagId, HtmlWriter, HtmlWriterError};
 /// attributes through the writer. To rename an element, write a different
 /// start tag and request its end-tag callback to write the matching end tag.
 ///
-/// [`super::RtfToHtml`] retains this context until the generated element closes.
+/// The converter retains this context until the generated element closes.
 /// Its end-tag callback sees the same attributes and flags, with
 /// [`Self::is_end_tag`] set to true. Empty elements do not receive end callbacks.
 /// Callback-written markup is trusted, not parsed, filtered, or stack-tracked.
@@ -53,6 +53,9 @@ pub struct HtmlTagContext {
     /// For RTF rendering this is bookkeeping only: omit the writer call to
     /// omit the start tag, and set [`Self::delete_end_tag`] separately.
     /// Setting this flag never removes markup already written by the callback.
+    /// [`super::TextToHtml`] also treats it as bookkeeping.
+    /// [`super::FlowedToHtml`] uses it to suppress a paragraph's markup newline,
+    /// checking it after any end-tag callback.
     pub delete_tag: bool,
     /// Omits the generated end tag and its callback, even if one was requested.
     ///

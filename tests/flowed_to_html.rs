@@ -10,7 +10,14 @@ fn fragment(text: &str, delete_space: bool) -> String {
     let mut converter = FlowedToHtml::new();
     converter.output_html_fragment = true;
     converter.delete_space = delete_space;
-    converter.convert(text)
+    let html = converter.convert(text);
+    assert_eq!(
+        converter.convert_with_tag_callback(text, |context, writer| {
+            context.write_tag(writer, true).unwrap();
+        }),
+        html
+    );
+    html
 }
 
 #[test]
