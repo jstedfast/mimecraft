@@ -6,7 +6,8 @@ use std::num::NonZeroUsize;
 
 use mimecraft::encodings::NewLineFormat;
 use mimecraft::text::{
-    HeaderFooterFormat, HtmlWriter, RtfIssue, RtfToHtml, RtfToText, RtfViolation as V,
+    HeaderFooterFormat, HtmlAttribute, HtmlAttributeId, HtmlTagId, HtmlWriter, RtfIssue, RtfToHtml,
+    RtfToText, RtfViolation as V,
 };
 
 fn fragment() -> RtfToHtml {
@@ -27,6 +28,15 @@ fn check(input: &[u8], expected: &str) {
         assert_eq!(
             fragment().convert_with_issues(reader, |_| {}).unwrap(),
             expected
+        );
+        let reader = BufReader::with_capacity(capacity, input);
+        assert_eq!(
+            fragment()
+                .convert_with_tag_callback(reader, |context, writer| {
+                    context.write_tag(writer, true).unwrap();
+                })
+                .unwrap(),
+            expected,
         );
     }
 }
@@ -657,6 +667,330 @@ fn placeholder_numbering_is_fresh_even_after_large_documents() {
     }
 }
 
+#[test]
+fn tag_callback_can_unwrap_character_formatting() {
+    let html = fragment()
+        .convert_with_tag_callback(br"{\rtf1{\b bold} plain}".as_slice(), |context, writer| {
+            if context.tag_id() == HtmlTagId::Span {
+                context.delete_tag = true;
+                context.delete_end_tag = true;
+            } else {
+                context.write_tag(writer, true).unwrap();
+            }
+        })
+        .unwrap();
+    assert_eq!(html, "<div>bold plain</div>\r\n");
+}
+
+#[test]
+fn tag_callback_suppression_and_replacement_end_tags_match_mimekit() {
+    let input = br"{\rtf1 a{\b secret}b\par{\i x}\par c}";
+    for capacity in [1, 2, 7, 4096] {
+        let html = fragment()
+            .convert_with_tag_callback(
+                BufReader::with_capacity(capacity, input.as_slice()),
+                |context, writer| {
+                    if context.tag_id() == HtmlTagId::Span
+                        && context
+                            .attributes()
+                            .get_by_id(HtmlAttributeId::Style)
+                            .and_then(HtmlAttribute::value)
+                            .is_some_and(|css| css.contains("bold"))
+                    {
+                        context.delete_tag = true;
+                        context.delete_end_tag = true;
+                        context.suppress_inner_content = true;
+                    } else if context.tag_id() == HtmlTagId::Div {
+                        if context.is_end_tag() {
+                            writer.write_end_tag("p").unwrap();
+                        } else {
+                            writer.write_start_tag("p").unwrap();
+                            context.invoke_callback_for_end_tag = true;
+                        }
+                    } else {
+                        context.write_tag(writer, true).unwrap();
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            html,
+            concat!(
+                "<p>ab</p>\r\n",
+                "<p><span style=\"font-style: italic;\">x</span></p>\r\n",
+                "<p>c</p>\r\n",
+            )
+        );
+    }
+}
+
+#[test]
+fn all_generated_tags_are_exposed_and_empty_elements_never_close() {
+    let input = br#"{\rtf1\intbl{\field{\*\fldinst HYPERLINK "https://e/"}{\fldrslt{\b x}}}\line\cell y\cell\row\pard z}"#;
+    let mut events = Vec::new();
+    let html = fragment()
+        .convert_with_tag_callback(input.as_slice(), |context, writer| {
+            assert_eq!(context.tag_id(), HtmlTagId::from_name(context.tag_name()));
+            assert_eq!(
+                context.is_empty_element(),
+                context.tag_id() == HtmlTagId::Br
+            );
+            if context.is_end_tag() {
+                assert!(context.invoke_callback_for_end_tag);
+                events.push(format!("/{}", context.tag_name()));
+            } else {
+                events.push(context.tag_name().to_owned());
+            }
+            context.invoke_callback_for_end_tag = true;
+            context.write_tag(writer, true).unwrap();
+        })
+        .unwrap();
+    assert_eq!(html, fragment().convert(input.as_slice()).unwrap());
+    assert_eq!(
+        events,
+        [
+            "table", "tr", "td", "div", "a", "span", "/span", "/a", "br", "/div", "/td", "td",
+            "div", "/div", "/td", "/tr", "/table", "div", "/div",
+        ]
+    );
+}
+
+#[test]
+fn callback_can_select_attributes_and_end_context_keeps_original_attributes() {
+    let input =
+        br#"{\rtf1{\field{\*\fldinst HYPERLINK "https://example.com/?a=1&b=2"}{\fldrslt x}}}"#;
+    let mut calls = 0;
+    let html = fragment()
+        .convert_with_tag_callback(input.as_slice(), |context, writer| {
+            if context.tag_id() != HtmlTagId::A {
+                context.write_tag(writer, true).unwrap();
+                return;
+            }
+            calls += 1;
+            let attribute = context.attributes().get("href").unwrap();
+            assert_eq!(attribute.value(), Some("https://example.com/?a=1&b=2"));
+            if context.is_end_tag() {
+                // Original attributes remain available, but writing the end tag
+                // must not serialize them or reproduce callback-added attributes.
+                assert!(context.invoke_callback_for_end_tag);
+                context.write_tag(writer, true).unwrap();
+            } else {
+                context.write_tag(writer, false).unwrap();
+                writer.write_html_attribute(attribute).unwrap();
+                writer.write_attribute("title", "<&\"\u{e9}").unwrap();
+                writer
+                    .write_html_attribute(&HtmlAttribute::new("data-none", None).unwrap())
+                    .unwrap();
+                writer
+                    .write_html_attribute(
+                        &HtmlAttribute::new("data-empty", Some(String::new())).unwrap(),
+                    )
+                    .unwrap();
+                context.invoke_callback_for_end_tag = true;
+            }
+        })
+        .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(
+        html,
+        concat!(
+            "<div><a href=\"https://example.com/?a=1&amp;b=2\"",
+            " title=\"&lt;&amp;&quot;&#233;\" data-none data-empty=\"\">x</a></div>\r\n",
+        )
+    );
+}
+
+#[test]
+fn tag_omission_and_end_tag_deletion_are_independent() {
+    for (write_start, delete_end, expected) in [
+        (false, false, "x</div>\r\n"),
+        (false, true, "x"),
+        (true, false, "<div>x</div>\r\n"),
+        (true, true, "<div>x"),
+    ] {
+        let mut end_calls = 0;
+        let html = fragment()
+            .convert_with_tag_callback(br"{\rtf1 x}".as_slice(), |context, writer| {
+                if context.is_end_tag() {
+                    end_calls += 1;
+                    context.write_tag(writer, true).unwrap();
+                    return;
+                }
+                context.delete_tag = true;
+                context.delete_end_tag = delete_end;
+                context.invoke_callback_for_end_tag = true;
+                if write_start {
+                    context.write_tag(writer, true).unwrap();
+                }
+            })
+            .unwrap();
+        assert_eq!(html, expected);
+        assert_eq!(end_calls, usize::from(!delete_end));
+    }
+}
+
+#[test]
+fn omitted_end_callback_output_still_has_the_configured_block_separator() {
+    let mut converter = RtfToHtml::with_new_line_format(NewLineFormat::Unix).unwrap();
+    converter.output_html_fragment = true;
+    let html = converter
+        .convert_with_tag_callback(br"{\rtf1 x}".as_slice(), |context, writer| {
+            if !context.is_end_tag() {
+                context.write_tag(writer, true).unwrap();
+                context.invoke_callback_for_end_tag = true;
+            }
+        })
+        .unwrap();
+    assert_eq!(html, "<div>x\n");
+}
+
+#[test]
+fn removing_a_line_break_does_not_suppress_following_content() {
+    let mut breaks = 0;
+    let html = fragment()
+        .convert_with_tag_callback(
+            br"{\rtf1 a\line b\par\par c}".as_slice(),
+            |context, writer| {
+                if context.tag_id() == HtmlTagId::Br {
+                    breaks += 1;
+                    context.delete_tag = true;
+                    context.delete_end_tag = true;
+                    context.invoke_callback_for_end_tag = true;
+                    context.suppress_inner_content = true;
+                } else {
+                    context.write_tag(writer, true).unwrap();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(breaks, 2);
+    assert_eq!(html, "<div>ab</div>\r\n<div></div>\r\n<div>c</div>\r\n");
+}
+
+#[test]
+fn suppression_skips_descendant_callbacks_but_not_own_end_or_diagnostics() {
+    let input = br"{\rtf1\f99{\b secret\line\objattph\'20}{\i more}}";
+    let mut issues = Vec::new();
+    let mut events = Vec::new();
+    let html = fragment()
+        .convert_with_all_callbacks(
+            input.as_slice(),
+            |issue| issues.push(issue),
+            |context, writer| {
+                assert_eq!(context.tag_id(), HtmlTagId::Div);
+                events.push(context.is_end_tag());
+                if context.is_end_tag() {
+                    assert!(context.suppress_inner_content);
+                } else {
+                    context.suppress_inner_content = true;
+                    context.invoke_callback_for_end_tag = true;
+                }
+                context.write_tag(writer, true).unwrap();
+            },
+            |_, _| panic!("suppressed placeholder"),
+        )
+        .unwrap();
+    assert_eq!(html, "<div></div>\r\n");
+    assert_eq!(events, [false, true]);
+    assert_eq!(issues, diagnosed(&fragment(), input).1);
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].violation, V::UndefinedFont);
+}
+
+#[test]
+fn placeholder_indices_include_suppressed_content_and_markup_bypasses_tags() {
+    let input = br"{\rtf1 A\objattph\'20{\b\objattph\'20}\objattph\'20B}";
+    let converter = fragment();
+    for _ in 0..2 {
+        let mut tags = Vec::new();
+        let mut indices = Vec::new();
+        let html = converter
+            .convert_with_all_callbacks(
+                input.as_slice(),
+                |_| {},
+                |context, writer| {
+                    tags.push(context.tag_id());
+                    if context.tag_id() == HtmlTagId::Span {
+                        context.suppress_inner_content = true;
+                    }
+                    context.write_tag(writer, true).unwrap();
+                },
+                |index, writer| {
+                    indices.push(index);
+                    writer.write_empty_element_tag("img").unwrap();
+                    writer
+                        .write_attribute("src", &format!("cid:{index}"))
+                        .unwrap();
+                },
+            )
+            .unwrap();
+        assert_eq!(indices, [0, 2]);
+        assert_eq!(tags, [HtmlTagId::Div, HtmlTagId::Span]);
+        assert_eq!(
+            html,
+            concat!(
+                "<div>A<img src=\"cid:0\"/><span style=\"font-weight: bold;\"></span>",
+                "<img src=\"cid:2\"/>B</div>\r\n",
+            )
+        );
+    }
+}
+
+#[test]
+fn document_wrappers_and_decorations_bypass_tag_callbacks() {
+    let mut converter = RtfToHtml::new();
+    converter.header = Some("> header".into());
+    converter.footer = Some("<footer>raw</footer>".into());
+    converter.footer_format = HeaderFooterFormat::Html;
+    let mut calls = 0;
+    let html = converter
+        .convert_with_tag_callback(br"{\rtf1{\b secret}\line text}".as_slice(), |context, _| {
+            calls += 1;
+            assert_eq!(context.tag_id(), HtmlTagId::Div);
+            context.delete_end_tag = true;
+            context.suppress_inner_content = true;
+        })
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(
+        html,
+        "<html><body><blockquote>header<br/></blockquote><footer>raw</footer></body></html>"
+    );
+}
+
+#[test]
+fn table_suppression_ends_before_following_ordinary_paragraph() {
+    let input = br"{\rtf1\intbl a\cell{\b b}\cell\row\pard visible}";
+    let mut tags = Vec::new();
+    let html = fragment()
+        .convert_with_tag_callback(input.as_slice(), |context, writer| {
+            tags.push(context.tag_id());
+            if context.tag_id() == HtmlTagId::Table {
+                context.suppress_inner_content = true;
+                context.delete_end_tag = true;
+            } else {
+                context.write_tag(writer, true).unwrap();
+            }
+        })
+        .unwrap();
+    assert_eq!(tags, [HtmlTagId::Table, HtmlTagId::Div]);
+    assert_eq!(html, "<div>visible</div>\r\n");
+}
+
+#[test]
+fn no_tag_callbacks_for_empty_or_hidden_input() {
+    for input in [b"".as_slice(), br"{\rtf1}", br"{\rtf1{\v hidden\line}}"] {
+        assert_eq!(
+            fragment()
+                .convert_with_tag_callback(input, |_, _| {
+                    panic!("no generated body tags");
+                })
+                .unwrap(),
+            ""
+        );
+    }
+}
+
 struct FailingReader<'a> {
     input: &'a [u8],
     remaining: usize,
@@ -713,4 +1047,32 @@ fn io_failures_never_return_partial_html_and_callback_effects_are_not_undone() {
     assert_eq!(placeholders, [0]);
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].violation, V::UndefinedFont);
+}
+
+#[test]
+fn io_failure_does_not_finalize_open_callback_contexts() {
+    let input = br"{\rtf1 x\par y}";
+    let mut events = Vec::new();
+    let error = fragment()
+        .convert_with_tag_callback(
+            FailingReader {
+                input,
+                remaining: input.len(),
+            },
+            |context, writer| {
+                events.push((context.tag_id(), context.is_end_tag()));
+                context.invoke_callback_for_end_tag = true;
+                context.write_tag(writer, true).unwrap();
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(
+        events,
+        [
+            (HtmlTagId::Div, false),
+            (HtmlTagId::Div, true),
+            (HtmlTagId::Div, false),
+        ]
+    );
 }

@@ -69,7 +69,8 @@ MimeKit. The crate is not configured for publication.
   decoding, hidden-text/destination suppression, tables, attachment-placeholder
   callbacks, and combined capped diagnostics.
 - RTF-to-HTML rendering with character styles, paragraph alignment, colors,
-  tables, bounded hyperlink fields, and text or trusted-HTML decorations.
+  tables, bounded hyperlink fields, text or trusted-HTML decorations, and
+  generated-tag callbacks with optional content suppression.
 - Delivery-status parts with bounded raw header-group parsing, encoded-remainder
   compatibility, and atomic edits that preserve outer metadata.
 - Disposition-notification parts with bounded raw field access, global-subtype
@@ -2007,6 +2008,49 @@ LF, while `Mixed` is rejected. Optional `header` and `footer` use
 Only visible placeholders count; their immediately following literal or escaped
 space is consumed. Without a callback placeholders produce no markup.
 
+`convert_with_tag_callback(reader, callback)` customizes generated body tags.
+The callback receives `(&mut HtmlTagContext, &mut HtmlWriter)` for `div`, `span`,
+`a`, `br`, `table`, `tr`, and `td`. It is responsible for writing each start
+tag: call `context.write_tag(writer, true)` to preserve it, pass `false` and
+write replacement attributes yourself, write a replacement tag, or write nothing.
+Source names and attributes remain read-only.
+
+```rust
+use mimecraft::text::{HtmlTagId, RtfToHtml};
+
+let mut converter = RtfToHtml::new();
+converter.output_html_fragment = true;
+let html = converter.convert_with_tag_callback(
+    &b"{\\rtf1 {\\b bold} plain}"[..],
+    |context, writer| {
+        if context.tag_id() == HtmlTagId::Span {
+            context.delete_tag = true;
+            context.delete_end_tag = true;
+        } else {
+            context.write_tag(writer, true).unwrap();
+        }
+    },
+)?;
+assert_eq!(html, "<div>bold plain</div>\r\n");
+# Ok::<(), std::io::Error>(())
+```
+
+End tags are automatic unless `invoke_callback_for_end_tag` requests a callback
+or `delete_end_tag` omits both the tag and its callback. End callbacks retain the
+start context's attributes and flags. To replace a tag name, write the new start
+tag and request an end callback to write the matching closing tag. Empty `br`
+elements never receive end callbacks. `delete_tag` records the callback's
+decision but does not undo writes or imply `delete_end_tag`.
+
+`suppress_inner_content` hides an element's text, descendant tags, and descendant
+tag/placeholder callbacks, but not the element's own end tag. Interpretation
+and diagnostics continue, and suppressed placeholder indices still advance.
+`convert_with_all_callbacks(reader, report, tag_callback, placeholder)` combines
+all three hooks. The existing `convert_with_callbacks` signature is unchanged.
+Document wrappers, headers, footers, and callback-written markup bypass tag
+callbacks. Generated contexts remain bounded to six open elements regardless
+of callback decisions; custom markup is neither tracked nor validated.
+
 The nonzero `max_group_depth`, `max_font_table_entries`, and
 `max_color_table_entries` limits each default to 4096. Automatic color entries
 count toward the color limit. Folded saved states compare hyperlink identity in
@@ -2029,8 +2073,8 @@ effects are not rolled back.
 
 This is **RTF rendering, not encapsulated-HTML extraction**: `\fromhtml` does not
 switch modes, `\htmltag` groups are skipped, and `\htmlrtf` content is rendered.
-Encapsulated-HTML extraction, HTML tokenization/filtering, HTML tag callbacks,
-and streaming-output conversion remain deferred. This is not a sanitizer:
+Encapsulated-HTML extraction, HTML tokenization/filtering, and streaming-output
+conversion remain deferred. This is not a sanitizer:
 HTML decorations and callback markup are trusted, and the hyperlink scheme
 allowlist does not validate addresses or make targets trustworthy.
 
@@ -4750,7 +4794,13 @@ bounds, empty paragraphs, whitespace, table recovery, field truncation, and link
 nesting. Reference-counted targets replace object identity without comparing
 long strings during state folding; the field cap uses UTF-8 bytes instead of
 UTF-16 units. Existing `HtmlWriter` and decoration helpers replace the C# writer
-plumbing. Encapsulated-HTML extraction and HTML tag callbacks are not ported.
+plumbing. `HtmlTagContext` and generated-tag callback handling adapt
+`Text/HtmlTagContext.cs`, `Text/HtmlTagCallback.cs`, and the rendering callbacks
+in `Text/RtfToHtml.cs`. Closures are supplied per conversion rather than stored
+in converter options. Read-only source attributes, explicit end-tag opt-in,
+suppression after popping a context, and placeholder numbering follow the source.
+Comments explain why suppressed contexts stay tracked and why custom markup
+does not affect generated nesting. Encapsulated-HTML extraction is not ported.
 RTF hyperlink-field parsing ports `RtfInterpreter.ParseHyperlink` and its
 canonical fixtures in `UnitTests/Text/RtfInterpreterTests.cs`. Borrowed UTF-8
 slices replace `StringBuilder` and substring allocations. The switch/argument

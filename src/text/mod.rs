@@ -17,9 +17,12 @@
 //! decoding, destination suppression, layout, and optional diagnostics.
 //! RTF-to-HTML rendering shares that interpreter and adds character formatting,
 //! paragraph alignment, colors, tables, and bounded hyperlink-field collection.
+//! Tag callbacks can customize generated RTF body tags, replace attributes,
+//! request end-tag callbacks, and suppress inner content.
 //! Decoded RTF hyperlink-field instructions can be parsed without allocating.
-//! HTML tokenization, HTML-input conversion, encapsulated-HTML extraction, HTML
-//! tag callbacks, and streaming-output converters are deferred.
+//! HTML tokenization, HTML-input conversion, encapsulated-HTML extraction, and
+//! streaming-output converters are deferred. Plain/flowed HTML converters do
+//! not yet expose tag callbacks.
 
 mod flowed_to_html;
 mod flowed_to_text;
@@ -29,6 +32,7 @@ mod html_attribute_collection;
 mod html_entities;
 mod html_entity_decoder;
 mod html_ids;
+mod html_tag_context;
 mod html_token;
 mod html_utils;
 mod html_writer;
@@ -59,6 +63,7 @@ pub use html_entity_decoder::{
     html_decode_with_options,
 };
 pub use html_ids::{HtmlAttributeId, HtmlTagId};
+pub use html_tag_context::HtmlTagContext;
 pub use html_token::{
     HtmlCommentToken, HtmlDataToken, HtmlDocTypeError, HtmlDocTypeToken, HtmlTagToken, HtmlToken,
     HtmlTokenKind,

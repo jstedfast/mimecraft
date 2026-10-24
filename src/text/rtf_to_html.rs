@@ -11,7 +11,10 @@ use super::rtf_interpreter::{
     ITALIC, InterpreterOptions, STRIKE, UNDERLINE, VerticalAlignment, interpret,
 };
 use super::text_to_html::write_decoration;
-use super::{HeaderFooterFormat, HtmlWriter, RtfIssue, output_newline};
+use super::{
+    HeaderFooterFormat, HtmlAttribute, HtmlAttributeId, HtmlTagContext, HtmlTagId, HtmlWriter,
+    RtfIssue, output_newline,
+};
 use crate::encodings::{EncoderOptionsError, NewLineFormat};
 
 /// Renders original RTF bytes as an HTML document or body fragment.
@@ -24,8 +27,8 @@ use crate::encodings::{EncoderOptionsError, NewLineFormat};
 ///
 /// This is the RTF-rendering path, not an encapsulated-HTML extractor:
 /// `\fromhtml` does not switch modes, `\htmltag` groups are skipped, and
-/// `\htmlrtf` content is rendered. HTML tag callbacks and extraction/filtering
-/// of encapsulated HTML are not implemented.
+/// `\htmlrtf` content is rendered. Extraction/filtering of encapsulated HTML
+/// is not implemented. Optional tag callbacks customize generated body tags.
 ///
 /// Input must contain original bytes, not re-encoded Unicode RTF. Code-page
 /// decoding, resource recovery, and source-error behavior match [`super::RtfToText`].
@@ -133,6 +136,7 @@ impl RtfToHtml {
             reader,
             None::<fn(RtfIssue)>,
             None::<fn(usize, &mut HtmlWriter)>,
+            None::<fn(&mut HtmlTagContext, &mut HtmlWriter)>,
         )
     }
 
@@ -153,7 +157,12 @@ impl RtfToHtml {
         reader: R,
         report: impl FnMut(RtfIssue),
     ) -> io::Result<String> {
-        self.convert_core(reader, Some(report), None::<fn(usize, &mut HtmlWriter)>)
+        self.convert_core(
+            reader,
+            Some(report),
+            None::<fn(usize, &mut HtmlWriter)>,
+            None::<fn(&mut HtmlTagContext, &mut HtmlWriter)>,
+        )
     }
 
     /// Converts bytes with diagnostics and attachment-placeholder rendering.
@@ -173,14 +182,73 @@ impl RtfToHtml {
         report: impl FnMut(RtfIssue),
         placeholder: impl FnMut(usize, &mut HtmlWriter),
     ) -> io::Result<String> {
-        self.convert_core(reader, Some(report), Some(placeholder))
+        self.convert_core(
+            reader,
+            Some(report),
+            Some(placeholder),
+            None::<fn(&mut HtmlTagContext, &mut HtmlWriter)>,
+        )
     }
 
-    fn convert_core<R: BufRead, F: FnMut(RtfIssue), G: FnMut(usize, &mut HtmlWriter)>(
+    /// Converts bytes with a callback that writes, replaces, or omits body tags.
+    ///
+    /// Invoked for generated `div`, `span`, `a`, `br`, `table`, `tr`, and `td`
+    /// tags. Call [`HtmlTagContext::write_tag`] to preserve a tag and its
+    /// attributes. End tags are written automatically unless the context
+    /// requests an end callback or deletes the end tag. Suppressed descendants
+    /// produce neither markup nor callbacks.
+    ///
+    /// Document wrappers, headers, and footers bypass the callback. Custom
+    /// markup is trusted and is not recursively passed through the callback.
+    /// Diagnostic and placeholder callbacks are absent in this overload.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source I/O errors; callback side effects are not rolled back.
+    pub fn convert_with_tag_callback<R: BufRead>(
+        &self,
+        reader: R,
+        tag_callback: impl FnMut(&mut HtmlTagContext, &mut HtmlWriter),
+    ) -> io::Result<String> {
+        self.convert_core(
+            reader,
+            None::<fn(RtfIssue)>,
+            None::<fn(usize, &mut HtmlWriter)>,
+            Some(tag_callback),
+        )
+    }
+
+    /// Converts bytes with diagnostics, tag customization, and placeholders.
+    ///
+    /// Tag callbacks follow [`Self::convert_with_tag_callback`]. Placeholder
+    /// markup bypasses tag callbacks, and placeholders inside suppressed
+    /// content skip the placeholder callback without skipping their indices.
+    /// Diagnostic reporting is unaffected by tag deletion or suppression.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source I/O errors; callback side effects are not rolled back.
+    pub fn convert_with_all_callbacks<R: BufRead>(
+        &self,
+        reader: R,
+        report: impl FnMut(RtfIssue),
+        tag_callback: impl FnMut(&mut HtmlTagContext, &mut HtmlWriter),
+        placeholder: impl FnMut(usize, &mut HtmlWriter),
+    ) -> io::Result<String> {
+        self.convert_core(reader, Some(report), Some(placeholder), Some(tag_callback))
+    }
+
+    fn convert_core<
+        R: BufRead,
+        F: FnMut(RtfIssue),
+        G: FnMut(usize, &mut HtmlWriter),
+        T: FnMut(&mut HtmlTagContext, &mut HtmlWriter),
+    >(
         &self,
         reader: R,
         report: Option<F>,
         placeholder: Option<G>,
+        tag_callback: Option<T>,
     ) -> io::Result<String> {
         let options = InterpreterOptions {
             max_group_depth: self.max_group_depth,
@@ -189,7 +257,7 @@ impl RtfToHtml {
             collect_hyperlinks: true,
             max_issues_per_violation: self.max_issues_per_violation,
         };
-        let handler = HtmlHandler::new(self, placeholder);
+        let handler = HtmlHandler::new(self, placeholder, tag_callback);
         Ok(interpret(reader, options, report, handler)?.finish(self))
     }
 }
@@ -295,33 +363,36 @@ enum Tag {
 }
 
 impl Tag {
-    fn name(self) -> &'static str {
+    fn id(self) -> HtmlTagId {
         match self {
-            Self::Table => "table",
-            Self::Row => "tr",
-            Self::Cell => "td",
-            Self::Block => "div",
-            Self::Link => "a",
-            Self::Span => "span",
+            Self::Table => HtmlTagId::Table,
+            Self::Row => HtmlTagId::Tr,
+            Self::Cell => HtmlTagId::Td,
+            Self::Block => HtmlTagId::Div,
+            Self::Link => HtmlTagId::A,
+            Self::Span => HtmlTagId::Span,
         }
     }
 }
 
 const MAX_CSS_CACHE_ENTRIES: usize = 256;
 
-struct HtmlHandler<G> {
+struct HtmlHandler<G, T> {
     writer: HtmlWriter,
-    stack: Vec<Tag>,
+    stack: Vec<HtmlTagContext>,
     css_cache: HashMap<SpanFormat, String>,
     span_format: Option<SpanFormat>,
     href: Option<Hyperlink>,
     last_was_space: bool,
     newline: &'static str,
     placeholder: Option<G>,
+    tag_callback: Option<T>,
 }
 
-impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
-    fn new(options: &RtfToHtml, placeholder: Option<G>) -> Self {
+impl<G: FnMut(usize, &mut HtmlWriter), T: FnMut(&mut HtmlTagContext, &mut HtmlWriter)>
+    HtmlHandler<G, T>
+{
+    fn new(options: &RtfToHtml, placeholder: Option<G>, tag_callback: Option<T>) -> Self {
         let mut prefix = String::new();
         if !options.output_html_fragment {
             prefix.push_str("<html><body>")
@@ -342,33 +413,68 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
             last_was_space: false,
             newline: output_newline(options.new_line_format),
             placeholder,
+            tag_callback,
         }
     }
 
     fn index(&self, tag: Tag) -> Option<usize> {
-        self.stack.iter().rposition(|&open| open == tag)
+        self.stack
+            .iter()
+            .rposition(|open| open.tag_id() == tag.id())
     }
 
-    fn open(&mut self, tag: Tag) {
+    fn suppress_content(&self) -> bool {
+        // Generated nesting has at most six elements, so this walk stays
+        // bounded even when the source RTF has arbitrarily deep groups.
+        self.stack
+            .iter()
+            .any(|context| context.suppress_inner_content)
+    }
+
+    fn write_tag(&mut self, context: &mut HtmlTagContext) {
+        if let Some(callback) = &mut self.tag_callback {
+            callback(context, &mut self.writer);
+        } else {
+            context
+                .write_tag(&mut self.writer, true)
+                .expect("generated HTML tag");
+        }
+    }
+
+    fn open(&mut self, tag: Tag, attribute: Option<HtmlAttribute>) {
         // There is at most one of each generated element, independent of RTF
-        // nesting. Caller-written placeholder markup does not enter this stack.
+        // nesting. Caller-written tag/placeholder markup does not enter this stack.
         debug_assert!(self.index(tag).is_none() && self.stack.len() < 6);
-        self.writer
-            .write_start_tag(tag.name())
-            .expect("known RTF HTML tag");
-        self.stack.push(tag);
+        let mut context = HtmlTagContext::new(tag.id(), attribute.into_iter().collect());
+        if !self.suppress_content() {
+            self.write_tag(&mut context);
+        }
+        // Keep even suppressed or unwritten elements so formatting transitions
+        // still close the same contexts and resume output at the right boundary.
+        self.stack.push(context);
     }
 
     fn close_to(&mut self, count: usize) {
         while self.stack.len() > count {
-            let tag = self.stack.pop().expect("open element");
-            if tag == Tag::Link {
+            let mut context = self.stack.pop().expect("open element");
+            let id = context.tag_id();
+            if id == HtmlTagId::A {
                 self.href = None
             }
-            self.writer
-                .write_end_tag(tag.name())
-                .expect("known RTF HTML tag");
-            if matches!(tag, Tag::Block | Tag::Row | Tag::Table) {
+            // Check suppression after popping: an element can suppress its
+            // children without suppressing its own closing tag or callback.
+            if self.suppress_content() || context.delete_end_tag {
+                continue;
+            }
+            context.mark_end_tag();
+            if context.invoke_callback_for_end_tag {
+                self.write_tag(&mut context);
+            } else {
+                context
+                    .write_tag(&mut self.writer, false)
+                    .expect("generated end tag");
+            }
+            if matches!(id, HtmlTagId::Div | HtmlTagId::Tr | HtmlTagId::Table) {
                 self.writer.write_markup_text(self.newline);
             }
         }
@@ -383,7 +489,7 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
     fn open_table(&mut self) {
         for tag in [Tag::Table, Tag::Row, Tag::Cell] {
             if self.index(tag).is_none() {
-                self.open(tag)
+                self.open(tag, None)
             }
         }
     }
@@ -399,7 +505,6 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
         if self.index(Tag::Block).is_some() {
             return;
         }
-        self.open(Tag::Block);
         // Alignment is a paragraph property: the first content fixes it.
         let alignment = match state.alignment {
             Alignment::Left => None,
@@ -407,11 +512,11 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
             Alignment::Right => Some("text-align: right;"),
             Alignment::Justify => Some("text-align: justify;"),
         };
-        if let Some(css) = alignment {
-            self.writer
-                .write_attribute("style", css)
-                .expect("attribute inside start tag");
-        }
+        let attribute = alignment.map(|css| {
+            HtmlAttribute::from_id(HtmlAttributeId::Style, Some(css.into()))
+                .expect("style attribute")
+        });
+        self.open(Tag::Block, attribute);
         self.last_was_space = true;
     }
 
@@ -434,14 +539,13 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
         if let Some(link) = &state.hyperlink
             && self.index(Tag::Link).is_none()
         {
-            self.open(Tag::Link);
-            self.writer
-                .write_attribute("href", link.as_str())
-                .expect("attribute inside start tag");
+            let attribute =
+                HtmlAttribute::from_id(HtmlAttributeId::Href, Some(link.as_str().into()))
+                    .expect("href attribute");
+            self.open(Tag::Link, Some(attribute));
             self.href = Some(link.clone());
         }
         if !format.is_default() && self.index(Tag::Span).is_none() {
-            self.open(Tag::Span);
             // Typical documents reuse formats. Bound the cache and clear it
             // when full so distinct malicious styles cannot accumulate forever.
             if !self.css_cache.contains_key(&format) {
@@ -450,9 +554,12 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
                 }
                 self.css_cache.insert(format, format.css());
             }
-            self.writer
-                .write_attribute("style", &self.css_cache[&format])
-                .expect("attribute inside start tag");
+            let attribute = HtmlAttribute::from_id(
+                HtmlAttributeId::Style,
+                Some(self.css_cache[&format].clone()),
+            )
+            .expect("style attribute");
+            self.open(Tag::Span, Some(attribute));
             self.span_format = Some(format);
         }
     }
@@ -483,9 +590,10 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
     }
 
     fn line_break(&mut self) {
-        self.writer
-            .write_empty_element_tag("br")
-            .expect("known RTF HTML tag");
+        if !self.suppress_content() {
+            let mut context = HtmlTagContext::new(HtmlTagId::Br, Default::default());
+            self.write_tag(&mut context);
+        }
         self.last_was_space = true;
     }
 
@@ -505,13 +613,17 @@ impl<G: FnMut(usize, &mut HtmlWriter)> HtmlHandler<G> {
     }
 }
 
-impl<G: FnMut(usize, &mut HtmlWriter)> ContentHandler for HtmlHandler<G> {
+impl<G: FnMut(usize, &mut HtmlWriter), T: FnMut(&mut HtmlTagContext, &mut HtmlWriter)>
+    ContentHandler for HtmlHandler<G, T>
+{
     fn content(&mut self, state: &GroupState, colors: &[Option<u32>], content: Content<'_>) {
         match content {
             Content::Text(text) => {
                 self.open_block(state);
                 self.open_inline(state, colors);
-                self.write_text(text);
+                if !self.suppress_content() {
+                    self.write_text(text);
+                }
             }
             Content::Paragraph => {
                 // Browsers collapse empty divs. Give empty RTF paragraphs a
@@ -536,7 +648,7 @@ impl<G: FnMut(usize, &mut HtmlWriter)> ContentHandler for HtmlHandler<G> {
             Content::Row => {
                 for tag in [Tag::Table, Tag::Row] {
                     if self.index(tag).is_none() {
-                        self.open(tag)
+                        self.open(tag, None)
                     }
                 }
                 self.close(Tag::Row);
@@ -545,10 +657,14 @@ impl<G: FnMut(usize, &mut HtmlWriter)> ContentHandler for HtmlHandler<G> {
                 if self.placeholder.is_some() {
                     self.open_block(state);
                     self.open_inline(state, colors);
-                    self.placeholder.as_mut().expect("placeholder callback")(
-                        index,
-                        &mut self.writer,
-                    );
+                    // The interpreter advances indices even when suppression
+                    // skips the callback, keeping attachment numbering aligned.
+                    if !self.suppress_content() {
+                        self.placeholder.as_mut().expect("placeholder callback")(
+                            index,
+                            &mut self.writer,
+                        );
+                    }
                     self.last_was_space = false;
                 }
             }
@@ -563,29 +679,52 @@ mod tests {
     #[test]
     fn renderer_nesting_and_css_cache_remain_bounded() {
         let options = RtfToHtml::new();
-        let mut handler = HtmlHandler::new(&options, None::<fn(usize, &mut HtmlWriter)>);
-        let mut state = GroupState::default();
-        for size in 26..1026 {
-            state.font_size = size;
-            state.flags = if size % 3 == 0 {
-                IN_TABLE | BOLD
-            } else {
-                ITALIC
+        for suppress in [false, true] {
+            let callback = |context: &mut HtmlTagContext, writer: &mut HtmlWriter| {
+                if suppress {
+                    context.suppress_inner_content = true;
+                    context.delete_end_tag = true;
+                } else {
+                    context.write_tag(writer, true).unwrap();
+                }
             };
-            handler.content(&state, &[], Content::Text("x"));
-            for content in [
-                Content::LineBreak,
-                Content::Cell,
-                Content::Row,
-                Content::Paragraph,
-            ] {
-                handler.content(&state, &[], content);
-                assert!(handler.stack.len() <= 6);
-                assert!(handler.stack.capacity() <= 6);
-                assert!(handler.css_cache.len() <= MAX_CSS_CACHE_ENTRIES);
+            let mut handler =
+                HtmlHandler::new(&options, None::<fn(usize, &mut HtmlWriter)>, Some(callback));
+            let mut state = GroupState::default();
+            for size in 26..1026 {
+                state.font_size = size;
+                state.flags = if size % 3 == 0 {
+                    IN_TABLE | BOLD
+                } else {
+                    ITALIC
+                };
+                handler.content(&state, &[], Content::Text("x"));
+                for content in [
+                    Content::LineBreak,
+                    Content::Cell,
+                    Content::Row,
+                    Content::Paragraph,
+                ] {
+                    handler.content(&state, &[], content);
+                    assert!(handler.stack.len() <= 6);
+                    assert!(handler.stack.capacity() <= 6);
+                    assert!(handler.css_cache.len() <= MAX_CSS_CACHE_ENTRIES);
+                    for (index, context) in handler.stack.iter().enumerate() {
+                        assert!(context.attributes().len() <= 1);
+                        assert!(
+                            handler.stack[..index]
+                                .iter()
+                                .all(|other| other.tag_id() != context.tag_id())
+                        );
+                    }
+                }
+            }
+            let output = handler.finish(&options);
+            if suppress {
+                assert_eq!(output, "<html><body></body></html>");
+            } else {
+                assert!(output.ends_with("</body></html>"));
             }
         }
-        let output = handler.finish(&options);
-        assert!(output.ends_with("</body></html>"));
     }
 }
