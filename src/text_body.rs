@@ -9,7 +9,11 @@ use crate::{
     MultipartError, References, TextPartError,
 };
 
-/// A requested text-body representation, without conversion between formats.
+/// A text format for body selection, classification, or part construction.
+///
+/// These operations do not convert content between formats. Body selection
+/// matches MIME types; [`crate::TextPart::format`] additionally returns Plain
+/// as a classification fallback for unknown text subtypes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TextFormat {
     /// `text/plain`, including flowed text.

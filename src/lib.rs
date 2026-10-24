@@ -47,6 +47,8 @@
 //! transfer conversion, UU wrappers, and [`MimePartWriteOptions`] newline settings.
 //! [`TextPart`] adds strict charset-aware text reads and atomic in-memory text
 //! updates, preserving raw metadata and reusing single-part serialization.
+//! Format-based constructors and metadata predicates share [`TextFormat`] body
+//! matching, without implicitly converting or validating text formats.
 //! [`MessageDeliveryStatus`] adds bounded, detached delivery-status header groups,
 //! one encoded-remainder compatibility pass, and atomic in-memory group edits.
 //! [`MessageDispositionNotification`] provides bounded, detached notification

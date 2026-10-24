@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    ContentHeaderParseError, ContentType, HeaderFormatError, MimeContent, MimePart,
+    ContentHeaderParseError, ContentType, HeaderFormatError, MimeContent, MimePart, TextFormat,
     charsets::{Charset, CharsetError},
 };
 
@@ -75,6 +75,59 @@ impl TextPart<Cursor<Vec<u8>>> {
         Self::with_charset(subtype, text, Charset::UTF8)
     }
 
+    /// Creates an in-memory UTF-8 part for a text format.
+    ///
+    /// Maps Plain/Flowed to `text/plain`, Html to `text/html`, Enriched to
+    /// `text/enriched`, and RichText to `text/rtf`. Flowed additionally sets
+    /// `format=flowed`. The supplied text is stored literally, without format
+    /// conversion, markup validation, flowed wrapping, or space stuffing.
+    ///
+    /// # Errors
+    ///
+    /// Returns content-type or header-formatting failures.
+    ///
+    /// ```
+    /// use mimecraft::{TextFormat, TextPart};
+    ///
+    /// let mut text = TextPart::with_format(TextFormat::Flowed, "already flowed \r\ntext")?;
+    /// assert!(text.is_plain()?);
+    /// assert!(text.is_flowed()?);
+    /// assert_eq!(text.format()?, TextFormat::Flowed);
+    /// assert_eq!(text.text()?, "already flowed \r\ntext");
+    /// # Ok::<(), mimecraft::TextPartError>(())
+    /// ```
+    pub fn with_format(format: TextFormat, text: &str) -> Result<Self, TextPartError> {
+        Self::with_format_and_charset(format, text, Charset::UTF8)
+    }
+
+    /// Creates a part for a text format using an explicit charset.
+    ///
+    /// Uses [`Self::with_format`]'s media-type mapping and
+    /// [`Self::with_charset`]'s strict encoding, without transcoding between
+    /// text formats. Flowed construction does not add a `delsp` parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns content-type, header-formatting, or unmappable-text errors.
+    pub fn with_format_and_charset(
+        format: TextFormat,
+        text: &str,
+        charset: Charset,
+    ) -> Result<Self, TextPartError> {
+        let subtype = match format {
+            TextFormat::Plain | TextFormat::Flowed => "plain",
+            TextFormat::Html => "html",
+            TextFormat::Enriched => "enriched",
+            TextFormat::RichText => "rtf",
+        };
+        let mut content_type =
+            ContentType::new("text", subtype).map_err(TextPartError::ContentType)?;
+        if format == TextFormat::Flowed {
+            content_type.set_format(Some("flowed"));
+        }
+        Self::from_text(content_type, text, charset)
+    }
+
     /// Creates an in-memory text part using a specific charset.
     ///
     /// Stores unencoded body bytes and writes the charset's canonical label.
@@ -89,8 +142,15 @@ impl TextPart<Cursor<Vec<u8>>> {
         text: &str,
         charset: Charset,
     ) -> Result<Self, TextPartError> {
-        let mut content_type =
-            ContentType::new("text", subtype).map_err(TextPartError::ContentType)?;
+        let content_type = ContentType::new("text", subtype).map_err(TextPartError::ContentType)?;
+        Self::from_text(content_type, text, charset)
+    }
+
+    fn from_text(
+        mut content_type: ContentType,
+        text: &str,
+        charset: Charset,
+    ) -> Result<Self, TextPartError> {
         content_type.set_charset_encoding(Some(charset));
         let bytes = charset
             .encode(text)
@@ -179,13 +239,58 @@ impl<R: Read + Seek> TextPart<R> {
         self.part
     }
 
+    /// Classifies the current Content-Type without reading or converting text.
+    ///
+    /// Recognizes flowed plain text, HTML, enriched text (including the older
+    /// `text/richtext`), and RTF. Unknown text subtypes return Plain as in
+    /// MimeKit, even though [`Self::is_plain`] is false for those subtypes.
+    /// The format parameter is Unicode-trimmed before comparing with `flowed`.
+    ///
+    /// Uses the same case-insensitive matching as body selection and the
+    /// predicates, including uppercase `PLAIN`, rather than MimeKit's
+    /// case-sensitive plain-subtype check in its Format property.
+    /// The fallback does not make unknown text types candidates for a plain
+    /// message body. Charset labels and payload syntax are not examined.
+    ///
+    /// # Errors
+    ///
+    /// Missing, invalid, and non-text Content-Type return [`TextPartError`].
+    /// In particular, this wrapper continues to reject `application/rtf`;
+    /// ordinary MIME leaves and RichText body selection can still represent it.
+    pub fn format(&self) -> Result<TextFormat, TextPartError> {
+        let content_type = self.checked_content_type()?;
+        // Flowed is both Plain and Flowed: classify the more specific format
+        // first without narrowing plain-body selection to fixed-width text.
+        Ok([
+            TextFormat::Flowed,
+            TextFormat::Html,
+            TextFormat::Enriched,
+            TextFormat::RichText,
+        ]
+        .into_iter()
+        .find(|format| format.matches(&content_type))
+        .unwrap_or(TextFormat::Plain))
+    }
+
     /// Returns whether the current content type is `text/plain`, ignoring case.
     ///
     /// # Errors
     ///
     /// Returns an error for missing, invalid, or non-text Content-Type.
     pub fn is_plain(&self) -> Result<bool, TextPartError> {
-        Ok(self.checked_content_type()?.is_mime_type("text", "plain"))
+        Ok(TextFormat::Plain.matches(&self.checked_content_type()?))
+    }
+
+    /// Returns whether this is plain text with a trimmed `format=flowed` value.
+    ///
+    /// Matching is case-insensitive. Flowed text also satisfies [`Self::is_plain`].
+    /// This does not validate flowed syntax or inspect the `delsp` parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, invalid, or non-text Content-Type.
+    pub fn is_flowed(&self) -> Result<bool, TextPartError> {
+        Ok(TextFormat::Flowed.matches(&self.checked_content_type()?))
     }
 
     /// Returns whether the current content type is `text/html`, ignoring case.
@@ -196,7 +301,32 @@ impl<R: Read + Seek> TextPart<R> {
     ///
     /// Returns an error for missing, invalid, or non-text Content-Type.
     pub fn is_html(&self) -> Result<bool, TextPartError> {
-        Ok(self.checked_content_type()?.is_mime_type("text", "html"))
+        Ok(TextFormat::Html.matches(&self.checked_content_type()?))
+    }
+
+    /// Returns whether this is `text/enriched` or its predecessor `text/richtext`.
+    ///
+    /// These are distinct from `text/rtf`; no content validation or conversion
+    /// occurs. Matching is case-insensitive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, invalid, or non-text Content-Type.
+    pub fn is_enriched(&self) -> Result<bool, TextPartError> {
+        Ok(TextFormat::Enriched.matches(&self.checked_content_type()?))
+    }
+
+    /// Returns whether the current type is `text/rtf`, ignoring case.
+    ///
+    /// Like other text-wrapper operations, rejects non-text media types,
+    /// including `application/rtf`. It can instead remain an ordinary leaf
+    /// selected with [`TextFormat::RichText`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, invalid, or non-text Content-Type.
+    pub fn is_rich_text(&self) -> Result<bool, TextPartError> {
+        Ok(TextFormat::RichText.matches(&self.checked_content_type()?))
     }
 
     /// Reads text using the declared charset, or UTF-8 when absent.

@@ -924,8 +924,31 @@ I/O; it accepts owned or borrowed seekable content. Failed wrapping drops the
 supplied part but leaves borrowed streams usable and unmoved. `part()` and
 `part_mut()` expose metadata, content, and serialization; `into_part()` returns
 the original model without copying. Raw Content-Type edits remain authoritative:
-text operations and `is_plain()`/`is_html()` recheck them, reporting missing,
+text operations and format predicates recheck them, reporting missing,
 malformed, or non-text values rather than using a cache or later duplicate.
+
+`with_format(format, text)` constructs UTF-8 text from a `TextFormat`;
+`with_format_and_charset(format, text, charset)` uses an explicit charset.
+Plain and Flowed use `text/plain`, Html uses `text/html`, Enriched uses
+`text/enriched`, and RichText uses `text/rtf`. Flowed adds `format=flowed`, but
+does not add `delsp`, wrap lines, stuff spaces, or convert the supplied text.
+All format constructors share the existing strict charset and checked header
+formatting path, without selecting a transfer encoding.
+
+`format()` classifies current metadata without source I/O. `is_plain`,
+`is_flowed`, `is_html`, `is_enriched`, and `is_rich_text` share the body selector's
+case-insensitive matching. Flowed is also plain; `format=flowed` is
+Unicode-trimmed and only applies to `text/plain`. The older `text/richtext`
+counts as Enriched, not RTF. Charset labels, markup, and body bytes are not
+validated. Unknown `text/*` subtypes classify as Plain, matching MimeKit's
+fallback, but do not satisfy `is_plain()` or plain-body selection.
+
+Unlike MimeKit's Format property's case-sensitive plain-subtype branch,
+uppercase `PLAIN` is recognized consistently with `is_flowed`. The existing
+text-only wrapper policy remains: missing, invalid, or non-text Content-Type
+returns `TextPartError`, including `application/rtf`. Such content can remain
+an ordinary `MimePart` and match RichText body selection instead. Format
+classification does not broaden which bodies are eligible for selection.
 
 `text()` transfer-decodes using the stored content encoding, then strictly
 decodes the declared charset, using UTF-8 only when the charset is absent.
@@ -5347,6 +5370,12 @@ strict charset conversion and checked header formatting make failed edits
 atomic. Unsupported labels and malformed bytes remain errors, and newlines/BOMs
 are preserved rather than applying MimeKit's detection, fallback, or newline
 normalization. Automatic detection and text-format conversion are not ported.
+Format-based construction maps the supported `TextFormat` variants to the
+source's text subtypes and flowed parameter. Classification and predicates
+reuse body-selection matching, retaining the unknown-text Plain fallback while
+making the plain-subtype comparison consistently case-insensitive. Enriched
+`text/richtext` stays distinct from RTF. The text wrapper's existing `text/*`
+validation remains stricter than MimeKit's support for `application/rtf`.
 Multipart ownership adapts `Multipart.cs` and `MimeEntity.cs` using an enum and
 owned child vectors instead of inheritance and parent/event machinery.
 Raw headers remain authoritative; checked edits implement the source's boundary
