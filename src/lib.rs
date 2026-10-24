@@ -95,6 +95,22 @@
 //! [`text::html_decode_with_options`] and
 //! [`text::html_attribute_decode_with_options`] add reference diagnostics with
 //! original UTF-8 byte offsets and optional per-violation reporting limits.
+//! [`text::RtfTokenizer`] reads bounded, owned RTF tokens from buffered bytes,
+//! retaining source positions and optionally reporting lexical recoveries.
+//! [`text::RtfTokenizerOptions`] bounds those reports independently per violation
+//! across streaming reads, with one marker when an issue is first suppressed.
+//! It skips binary payloads but does not decode code pages or render RTF.
+//! [`text::RtfValidator`] adds missing-header, unmatched-closing-brace, and
+//! trailing-content checks without changing tokens. [`text::RtfValidationOptions`]
+//! caps the combined lexical/structural report with independent violation quotas.
+//! [`text::RtfToText`] renders original buffered RTF bytes into Unicode text,
+//! with bounded group/font state, code-page decoding, Unicode fallback, tables,
+//! optional attachment placeholders, and capped interpretation diagnostics.
+//! [`text::RtfToHtml`] shares that interpreter to render HTML documents or
+//! fragments with character styles, paragraph alignment, colors, and field links.
+//! Encapsulated-HTML extraction and HTML tag callbacks are not yet implemented.
+//! [`text::parse_rtf_hyperlink`] extracts borrowed, scheme-filtered targets
+//! from decoded RTF field instructions without tokenizing or rendering RTF.
 //! [`text::TextToHtml`] renders decoded plain text with line breaks, quote blocks,
 //! automatic links, and optional text or trusted-HTML headers and footers.
 //! [`text::FlowedToHtml`] joins flowed lines into HTML paragraphs with the same

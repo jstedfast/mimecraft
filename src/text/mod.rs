@@ -9,8 +9,17 @@
 //! decoding with opt-in reference diagnostics, and plain/flowed HTML rendering,
 //! plus an in-memory HTML writer, known tag/attribute identifiers, checked
 //! attribute collections, and owned HTML token serialization.
-//! HTML tokenization, HTML-input conversion, rich-text conversion, and streaming
-//! converters are deferred.
+//! A byte-oriented streaming RTF tokenizer supplies owned tokens, keyword
+//! classifications, positions, and optionally capped lexical recovery callbacks.
+//! An RTF validator adds document-header and group-structure checks without
+//! changing tokens or interpreting their formatting.
+//! RTF-to-text conversion adds bounded group/font state, charset and Unicode
+//! decoding, destination suppression, layout, and optional diagnostics.
+//! RTF-to-HTML rendering shares that interpreter and adds character formatting,
+//! paragraph alignment, colors, tables, and bounded hyperlink-field collection.
+//! Decoded RTF hyperlink-field instructions can be parsed without allocating.
+//! HTML tokenization, HTML-input conversion, encapsulated-HTML extraction, HTML
+//! tag callbacks, and streaming-output converters are deferred.
 
 mod flowed_to_html;
 mod flowed_to_text;
@@ -24,6 +33,14 @@ mod html_token;
 mod html_utils;
 mod html_writer;
 mod plain_text_previewer;
+mod rtf_hyperlink;
+mod rtf_interpreter;
+mod rtf_keyword;
+mod rtf_reporting;
+mod rtf_to_html;
+mod rtf_to_text;
+mod rtf_tokenizer;
+mod rtf_validator;
 mod text_to_flowed;
 mod text_to_html;
 mod text_to_text;
@@ -49,6 +66,15 @@ pub use html_token::{
 pub use html_utils::{HtmlAttributeQuote, html_attribute_encode, html_encode};
 pub use html_writer::{HtmlWriter, HtmlWriterError, HtmlWriterState};
 pub use plain_text_previewer::{InvalidPreviewLength, PlainTextPreviewer};
+pub use rtf_hyperlink::parse_rtf_hyperlink;
+pub use rtf_keyword::RtfKeyword;
+pub use rtf_to_html::RtfToHtml;
+pub use rtf_to_text::RtfToText;
+pub use rtf_tokenizer::{
+    RtfControlWord, RtfLexicalIssue, RtfLexicalViolation, RtfSourcePosition, RtfToken,
+    RtfTokenKind, RtfTokenizer, RtfTokenizerOptions,
+};
+pub use rtf_validator::{RtfIssue, RtfValidationOptions, RtfValidator, RtfViolation};
 pub use text_to_flowed::TextToFlowed;
 pub use text_to_html::TextToHtml;
 pub use text_to_text::TextToText;

@@ -357,7 +357,7 @@ fn parse_codepage(name: &str) -> Option<u32> {
     }
 }
 
-fn from_codepage(codepage: u32) -> Option<Charset> {
+pub(crate) fn from_codepage(codepage: u32) -> Option<Charset> {
     let encoding = match codepage {
         20127 => return Some(Charset::ASCII),
         28591 | 819 => return Some(Charset::LATIN1),

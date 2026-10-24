@@ -59,6 +59,17 @@ MimeKit. The crate is not configured for publication.
 - HTML character-reference decoding with the complete named-entity table,
   longest-name matching, numeric-reference recovery, attribute-context rules,
   a bounded incremental decoder, and opt-in, per-violation-capped diagnostics.
+- Streaming byte-oriented RTF tokenization with bounded owned tokens,
+  case-sensitive keyword classifications, binary-payload skipping, source
+  positions, optionally capped lexical recovery callbacks, and a borrowed parser
+  for decoded hyperlink-field instructions.
+- Streaming RTF header/group-structure validation with optional per-violation
+  limits on the combined lexical and structural report, without changing tokens.
+- RTF-to-text conversion with bounded group/font state, code-page and Unicode
+  decoding, hidden-text/destination suppression, tables, attachment-placeholder
+  callbacks, and combined capped diagnostics.
+- RTF-to-HTML rendering with character styles, paragraph alignment, colors,
+  tables, bounded hyperlink fields, and text or trusted-HTML decorations.
 - Delivery-status parts with bounded raw header-group parsing, encoded-remainder
   compatibility, and atomic edits that preserve outer metadata.
 - Disposition-notification parts with bounded raw field access, global-subtype
@@ -1709,6 +1720,357 @@ These are reference-only diagnostics, not an HTML compliance framework:
 literal controls, tag structure, comment/script context, and URL safety are
 not checked. General HTML compliance logging, severity/category metadata, and
 HTML tokenization remain deferred.
+
+### Streaming RTF tokenization
+
+`text::RtfTokenizer<R: BufRead>` reads original RTF bytes and returns owned
+`RtfToken { kind, position }` values. Byte slices already implement `BufRead`;
+wrap files and other `Read` sources in `std::io::BufReader`.
+
+```rust
+use mimecraft::text::{RtfKeyword, RtfTokenKind, RtfTokenizer};
+
+let mut tokenizer = RtfTokenizer::new(&b"{\\rtf1 hello}"[..]);
+assert_eq!(tokenizer.read_token()?.unwrap().kind, RtfTokenKind::GroupStart);
+let token = tokenizer.read_token()?.unwrap();
+let RtfTokenKind::ControlWord(word) = token.kind else { panic!("expected word") };
+assert_eq!(word.name(), "rtf");
+assert_eq!(word.id(), RtfKeyword::Rtf);
+assert_eq!(word.parameter(), Some(1));
+assert_eq!(tokenizer.read_token()?.unwrap().kind, RtfTokenKind::Text(b"hello".to_vec()));
+# Ok::<(), std::io::Error>(())
+```
+
+`RtfTokenKind` carries group starts/ends, control words, control symbols,
+hexadecimal bytes, or raw text bytes. `RtfControlWord` retains the original
+bounded name, its ID, an optional `i32` parameter, and truncation/invalid-parameter
+flags. Tokens survive subsequent reads. Text tokens may split at reader buffer
+boundaries; concatenate adjacent text tokens when a contiguous run is needed.
+
+`RtfKeyword::from_name` is allocation-free and case-sensitive. Its 134 spellings
+match MimeKit's converter-focused table, not every control word in RTF.
+Underline styles, background-color spellings, and other rendering equivalents
+share IDs. `SkipDestination` classifies non-rendered destinations but does **not**
+make this tokenizer skip them. In particular, `object` is intentionally not a
+skipped destination, so a later interpreter can preserve its display fallback.
+
+The scanner retains at most 32 letters per word and emits at most 4096 bytes
+per text token. Overlong names remain unknown. Only the first ten parameter
+digits contribute; all remaining digits are consumed and flagged invalid.
+The retained signed value clamps to `i32::MIN..=i32::MAX`. This preserves
+MimeKit's handling of excess leading zeros: `\fs00000000001` yields parameter
+zero with the invalid flag, rather than one.
+
+A positive `\binN` parameter causes exactly N following bytes to be skipped,
+after the word's single delimiting space if present. No allocation is
+proportional to N, and braces, backslashes, and line feeds inside the payload
+are not interpreted as RTF syntax. Zero and negative lengths do not skip data.
+Source bytes, raw text, and hex escapes are not charset-decoded or assumed
+to be UTF-8; font code pages and Unicode fallback processing belong to a
+future interpreter.
+
+Raw CR/LF are ignored, while escaped CR or LF becomes an LF control symbol.
+Only one delimiting space after a word or numeric parameter is consumed.
+A minus sign followed by a non-digit yields no parameter, flags it invalid,
+and leaves that next byte untouched. A trailing minus at EOF instead follows
+MimeKit's pending-word finalization without setting the flag.
+Malformed hex escapes with no digits are dropped; one-digit escapes yield that
+digit's value. A final backslash is dropped.
+
+Each `RtfSourcePosition` stores a zero-based byte offset, one-based line and
+byte-column numbers, and enclosing group depth. Only LF advances the line.
+Both braces have the depth outside their group. Binary payloads count toward
+positions, including any LF they contain. Unmatched closing braces still
+produce tokens; structural validation belongs to an interpreter.
+
+`read_token_with_issues` accepts a callback for `RtfLexicalIssue` values:
+`KeywordTooLong`, `InvalidParameter`, `InvalidHexEscape`, and `TruncatedStream`.
+The tokenizer retains no issue list; callers control storage and limits.
+Issues for words or escapes point to the backslash. Truncation points to EOF
+and is reported once even if both a payload and groups are incomplete.
+Word-length issues precede parameter issues for the same word.
+
+```rust
+use mimecraft::text::{RtfLexicalViolation, RtfTokenizer};
+
+let mut tokenizer = RtfTokenizer::new(&b"{\\'z"[..]);
+let mut issues = Vec::new();
+while tokenizer.read_token_with_issues(|issue| issues.push(issue))?.is_some() {}
+assert_eq!(issues[0].violation, RtfLexicalViolation::InvalidHexEscape);
+assert_eq!(issues[1].violation, RtfLexicalViolation::TruncatedStream);
+# Ok::<(), std::io::Error>(())
+```
+
+`RtfTokenizer::with_options(reader, &RtfTokenizerOptions)` can limit how many
+issues reach those callbacks. `max_issues_per_violation` defaults to zero
+(unlimited); a positive limit applies independently to each violation for the
+entire tokenizer. A flood of one kind therefore cannot hide different kinds.
+The first **suppressed** issue emits one `TooManyComplianceIssues` marker with
+that issue's original byte offset, line, column, and depth. Merely reaching the
+limit emits no marker. Later suppressions do not repeat it.
+
+```rust
+use mimecraft::text::{RtfLexicalViolation, RtfTokenizer, RtfTokenizerOptions};
+
+let options = RtfTokenizerOptions { max_issues_per_violation: 1 };
+let mut tokenizer = RtfTokenizer::with_options(&b"\\'z\\'z\\'z"[..], &options);
+let mut issues = Vec::new();
+while tokenizer.read_token_with_issues(|issue| issues.push(issue))?.is_some() {}
+assert_eq!(issues.len(), 2);
+assert_eq!(issues[1].violation, RtfLexicalViolation::TooManyComplianceIssues);
+assert_eq!(issues[1].position.offset, 3);
+# Ok::<(), std::io::Error>(())
+```
+
+Options are copied at construction; each new tokenizer gets fresh counters.
+Budgets persist across reads, callback changes, and retryable source errors.
+Calls to `read_token` discard issues without charging those budgets, and do not
+defer issues or report-limit markers until a later reporting call.
+The tokenizer stores four fixed counters and no issue collection. With a
+positive limit, it delivers at most four times that limit plus one issues.
+`TooManyComplianceIssues` means the **report** is incomplete; it is distinct
+from `TruncatedStream`, which describes EOF inside a group or binary payload.
+Limits do not affect returned tokens, lexical recovery, or binary skipping.
+
+Source errors, including `Interrupted` and `WouldBlock`, are returned without
+resetting partial words, hex escapes, or binary-skip progress. Retrying is
+supported; issues already delivered before an error are not replayed.
+The first empty source buffer latches EOF. Pending words and hex values are
+emitted before `None`, after which further calls perform no I/O.
+`into_inner()` recovers the buffered source and its unread bytes, but discards
+pending lexical state; it is not a way to resume a partially read token.
+
+This is tokenization only: RTF headers, destination groups, code pages, fields,
+formatting, Unicode fallback bytes, and attachments are not interpreted.
+Use `RtfToText` or `RtfToHtml` below for rendering. Token serialization,
+comprehensive compliance reporting, and async I/O remain deferred.
+
+### Validating RTF document structure
+
+`text::RtfValidator<R: BufRead>` wraps the tokenizer and adds MimeKit's initial
+header, unmatched-closing-brace, and content-after-document checks. It returns
+the same owned tokens, including malformed tokens and destination contents;
+validation never rejects input, changes recovery, or renders text.
+
+```rust
+use mimecraft::text::{RtfValidationOptions, RtfValidator, RtfViolation};
+
+let options = RtfValidationOptions { max_issues_per_violation: 2 };
+let mut validator =
+    RtfValidator::with_options(&b"{\\rtf1 hello}}junk"[..], &options);
+let mut issues = Vec::new();
+while validator.read_token_with_issues(|issue| issues.push(issue))?.is_some() {}
+assert_eq!(issues.len(), 2);
+assert_eq!(issues[0].violation, RtfViolation::UnbalancedGroupEnd);
+assert_eq!(issues[1].violation, RtfViolation::ContentAfterDocument);
+# Ok::<(), std::io::Error>(())
+```
+
+`RtfIssue` carries an `RtfViolation` and the original `RtfSourcePosition`.
+The report includes all tokenizer violations plus these structural checks:
+
+- `MissingRtfHeader`: the first two tokens must be `{` and the case-sensitive
+  `\rtf` control word. The version parameter and remaining header are not
+  validated. An empty stream or EOF after just `{` also reports a missing header.
+- `UnbalancedGroupEnd`: each `}` without a matching `{` is reported, but retained.
+- `ContentAfterDocument`: reported once after the first closed top-level group.
+  Raw spaces, tabs, NUL padding, and ignored CR/LF are harmless; additional `}`
+  tokens receive only their unmatched-brace issue. Later groups do not restart
+  header checking.
+
+Lexical issues precede structural checks on each returned token. At EOF,
+`TruncatedStream` precedes `MissingRtfHeader` if both apply. Structural positions
+point to the affected token's start, or the actual EOF cursor. A trailing text
+token containing both padding and non-padding reports at its start, so its
+location can depend on the source's buffer boundaries.
+
+Options are copied at construction. Default/zero limits are unlimited;
+positive limits apply independently per violation across reads, callback
+changes, and source-error retries. The combined report emits just one
+`TooManyComplianceIssues` marker at the first suppressed issue, not on merely
+reaching a limit. Lexical and structural floods cannot exhaust each other's
+quotas. With a positive limit, at most seven times the limit plus one issues
+reach callbacks.
+
+`read_token()` discards issues without spending reporting budgets. Structural
+state still advances, so later callbacks neither recheck a consumed header nor
+replay discarded once-per-stream issues. Source errors preserve partial tokens
+and state for retry; issues already delivered are not repeated. After `None`,
+further reads perform no I/O or reporting. `get_ref`, `get_mut`, and `into_inner`
+have the same source-access restrictions as the tokenizer.
+
+Structural tracking uses constant additional storage, without recursion, a
+group stack, or a retained issue list. This is not comprehensive RTF validation:
+destination semantics, formatting, font/color tables, charset and Unicode
+interpretation, and rendering are outside this token-preserving adapter.
+
+### Converting RTF to plain text
+
+`text::RtfToText` consumes original bytes from a `BufRead` source and returns a
+complete Unicode `String`. Do not decode the input before conversion: raw bytes,
+hex escapes, and binary-payload lengths must retain their original meaning.
+
+```rust
+use mimecraft::text::RtfToText;
+
+let converter = RtfToText::new();
+let text = converter.convert(
+    &b"{\\rtf1\\ansi caf\\'e9\\par a\\cell b\\cell\\row}"[..],
+)?;
+assert_eq!(text, "caf\u{e9}\r\na\tb\r\n");
+# Ok::<(), std::io::Error>(())
+```
+
+Group-scoped character state, font charset/code-page overrides, signed UTF-16
+`\uN` escapes, `\ucN` fallback skipping, surrogate pairs, and `\upr`/`\ud`
+alternatives follow MimeKit's interpretation. Incremental decoding preserves
+multibyte characters across input and escape boundaries. Hidden text and
+non-text destinations are suppressed; field results and object-result fallback
+text are retained. Encapsulated HTML uses its RTF rendering, not its markup.
+Cells are separated by tabs without a trailing tab at row ends.
+
+Line and paragraph breaks default to CRLF regardless of platform.
+`with_new_line_format(NewLineFormat::Unix)` selects LF; `Mixed` is rejected.
+Optional `header` and `footer` strings are copied verbatim without separators.
+`convert_with_callbacks` additionally accepts a diagnostic callback and an
+attachment-placeholder callback receiving `(zero_based_index, &mut String)`.
+Only visible placeholders count. The immediately following literal or escaped
+space is consumed, even without a placeholder callback.
+
+`max_group_depth` and `max_font_table_entries` are nonzero limits, each defaulting
+to 4096. Identical saved states fold into one stack entry; groups needing a new
+entry beyond the limit are skipped rather than rendered with incorrect state.
+Font-table overflow rejects new numbers but permits existing entries to be
+updated. Font names and hyperlink targets are not retained. The converter
+caches at most 32 code-page resolutions and uses a fixed-size byte buffer with
+one incremental decoder. These bounds do not limit the returned string or
+anything retained or appended by caller callbacks.
+
+Charset support is the crate's existing `Charset`/`encoding_rs` support, not
+every .NET code page. Unsupported pages (including DOS 437/850 and Johab 1361)
+and new pages beyond the cache limit fall back to Windows-1252; cached pages
+remain usable. BOMs are not sniffed. Decoding errors emit replacement characters.
+
+`convert_with_issues` reports `RtfIssue` values for lexical and structural
+problems plus group/font limits, undefined fonts, invalid font sizes, unsupported
+or excess code pages, invalid byte sequences, raw high bytes, and unpaired
+surrogates. `max_issues_per_violation` defaults to zero (unlimited); positive
+limits apply independently to all sixteen violation kinds with a single
+first-suppression marker, delivering at most sixteen times the limit plus one
+issues. Budgets and interpreter state start fresh for each conversion.
+Tokenization/structure checks precede interpretation; decoder diagnostics use
+the token triggering decoding (possibly a later flushing token), or EOF.
+Callback-free conversion discards
+diagnostics without changing rendering.
+
+Source I/O errors propagate, without returning partial output. Unlike the
+tokenizer/validator, a failed whole-document conversion cannot resume; the
+source may have been consumed and callback side effects are not rolled back.
+The text converter does not collect or validate colors and field instructions;
+these are enabled only for HTML rendering. Streaming-output conversion remains
+deferred.
+
+### Rendering RTF as HTML
+
+`text::RtfToHtml` shares the text converter's byte-oriented interpreter and
+returns a complete HTML document or body fragment. Input must retain its original
+bytes; charset decoding, Unicode recovery, hidden-text suppression, and skipped
+destinations follow `RtfToText`.
+
+```rust
+use mimecraft::text::RtfToHtml;
+
+let mut converter = RtfToHtml::new();
+converter.output_html_fragment = true;
+let html = converter.convert(&b"{\\rtf1 Hello {\\b world}!}"[..])?;
+assert_eq!(
+    html,
+    "<div>Hello <span style=\"font-weight: bold;\">world</span>!</div>\r\n",
+);
+# Ok::<(), std::io::Error>(())
+```
+
+Rendering includes bold, italic, underline, strikeout, superscript/subscript,
+half-point font sizes, foreground/background colors, paragraph alignment,
+line breaks, and tables. Text and attributes use `HtmlWriter` escaping.
+Alternating ordinary/nonbreaking spaces preserve significant whitespace;
+tabs become four nonbreaking spaces. Empty paragraphs get explicit breaks.
+Field results become links only when `parse_rtf_hyperlink` accepts the target;
+rejected or unsupported fields still render their visible results.
+
+Document mode wraps the body in `<html><body>` and closing tags. Generated block
+separators use CRLF by default; `with_new_line_format(NewLineFormat::Unix)` selects
+LF, while `Mixed` is rejected. Optional `header` and `footer` use
+`HeaderFooterFormat::Text` by default; `Html` inserts trusted markup.
+`convert_with_callbacks` takes diagnostics and a placeholder callback receiving
+`(zero_based_index, &mut HtmlWriter)` in the current paragraph/inline context.
+Only visible placeholders count; their immediately following literal or escaped
+space is consumed. Without a callback placeholders produce no markup.
+
+The nonzero `max_group_depth`, `max_font_table_entries`, and
+`max_color_table_entries` limits each default to 4096. Automatic color entries
+count toward the color limit. Folded saved states compare hyperlink identity in
+constant time; excess groups are skipped, not rendered in the wrong state.
+The renderer retains at most six generated open elements and caches at most 256
+CSS formats. Field instructions retain at most **2048 UTF-8 bytes**, rather than
+MimeKit's UTF-16 units, without splitting a scalar. Once an instruction exceeds
+this bound, all later instruction text is discarded. The retained prefix is still
+parsed, so an unterminated quoted target can produce a truncated link. No bounds
+are imposed on the output string or caller-owned callback data.
+
+`convert_with_issues` adds color-table overflow, undefined-color, and
+field-instruction-limit diagnostics to the text converter's checks.
+`max_issues_per_violation` defaults to zero (unlimited). Positive quotas apply
+independently to all nineteen kinds with one first-suppression marker: at most
+nineteen times the limit plus one issues per conversion. All interpretation and
+reporting state starts fresh per call. Source I/O errors propagate without
+returning partial HTML; failed conversions cannot resume and callback side
+effects are not rolled back.
+
+This is **RTF rendering, not encapsulated-HTML extraction**: `\fromhtml` does not
+switch modes, `\htmltag` groups are skipped, and `\htmlrtf` content is rendered.
+Encapsulated-HTML extraction, HTML tokenization/filtering, HTML tag callbacks,
+and streaming-output conversion remain deferred. This is not a sanitizer:
+HTML decorations and callback markup are trusted, and the hyperlink scheme
+allowlist does not validate addresses or make targets trustworthy.
+
+### Parsing RTF hyperlink fields
+
+`text::parse_rtf_hyperlink(&str) -> Option<&str>` extracts an external target
+from already-decoded `\fldinst` text. It borrows the target from the input
+without allocating and scans in linear time with constant additional storage.
+It does not extract instructions from a raw RTF document or interpret groups.
+
+```rust
+use mimecraft::text::parse_rtf_hyperlink;
+
+assert_eq!(
+    parse_rtf_hyperlink(r#"HYPERLINK \o "tooltip" "https://example.com/""#),
+    Some("https://example.com/"),
+);
+assert_eq!(parse_rtf_hyperlink(r#"HYPERLINK \l "bookmark""#), None);
+```
+
+The field name and allowed schemes (`http`, `https`, `mailto`, `ftp`, and `tel`)
+use ASCII-insensitive matching. Switches are case-sensitive: `\l` before a
+target rejects a local bookmark; `\o` and `\t` skip one quoted or unquoted
+argument, while other switches only skip themselves.
+
+MimeKit's recovery is preserved: keyword separators are optional, switches
+are recognized by their first letter, and an unterminated quoted target uses
+the rest of the instruction. Quotes are not backslash-unescaped. The first
+target ends parsing, so subsequent switches (including `\l`) are ignored.
+Whitespace separation and target trimming use Unicode whitespace. Controls
+remaining inside the trimmed target are rejected, as are missing or disallowed
+schemes. A rejected first target does not cause a search for later candidates.
+
+**This is not full URL validation or HTML sanitization.** Scheme-only targets
+such as `https:` are accepted; addresses, escapes, and host names are not
+validated or normalized. Use `html_attribute_encode` when writing the result
+into HTML and apply any application-specific URL restrictions separately.
+Unlike the HTML converter's bounded field collector, this helper does not
+truncate its borrowed input. `RtfToHtml` collects field instructions and tracks
+group-scoped hyperlink identity; plain-text conversion renders only field results.
 
 ### Converting plain text to HTML
 
@@ -4346,6 +4708,55 @@ trailing-less-than protection, and DOCTYPE name/quote rationale. Checked
 DOCTYPE setters retain keyword transitions and reject unrepresentable values
 atomically. String output replaces `TextWriter`; tokenization and reusable
 character buffers are not included.
+RTF tokenization ports `Text/RtfTokenizer.cs` and `Text/RtfKeyword.cs`, with
+canonical tokens, malformed recovery, and lexical positions from
+`UnitTests/Text/RtfTokenizerTests.cs` and `RtfInterpreterComplianceTests.cs`.
+`BufRead` and owned token payloads replace `TextReader` and reusable character
+buffers. Reading original bytes preserves raw high bytes and makes `\binN`
+lengths unambiguous without a Latin-1 decoding layer. A resumable state machine
+preserves source errors for retry; fixed lexical bounds, binary skipping,
+case-sensitive aliases, and applicable inline rationale are retained.
+`RtfTokenizerOptions` and capped callback delivery adapt the lexical subset of
+`Text/RtfComplianceOptions.cs` and `Text/RtfCappedComplianceLogger.cs`.
+Per-violation counters and the first-suppressed-issue marker preserve the
+upstream rationale, with coverage from `RtfCappedComplianceLoggerTests.cs`
+and `RtfConverterComplianceTests.cs`. Copied constructor options and stream-local
+counters replace global defaults and the converter's logger wrapper; calls
+without a callback do not spend the reporting budget.
+`RtfValidator` ports the initial-header, group-balance, and trailing-content
+checks from `Text/RtfInterpreter.cs`, with structural fixtures and issue ordering
+from `UnitTests/Text/RtfInterpreterComplianceTests.cs`. A token-preserving
+`BufRead` adapter exposes these checks independently of the rendering
+interpreter. The tokenizer and validator share the adapted capped-reporting
+helper; the validator applies one budget layer to the combined report.
+Applicable comments retain the header grammar, harmless-padding rule, lenient
+brace recovery, and first-root closure behavior. Structural state advances even
+on callback-free reads so enabling reporting does not recheck a consumed header.
+`RtfToText` ports `Text/RtfToText.cs` and the plain-text interpretation paths in
+`Text/RtfInterpreter.cs`, with fixtures from `RtfToTextTests.cs` and
+`RtfInterpreterTests.cs`. Applicable inline comments preserve folded-state
+limits, destination skipping, font-table boundaries, decoder-cache bounds,
+Unicode fallback/surrogate handling, delayed table separators, and placeholder
+spacing. Original byte input and the existing incremental charset filter replace
+the Latin-1 reader and platform encodings. Color storage and hyperlink collection
+are disabled for plain-text conversion; charset fallback and decode errors have
+explicit diagnostics.
+`RtfToHtml` ports the rendering handler from `Text/RtfToHtml.cs`, sharing the
+interpreter's bounded color table, field collector, and group-scoped hyperlink
+state. Fixtures come from `UnitTests/Text/RtfToHtmlTests.cs`; additional cases
+cover UTF-8 field limits, decoder boundaries, state bounds, and reporting quotas.
+Applicable comments preserve automatic-color handling, CSS formatting/cache
+bounds, empty paragraphs, whitespace, table recovery, field truncation, and link
+nesting. Reference-counted targets replace object identity without comparing
+long strings during state folding; the field cap uses UTF-8 bytes instead of
+UTF-16 units. Existing `HtmlWriter` and decoration helpers replace the C# writer
+plumbing. Encapsulated-HTML extraction and HTML tag callbacks are not ported.
+RTF hyperlink-field parsing ports `RtfInterpreter.ParseHyperlink` and its
+canonical fixtures in `UnitTests/Text/RtfInterpreterTests.cs`. Borrowed UTF-8
+slices replace `StringBuilder` and substring allocations. The switch/argument
+and control-character rationale, allowed schemes, and malformed-quote recovery
+are preserved; keyword and scheme folding deliberately use ASCII matching.
+This standalone helper does not implement the interpreter's field collector.
 Character-reference decoding follows `Text/HtmlEntityDecoder.cs`,
 `Text/HtmlEntityDecoder.g.cs`, and `HtmlUtils.HtmlDecode`. The standalone Rust
 generator adapts HtmlKit's `CodeGenerator/Program.cs` and bundles its
