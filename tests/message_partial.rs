@@ -344,6 +344,136 @@ bad record\r\nMessage-ID: <inner>\r\nSubject: third\r\n"
 }
 
 #[test]
+fn reassembly_discards_unrelated_root_offsets_before_ordinary_and_masked_writing() {
+    let mut envelope =
+        fields(b"X-Keep: outer\r\nSubject: discarded\r\nFrom: sender@example.com\r\n");
+    envelope.add(Header::parse(b"X-Authored: keep\r\n").unwrap());
+    let before: Vec<_> = envelope.iter().map(Header::offset).collect();
+    let enclosed = b"Content-Type: text/plain\r\nSubject: inner\r\n\
+Content-X: first\r\nMessage-ID: <inner@example.com>\r\nContent-X: second\r\n\r\nbody";
+    let expected_headers = b"X-Keep: outer\r\nSubject: inner\r\nFrom: sender@example.com\r\n\
+X-Authored: keep\r\nMessage-ID: <inner@example.com>\r\nContent-Type: text/plain\r\n\
+Content-X: first\r\nContent-X: second\r\n";
+
+    for split in 0..=enclosed.len() {
+        let mut parts = [
+            fragment(2, 2, &enclosed[split..]),
+            fragment(1, 2, &enclosed[..split]),
+        ];
+        let original_headers = fields(
+            b"Content-Type: message/partial; id=id; number=1; total=2\r\nX-Fragment: keep\r\n",
+        );
+        *parts[1].part_mut().headers_mut() = original_headers.clone();
+        let fragment_offsets: Vec<_> = original_headers.iter().map(Header::offset).collect();
+        let mut joined = MessagePartial::join(&envelope, &mut parts)
+            .unwrap()
+            .unwrap();
+        let mut expected = expected_headers.to_vec();
+        expected.extend_from_slice(b"\r\nbody");
+        assert_eq!(write(&mut joined), expected, "split at {split}");
+
+        let mut headers_only = Vec::new();
+        joined.write_headers_to(&mut headers_only).unwrap();
+        assert_eq!(headers_only, &expected[..expected.len() - 4]);
+        let mut masked_headers = Vec::new();
+        mimecraft::anonymize::write_headers(&fields(expected_headers), &mut masked_headers)
+            .unwrap();
+        masked_headers.extend_from_slice(b"\r\n");
+        let mut actual = Vec::new();
+        mimecraft::anonymize::write_message_headers(&joined, &mut actual).unwrap();
+        assert_eq!(actual, masked_headers);
+        actual.clear();
+        mimecraft::anonymize::write_message(&mut joined, &mut actual).unwrap();
+        masked_headers.extend_from_slice(b"xxxx");
+        assert_eq!(actual, masked_headers);
+
+        // Value equality intentionally ignores offsets, so check provenance
+        // separately from raw bytes and the header-list lookup index.
+        assert!(
+            joined
+                .headers()
+                .iter()
+                .all(|header| header.offset().is_none())
+        );
+        let body_headers = joined.body().unwrap().headers();
+        assert!(body_headers.iter().all(|header| header.offset().is_none()));
+        assert_eq!(body_headers.get_all("Content-X").count(), 2);
+        assert_eq!(
+            body_headers.get("Content-X").unwrap().raw_value(),
+            b" first\r\n"
+        );
+        assert_eq!(
+            envelope.iter().map(Header::offset).collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(parts[1].part().headers(), &original_headers);
+        assert_eq!(
+            parts[1]
+                .part()
+                .headers()
+                .iter()
+                .map(Header::offset)
+                .collect::<Vec<_>>(),
+            fragment_offsets
+        );
+        assert_eq!(
+            parts[0].part().content().get_ref().get_ref(),
+            &enclosed[split..]
+        );
+        assert_eq!(
+            parts[1].part().content().get_ref().get_ref(),
+            &enclosed[..split]
+        );
+    }
+}
+
+#[test]
+fn reassembly_retains_descendant_offsets_and_embedded_header_interleaving() {
+    let enclosed = b"Content-Type: multipart/mixed; boundary=b\r\nSubject: joined\r\n\r\n\
+--b\r\nContent-Type: message/rfc822\r\nContent-Description: attachment\r\n\r\n\
+X-Before: first\r\nContent-Type: text/plain\r\nSubject: attached\r\n\
+Content-X: inner\r\nX-After: last\r\n\r\nbody\r\n--b--\r\n";
+    let mut joined = MessagePartial::join(&HeaderList::new(), &mut [fragment(1, 1, enclosed)])
+        .unwrap()
+        .unwrap();
+    assert!(
+        joined
+            .headers()
+            .iter()
+            .all(|header| header.offset().is_none())
+    );
+    let Some(MimeEntity::Multipart(root)) = joined.body() else {
+        panic!("expected multipart");
+    };
+    assert!(
+        root.headers()
+            .iter()
+            .all(|header| header.offset().is_none())
+    );
+    let MimeEntity::Message(wrapper) = &root.children()[0] else {
+        panic!("expected embedded message");
+    };
+    let inner = wrapper.message().unwrap();
+    for header in wrapper
+        .headers()
+        .iter()
+        .chain(inner.headers())
+        .chain(inner.body().unwrap().headers())
+    {
+        let offset = enclosed
+            .windows(header.raw().len())
+            .position(|bytes| bytes == header.raw())
+            .unwrap() as u64;
+        assert_eq!(header.offset(), Some(offset), "{header:?}");
+    }
+    let expected = b"Subject: joined\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n\
+--b\r\nContent-Type: message/rfc822\r\nContent-Description: attachment\r\n\r\n\
+X-Before: first\r\nContent-Type: text/plain\r\nSubject: attached\r\n\
+Content-X: inner\r\nX-After: last\r\n\r\nbody\r\n--b--\r\n";
+    assert_eq!(write(&mut joined), expected);
+}
+
+#[test]
 fn stored_encodings_control_each_decoder_independently_of_outer_headers() {
     let mut first = fragment(1, 2, b"Subject: original=0D=0A=0D=0Ahel");
     first.part_mut().set_content(MimeContent::with_encoding(

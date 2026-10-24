@@ -472,6 +472,12 @@ impl HeaderList {
         self.first_by_name.clear();
     }
 
+    pub(crate) fn clear_offsets(&mut self) {
+        for header in &mut self.headers {
+            header.clear_offset();
+        }
+    }
+
     fn index_header(&mut self, index: usize) {
         if let Some(field) = self.headers[index].field() {
             // Entry avoids probing twice, like MimeKit's TryAdd, while keeping

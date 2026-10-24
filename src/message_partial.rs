@@ -208,8 +208,11 @@ impl<R: Read + Seek> MessagePartial<R> {
     /// fields are copied in order except those four special fields, whose slots
     /// take matching enclosed fields when present. Remaining enclosed special
     /// fields follow. Body Content-* headers remain those of the enclosed message.
-    /// Raw field spelling, duplicates, folds, and values are retained; header
-    /// interleaving between the message and body follows ordinary message I/O.
+    /// Raw field spelling, duplicates, folds, and values are retained. Combined
+    /// message and root-body headers have their stream offsets cleared, so
+    /// serialization writes the combined message headers before root-body fields.
+    /// Descendant offsets and embedded-message header interleaving are preserved.
+    /// The enclosing headers and input fragment headers retain their offsets.
     ///
     /// # Errors
     ///
@@ -348,7 +351,15 @@ fn combine_headers(enclosing: &HeaderList, joined: &mut MimeMessage) {
         }
     }
     headers.extend(enclosed);
+    // The enclosing and enclosed headers came from different streams; their
+    // offsets no longer describe the combined order. Like MimeKit, clear the
+    // message and root-body offsets, not those of independently ordered
+    // descendants such as attached messages.
+    headers.clear_offsets();
     *joined.headers_mut() = headers;
+    if let Some(body) = joined.body_mut() {
+        body.headers_mut().clear_offsets();
+    }
 }
 
 struct FragmentReader<R>(VecDeque<R>);

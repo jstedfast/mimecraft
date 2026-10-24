@@ -193,9 +193,14 @@ impl Header {
     /// from the start of their input; nested entities share that origin.
     /// Standalone parsing and authored headers return `None`. Clones retain
     /// offsets, but replacing a record does not assign the old record's offset.
+    /// Partial-message reassembly clears offsets of combined root headers.
     /// Offsets do not participate in header value equality.
     pub fn offset(&self) -> Option<u64> {
         self.offset
+    }
+
+    pub(crate) fn clear_offset(&mut self) {
+        self.offset = None;
     }
 
     /// Returns the ASCII field name, excluding blanks before the colon.

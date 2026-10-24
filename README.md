@@ -3613,8 +3613,12 @@ fields and discards other enclosed non-Content headers. Other enclosing
 non-Content fields are copied in order; the four special fields take matching
 enclosed values at their enclosing slots, with remaining enclosed special
 fields appended. The enclosed body's Content-* headers are preserved.
-Raw spelling, duplicates, folds, and values are retained; reassembled messages
-use the same message/body header merge as ordinary message serialization.
+Raw spelling, duplicates, folds, and values are retained. Stream offsets on
+combined message and root-body headers are cleared: offsets from the enclosing
+and enclosed streams cannot define their new order. Ordinary and masked writers
+therefore emit combined message headers before root-body Content-* headers.
+Descendant offsets and embedded-message header interleaving remain intact;
+the enclosing and input fragment headers are unchanged.
 Automatic splitting and generated IDs remain deferred. Fragment leaves can use
 ordinary part/tree transport preparation; no splitting-specific preparation
 is performed.
@@ -5867,8 +5871,9 @@ merging comments are preserved/adapted. Composition and decoded borrowed
 readers replace inheritance and disposable chained streams. Explicit errors
 distinguish malformed numbers from missing parameters, and missing IDs are
 rejected. Shared parser limits bound the reassembled decoded message; no
-intermediate concatenated message buffer is required. Source-offset clearing,
-visitor dispatch, and disposal comments do not apply to the Rust model.
+intermediate concatenated message buffer is required. As in MimeKit, combined
+message and root-body offsets are cleared without changing descendant offsets.
+Visitor dispatch and disposal comments do not apply to the Rust model.
 Automatic splitting and ID generation are not yet ported.
 `MimeReader.cs`'s multipart/digest default is scoped to the immediate parent
 and resets at embedded message roots. Unlike cached effective metadata, the
