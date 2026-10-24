@@ -1,3 +1,4 @@
+// Includes fixtures adapted from MimeKit's UnitTests/MimePartTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
@@ -125,6 +126,13 @@ fn every_stored_and_requested_encoding_pair_round_trips_without_mutation() {
                 let mut repeated = Vec::new();
                 part.write_to_with_options(&mut repeated, &options).unwrap();
                 assert_eq!(repeated, output);
+                let mut content_only = Vec::new();
+                part.write_content_to_with_options(&mut content_only, &options)
+                    .unwrap();
+                assert_eq!(content_only, body(&output, format));
+                assert_eq!(part.headers(), &before);
+                assert_eq!(part.content().get_ref().position(), 0);
+                assert_eq!(part.content().get_ref().get_ref(), &bytes);
             }
         }
     }
@@ -195,6 +203,9 @@ fn matching_encodings_preserve_payload_spelling_without_double_wrappers() {
         let mut output = Vec::new();
         part.write_to(&mut output).unwrap();
         assert_eq!(body(&output, NewLineFormat::Dos), expected);
+        let mut content_only = Vec::new();
+        part.write_content_to(&mut content_only).unwrap();
+        assert_eq!(content_only, expected);
     }
 }
 
@@ -241,6 +252,10 @@ fn empty_bodies_obey_newline_option_for_every_encoding_path() {
                         expected,
                         "{source:?} -> {target:?}, {format:?}, {ensure}"
                     );
+                    let mut content_only = Vec::new();
+                    part.write_content_to_with_options(&mut content_only, &options)
+                        .unwrap();
+                    assert_eq!(content_only, expected);
                 }
             }
         }
@@ -272,6 +287,9 @@ fn uu_filename_precedence_fallback_trim_and_utf8() {
             body(&output, NewLineFormat::Dos)
                 .starts_with(format!("begin 0644 {expected}\r\n").as_bytes())
         );
+        let mut content_only = Vec::new();
+        part.write_content_to(&mut content_only).unwrap();
+        assert_eq!(content_only, body(&output, NewLineFormat::Dos));
     }
 }
 
@@ -307,11 +325,19 @@ fn headers_normalize_without_mutation_and_repair_record_boundaries() {
         };
         assert_eq!(output, expected);
         assert_eq!(part.headers(), &headers);
+        let mut content_only = Vec::new();
+        part.write_content_to_with_options(&mut content_only, &options)
+            .unwrap();
+        assert_eq!(content_only, b"body");
+        assert_eq!(part.headers(), &headers);
     }
     let mut part = MimePart::from_parts(HeaderList::new(), MimeContent::new(Cursor::new(b"body")));
     let mut output = Vec::new();
     part.write_to(&mut output).unwrap();
     assert_eq!(output, b"\r\nbody");
+    let mut content_only = Vec::new();
+    part.write_content_to(&mut content_only).unwrap();
+    assert_eq!(content_only, b"body");
 
     let raw = raw_headers(b"\r\r\nX: value\n");
     let mut part = MimePart::from_parts(raw, MimeContent::new(Cursor::new(b"body")));
@@ -350,6 +376,12 @@ fn invalid_options_or_required_metadata_fail_before_any_io() {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.get_ref().is_some());
+        assert_eq!(
+            part.write_content_to_with_options(&mut output, &options)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(output.calls, 0);
         assert_eq!(output.flushes, 0);
         assert_eq!(part.content().get_ref().seeks, 0);
@@ -363,6 +395,10 @@ fn invalid_options_or_required_metadata_fail_before_any_io() {
         let mut output = Sink::default();
         assert_eq!(
             part.write_to(&mut output).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            part.write_content_to(&mut output).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
         assert_eq!(output.calls + output.flushes, 0);
@@ -382,6 +418,10 @@ fn invalid_options_or_required_metadata_fail_before_any_io() {
             part.write_to(&mut output).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        assert_eq!(
+            part.write_content_to(&mut output).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         assert_eq!(output.calls + output.flushes, 0);
         assert_eq!(part.content().get_ref().seeks, 0);
     }
@@ -392,6 +432,10 @@ fn invalid_options_or_required_metadata_fail_before_any_io() {
     let mut output = Sink::default();
     assert_eq!(
         part.write_to(&mut output).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+        part.write_content_to(&mut output).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
     assert_eq!(output.calls + output.flushes, 0);
@@ -431,6 +475,21 @@ fn requested_encoder_widths_and_chunked_streaming_work_for_large_bodies() {
             assert_eq!(decoded, bytes);
             assert_eq!(part.content().get_ref().inner.position(), 0);
             assert!(sink.flushes > 0);
+            let mut content_only = Sink {
+                chunk: 3,
+                interrupt: true,
+                ..Default::default()
+            };
+            part.write_content_to_with_options(
+                &mut content_only,
+                &MimePartWriteOptions {
+                    max_line_length: width,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(content_only.bytes, encoded);
+            assert_eq!(part.content().get_ref().inner.position(), 0);
         }
     }
 }
@@ -504,6 +563,112 @@ fn io_failures_propagate_and_retry_restarts_the_whole_part() {
         );
         assert_eq!(sink.flushes, flush);
     }
+}
+
+#[test]
+fn content_only_io_failures_propagate_and_retry_restarts_the_body() {
+    for encoding in ENCODINGS {
+        let full = serialize(b"body bytes", encoding, &MimePartWriteOptions::default());
+        let expected = body(&full, NewLineFormat::Dos);
+        for limit in 0..expected.len() {
+            let mut part = MimePart::new(MimeContent::new(Source::new(b"body bytes")));
+            part.set_content_transfer_encoding(encoding);
+            let mut sink = Sink {
+                fail_after: Some(limit),
+                chunk: 3,
+                interrupt: true,
+                ..Default::default()
+            };
+            assert_eq!(
+                part.write_content_to(&mut sink).unwrap_err().kind(),
+                io::ErrorKind::Other
+            );
+            assert_eq!(sink.bytes, expected[..limit]);
+            let mut retry = Vec::new();
+            part.write_content_to(&mut retry as &mut dyn Write).unwrap();
+            assert_eq!(retry, expected);
+            assert_eq!(part.content().get_ref().inner.position(), 0);
+        }
+    }
+    for fail_seek in [1, 2] {
+        let mut source = Source::new(b"body");
+        source.fail_seek = Some(fail_seek);
+        let mut part = MimePart::new(MimeContent::new(source));
+        assert_eq!(
+            part.write_content_to(&mut Vec::new()).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(part.content().get_ref().seeks, fail_seek);
+    }
+    let mut source = Source::new(b"body");
+    source.fail_read = true;
+    let mut part = MimePart::new(MimeContent::new(source));
+    assert_eq!(
+        part.write_content_to(&mut Vec::new()).unwrap_err().kind(),
+        io::ErrorKind::Other
+    );
+    assert_eq!(part.content().get_ref().seeks, 1);
+
+    let mut part = MimePart::new(MimeContent::new(Cursor::new(b"body")));
+    assert_eq!(
+        part.write_content_to(&mut Sink {
+            chunk: 0,
+            ..Default::default()
+        })
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::WriteZero
+    );
+    let mut sink = Sink::default();
+    part.write_content_to(&mut sink).unwrap();
+    for flush in 1..=sink.flushes {
+        let mut failing = Sink {
+            fail_flush: Some(flush),
+            ..Default::default()
+        };
+        assert_eq!(
+            part.write_content_to(&mut failing).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(failing.flushes, flush);
+    }
+}
+
+#[test]
+fn content_only_uu_and_binary_output_match_upstream_fixtures() {
+    // MimeKit's content-only UU fixture includes the wrapper lines, not headers.
+    let mut part = MimePart::new(MimeContent::new(Cursor::new(b"abc")));
+    part.set_content_transfer_encoding(ContentEncoding::UuEncode);
+    let mut disposition = ContentDisposition::default();
+    disposition.set_file_name(Some("file.txt"));
+    part.set_content_disposition(Some(&disposition)).unwrap();
+    let mut output = Vec::new();
+    part.write_content_to_with_options(
+        &mut output,
+        &MimePartWriteOptions {
+            new_line_format: NewLineFormat::Unix,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(output, b"begin 0644 file.txt\n#86)C\n`\nend\n");
+
+    let bytes = b"a\rb\nc";
+    let mut part = MimePart::new(MimeContent::with_encoding(
+        Cursor::new(bytes),
+        ContentEncoding::Binary,
+    ));
+    part.set_content_transfer_encoding(ContentEncoding::Binary);
+    let mut output = Vec::new();
+    part.write_content_to_with_options(
+        &mut output,
+        &MimePartWriteOptions {
+            ensure_new_line: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(output, bytes);
 }
 
 struct Source {

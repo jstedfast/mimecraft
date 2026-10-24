@@ -774,6 +774,13 @@ The borrowed destination is flushed, never closed. Retrying restarts the entire
 part, not the failed write; clear or replace the destination first. Neither the
 source body nor the output is materialized in its entirety.
 
+`write_content_to` and `write_content_to_with_options` serialize only the
+body, omitting this part's headers and blank separator. This is **not raw
+copying or decoded-content extraction**: the requested transfer encoding,
+newline options, encoder widths, and UU wrapper lines still apply. Required
+metadata is still validated before I/O; unrelated headers are not written.
+The same source rewind, destination flush, and error/retry rules apply.
+
 ### Text parts
 
 `TextPart<R>` composes a `MimePart<R>` with text-specific operations.
@@ -934,6 +941,15 @@ and source/destination errors propagate. No rollback occurs; retries restart
 serialization. Sources follow the leaf writer's rewind rules, the destination
 is flushed but not closed, and stored headers, text, bodies, and structure are
 unchanged. Transport preparation and signature-specific handling are deferred.
+
+`Multipart` and `MimeEntity` also provide `write_content_to` and
+`write_content_to_with_options`. Only the root header section is omitted:
+preambles, complete child entities, boundary markers, and epilogues remain.
+In particular, child headers are not suppressed, delimiter-owned newlines are
+unchanged, and the root boundary remains active for ancestor-overlap checks.
+`MimeEntity` dispatches leaves to the single-part content writer and message
+wrappers to their enclosed-message writer. Content-only output uses the same
+iterative traversal and metadata validation as complete serialization.
 
 ### Entity loading
 
@@ -3052,6 +3068,13 @@ drop still recurse, so callers must bound programmatic depth. Active ancestor
 boundaries remain checked inside messages, and independent delimiter framing
 preserves binary suffixes. Root newline assurance flows through message
 wrappers to the body or root epilogue; multipart children do not force it.
+
+`write_content_to` and its `_with_options` variant omit only the wrapper's
+headers and separator. The enclosed message still includes its message headers,
+root-body headers, separator, and body, without generating metadata or hiding
+Bcc. A missing message writes no bytes but flushes the destination; a present
+empty message writes its own separator. Standalone wrapper metadata checks
+still apply, including rejection of unsupported encoded wrappers.
 
 The wrapper requires a valid message/* or text/rfc822-headers Content-Type,
 except for an implicit message/rfc822 child written through a multipart/digest

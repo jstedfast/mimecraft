@@ -3,8 +3,8 @@
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 
 use mimecraft::{
-    ContentEncoding, Header, HeaderList, HeaderParser, MimeContent, MimeEntity, MimePart,
-    MimePartWriteOptions, Multipart, TextPart, encodings::NewLineFormat,
+    ContentEncoding, Header, HeaderList, HeaderParser, MessagePart, MimeContent, MimeEntity,
+    MimeMessage, MimePart, MimePartWriteOptions, Multipart, TextPart, encodings::NewLineFormat,
 };
 
 fn container(boundary: &str) -> Multipart {
@@ -23,6 +23,19 @@ fn wire(part: &mut Multipart, options: &MimePartWriteOptions) -> Vec<u8> {
     let mut output = Vec::new();
     part.write_to_with_options(&mut output, options).unwrap();
     output
+}
+
+fn content_bytes(output: &[u8], format: NewLineFormat) -> &[u8] {
+    let separator = if format == NewLineFormat::Dos {
+        b"\r\n\r\n".as_slice()
+    } else {
+        b"\n\n"
+    };
+    let start = output
+        .windows(separator.len())
+        .position(|value| value == separator)
+        .unwrap();
+    &output[start + separator.len()..]
 }
 
 fn nested() -> Multipart {
@@ -79,6 +92,10 @@ fn nested_tree_has_exact_framing_and_root_only_newline_option() {
                 0
             );
             assert_eq!(wire(&mut part, &options), output);
+            let mut content_only = Vec::new();
+            part.write_content_to_with_options(&mut content_only, &options)
+                .unwrap();
+            assert_eq!(content_only, content_bytes(&output, format));
         }
     }
 }
@@ -137,6 +154,17 @@ fn delimiter_newline_never_consumes_binary_suffix_bytes_or_empty_bodies() {
             let delimiter_start = content_start + bytes.len();
             assert_eq!(&output[content_start..delimiter_start], bytes);
             assert!(output[delimiter_start..].starts_with(middle.as_bytes()));
+            let mut content_only = Vec::new();
+            part.write_content_to_with_options(
+                &mut content_only,
+                &MimePartWriteOptions {
+                    new_line_format: format,
+                    ensure_new_line: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(content_only, content_bytes(&output, format));
         }
     }
 }
@@ -326,6 +354,10 @@ fn invalid_root_metadata_and_options_fail_before_output_or_flush() {
             part.write_to(&mut sink).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        assert_eq!(
+            part.write_content_to(&mut sink).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         assert_eq!(sink.calls + sink.flushes, 0);
         assert_eq!(
             part.leaf_parts()
@@ -359,6 +391,13 @@ fn invalid_root_metadata_and_options_fail_before_output_or_flush() {
                 .kind(),
             io::ErrorKind::InvalidInput
         );
+        assert_eq!(
+            nested()
+                .write_content_to_with_options(&mut sink, &options)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(sink.calls + sink.flushes, 0);
     }
 }
@@ -382,6 +421,10 @@ fn multipart_transfer_encodings_are_checked_using_the_first_header() {
         let mut sink = Sink::default();
         assert_eq!(
             part.write_to(&mut sink).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            part.write_content_to(&mut sink).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
         assert_eq!(sink.calls + sink.flushes, 0);
@@ -611,6 +654,359 @@ fn large_raw_sections_and_chunked_binary_sources_cross_filter_buffers() {
     let source = root.leaf_parts().next().unwrap().content().get_ref();
     assert_eq!(source.inner.position(), 0);
     assert!(source.reads > payload.len() / 3);
+}
+
+#[test]
+fn content_only_entity_dispatch_omits_only_the_root_header_section() {
+    let message = MimeMessage::from_parts(
+        vec![
+            Header::parse(b"Subject: attached").unwrap(),
+            Header::parse(b"Bcc: kept@example.com").unwrap(),
+        ]
+        .into(),
+        Some(nested().into()),
+    );
+    let mut entities = [
+        leaf(b"binary\0\r", ContentEncoding::Binary),
+        nested().into(),
+        MessagePart::new(message).into(),
+    ];
+    for entity in &mut entities {
+        let headers = entity.headers().clone();
+        for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+            for ensure_new_line in [false, true] {
+                let options = MimePartWriteOptions {
+                    new_line_format: format,
+                    ensure_new_line,
+                    ..Default::default()
+                };
+                let mut complete = Vec::new();
+                entity
+                    .write_to_with_options(&mut complete, &options)
+                    .unwrap();
+                let mut content_only = Vec::new();
+                entity
+                    .write_content_to_with_options(&mut content_only as &mut dyn Write, &options)
+                    .unwrap();
+                assert_eq!(content_only, content_bytes(&complete, format));
+                assert_eq!(entity.headers(), &headers);
+                for part in entity.leaf_parts() {
+                    assert_eq!(part.content().get_ref().position(), 0);
+                }
+            }
+        }
+        let mut complete = Vec::new();
+        entity.write_to(&mut complete).unwrap();
+        let mut content_only = Vec::new();
+        entity.write_content_to(&mut content_only).unwrap();
+        assert_eq!(content_only, content_bytes(&complete, NewLineFormat::Dos));
+    }
+}
+
+#[test]
+fn content_only_empty_containers_and_absent_or_empty_messages_have_exact_framing() {
+    for (format, newline) in [(NewLineFormat::Dos, "\r\n"), (NewLineFormat::Unix, "\n")] {
+        let options = MimePartWriteOptions {
+            new_line_format: format,
+            ensure_new_line: true,
+            ..Default::default()
+        };
+        let mut empty = container("empty");
+        let mut output = Vec::new();
+        empty
+            .write_content_to_with_options(&mut output, &options)
+            .unwrap();
+        assert_eq!(output, format!("--empty--{newline}").as_bytes());
+        empty.set_preamble(b"intro".to_vec());
+        empty.set_epilogue(b"tail".to_vec());
+        output.clear();
+        empty
+            .write_content_to_with_options(&mut output, &options)
+            .unwrap();
+        assert_eq!(
+            output,
+            format!("intro{newline}--empty--{newline}tail{newline}").as_bytes()
+        );
+
+        let mut wrapper: MessagePart = MessagePart::new(MimeMessage::new());
+        let mut sink = Sink::default();
+        wrapper
+            .write_content_to_with_options(&mut sink, &options)
+            .unwrap();
+        assert_eq!(sink.bytes, newline.as_bytes());
+        assert!(sink.flushes > 0);
+        wrapper.set_message(None);
+        let mut sink = Sink::default();
+        wrapper
+            .write_content_to_with_options(&mut sink, &options)
+            .unwrap();
+        assert!(sink.bytes.is_empty());
+        assert!(sink.flushes > 0);
+    }
+    let mut absent: MessagePart = MessagePart::new(MimeMessage::new());
+    absent.set_message(None);
+    let mut sink = Sink::default();
+    absent.write_content_to(&mut sink).unwrap();
+    assert!(sink.bytes.is_empty());
+    assert!(sink.flushes > 0);
+}
+
+#[test]
+fn content_only_wrappers_keep_enclosed_message_headers_and_do_not_filter_bcc() {
+    for content_type in ["message/rfc822", "message/global", "text/rfc822-headers"] {
+        let message = MimeMessage::from_parts(
+            vec![
+                Header::parse(b"Subject: inside").unwrap(),
+                Header::parse(b"Bcc: kept@example.com").unwrap(),
+            ]
+            .into(),
+            Some(leaf(b"binary", ContentEncoding::Binary)),
+        );
+        let mut wrapper = MessagePart::from_parts(
+            vec![
+                Header::parse(format!("Content-Type: {content_type}").as_bytes()).unwrap(),
+                Header::parse(b"X-Wrapper: omit").unwrap(),
+            ]
+            .into(),
+            Some(message),
+        );
+        let before = wrapper.headers().clone();
+        let mut output = Vec::new();
+        wrapper.write_content_to(&mut output).unwrap();
+        assert_eq!(
+            output,
+            b"Subject: inside\r\nBcc: kept@example.com\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: binary\r\n\r\nbinary"
+        );
+        assert_eq!(wrapper.headers(), &before);
+    }
+}
+
+#[test]
+fn content_only_preserves_digest_child_defaults_but_not_for_standalone_wrappers() {
+    let wrapper = MessagePart::from_parts(HeaderList::new(), Some(MimeMessage::new()));
+    let mut digest: Multipart = Multipart::new("digest", "digest").unwrap();
+    digest.children_mut().push(wrapper.into());
+    let mut output = Vec::new();
+    digest.write_content_to(&mut output).unwrap();
+    assert_eq!(output, b"--digest\r\n\r\n\r\n\r\n--digest--\r\n");
+    let MimeEntity::Message(wrapper) = &mut digest.children_mut()[0] else {
+        panic!("wrapper expected")
+    };
+    let mut sink = Sink::default();
+    assert_eq!(
+        wrapper.write_content_to(&mut sink).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(sink.calls + sink.flushes, 0);
+}
+
+#[test]
+fn content_only_still_validates_root_wrappers_and_all_options_before_io() {
+    for raw in [
+        b"".as_slice(),
+        b"Content-Type: text/plain",
+        b"Content-Type: invalid",
+        b"Content-Type: message/global\r\nContent-Transfer-Encoding: base64",
+        b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: unknown",
+    ] {
+        let mut parser = HeaderParser::new();
+        let mut records = Vec::new();
+        parser.parse(raw, &mut records).unwrap();
+        parser.finish(&mut records).unwrap();
+        let mut part = MessagePart::from_parts(
+            records.into(),
+            Some(MimeMessage::with_body(leaf(
+                b"untouched",
+                ContentEncoding::Binary,
+            ))),
+        );
+        let mut sink = Sink::default();
+        assert_eq!(
+            part.write_content_to(&mut sink).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(sink.calls + sink.flushes, 0);
+        assert_eq!(
+            part.leaf_parts()
+                .next()
+                .unwrap()
+                .content()
+                .get_ref()
+                .position(),
+            2
+        );
+    }
+    let mut roots = [
+        leaf(b"untouched", ContentEncoding::Base64),
+        nested().into(),
+        MessagePart::new(MimeMessage::with_body(leaf(
+            b"untouched",
+            ContentEncoding::Binary,
+        )))
+        .into(),
+    ];
+    for options in [
+        MimePartWriteOptions {
+            new_line_format: NewLineFormat::Mixed,
+            ..Default::default()
+        },
+        MimePartWriteOptions {
+            max_line_length: 59,
+            ..Default::default()
+        },
+        MimePartWriteOptions {
+            max_line_length: 999,
+            ..Default::default()
+        },
+    ] {
+        for root in &mut roots {
+            let positions: Vec<_> = root
+                .leaf_parts()
+                .map(|part| part.content().get_ref().position())
+                .collect();
+            let mut sink = Sink::default();
+            assert_eq!(
+                root.write_content_to_with_options(&mut sink, &options)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(sink.calls + sink.flushes, 0);
+            assert_eq!(
+                root.leaf_parts()
+                    .map(|part| part.content().get_ref().position())
+                    .collect::<Vec<_>>(),
+                positions
+            );
+        }
+    }
+}
+
+#[test]
+fn content_only_root_boundaries_remain_active_inside_attached_messages() {
+    for (outer, inner) in [
+        ("same", "same"),
+        ("outer", "outer-long"),
+        ("outer-long", "outer"),
+    ] {
+        let mut root = container(outer);
+        let attached = MessagePart::new(MimeMessage::with_body(container(inner).into()));
+        root.children_mut().push(attached.into());
+        let mut output = Vec::new();
+        let error = root.write_content_to(&mut output).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("ancestor"));
+        assert_eq!(
+            output,
+            format!("--{outer}\r\nContent-Type: message/rfc822\r\n\r\n").as_bytes()
+        );
+    }
+}
+
+#[test]
+fn content_only_sink_errors_stop_at_the_failure_and_retries_restart() {
+    let mut successful = Sink {
+        chunk: 3,
+        interrupt: true,
+        ..Default::default()
+    };
+    nested().write_content_to(&mut successful).unwrap();
+    let expected = &successful.bytes;
+    for limit in 0..expected.len() {
+        let mut root = nested();
+        let mut sink = Sink {
+            chunk: 3,
+            interrupt: true,
+            fail_after: Some(limit),
+            ..Default::default()
+        };
+        assert_eq!(
+            root.write_content_to(&mut sink).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(sink.bytes, expected[..limit]);
+        let mut retry = Vec::new();
+        root.write_content_to(&mut retry).unwrap();
+        assert_eq!(&retry, expected);
+    }
+    assert_eq!(
+        nested()
+            .write_content_to(&mut Sink {
+                chunk: 0,
+                ..Default::default()
+            })
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WriteZero
+    );
+    for flush in 1..=successful.flushes {
+        let mut failing = Sink {
+            fail_flush: Some(flush),
+            ..Default::default()
+        };
+        assert_eq!(
+            nested().write_content_to(&mut failing).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(failing.flushes, flush);
+    }
+}
+
+#[test]
+fn content_only_child_io_failure_leaves_later_borrowed_sources_untouched() {
+    let mut first = Source::new(false);
+    let mut failing = Source::new(true);
+    let mut last = Source::new(false);
+    {
+        let mut root = Multipart::new("mixed", "outer").unwrap();
+        for source in [&mut first, &mut failing, &mut last] {
+            root.children_mut()
+                .push(MimePart::new(MimeContent::new(source)).into());
+        }
+        let mut output = Vec::new();
+        assert_eq!(
+            root.write_content_to(&mut output).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert!(output.starts_with(b"--outer\r\n"));
+        assert!(!output.ends_with(b"--outer--\r\n"));
+    }
+    assert_eq!(first.seeks, 2);
+    assert_eq!(first.inner.position(), 0);
+    assert_eq!(failing.seeks, 1);
+    assert_eq!(last.seeks, 0);
+    assert_eq!(last.inner.position(), 2);
+}
+
+#[test]
+fn content_only_deep_wrappers_remain_iterative_and_omit_exactly_one_header_section() {
+    const DEPTH: usize = 10_000;
+    let mut root = leaf(b"deep", ContentEncoding::Binary);
+    for _ in 0..DEPTH {
+        root = MessagePart::new(MimeMessage::with_body(root)).into();
+    }
+    let mut output = Vec::new();
+    root.write_content_to(&mut output).unwrap();
+    let wrapper_header = b"Content-Type: message/rfc822\r\n\r\n";
+    let count = output
+        .windows(wrapper_header.len())
+        .filter(|value| *value == wrapper_header)
+        .count();
+    assert_eq!(count, DEPTH - 1);
+    assert!(output.ends_with(b"\r\n\r\ndeep"));
+    assert_eq!(
+        root.leaf_parts()
+            .next()
+            .unwrap()
+            .content()
+            .get_ref()
+            .position(),
+        0
+    );
+    // Writing is iterative; the model's ordinary Drop still recurses.
+    while let MimeEntity::Message(wrapper) = root {
+        root = wrapper.into_parts().1.unwrap().into_parts().1.unwrap();
+    }
 }
 
 struct Source {

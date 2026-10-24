@@ -50,6 +50,8 @@
 //! edits, raw preamble/epilogue bytes, and iterative [`LeafParts`] traversal.
 //! Their synchronous writers use iterative traversal, shared leaf encoding,
 //! checked ancestor boundaries, and independent delimiter-owned newlines.
+//! [`MimeEntity::write_content_to`] omits only the root's headers and separator,
+//! retaining transfer encoding, multipart framing, and complete enclosed messages.
 //! [`MimeEntity::load`] reads complete entity trees from buffered sources into
 //! owned body streams, preserving encoded bytes and raw headers with explicit
 //! [`MimeEntityParseOptions`] limits. Recovery of truncated entities is deferred.

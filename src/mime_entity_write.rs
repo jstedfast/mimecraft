@@ -43,6 +43,47 @@ impl<R: Read + Seek> MimeEntity<R> {
             Self::Message(part) => part.write_to_with_options(output, options),
         }
     }
+
+    /// Serializes only this entity's content using default options.
+    ///
+    /// Omits root headers and their separator, not descendant headers.
+    /// See [`Self::write_content_to_with_options`] for variant-specific behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata or I/O errors, possibly after partial output.
+    pub fn write_content_to<W: Write + ?Sized>(&mut self, output: &mut W) -> io::Result<()> {
+        self.write_content_to_with_options(output, &MimePartWriteOptions::default())
+    }
+
+    /// Serializes content without this entity's headers or blank separator.
+    ///
+    /// Leaves use [`crate::MimePart::write_content_to_with_options`], retaining
+    /// transfer encoding rather than simply decoding or copying stored bytes.
+    /// Multiparts retain preambles, complete children, delimiters, and epilogues.
+    /// Message wrappers retain the complete enclosed message. Only the root's
+    /// headers are omitted; required metadata validation and all other writer
+    /// behavior remain unchanged.
+    ///
+    /// Output is streamed and flushed, not closed. Successful body copying
+    /// rewinds sources, without changing headers, stored bytes, or tree shape.
+    ///
+    /// # Errors
+    ///
+    /// Options fail before I/O. Required metadata and source/destination errors
+    /// propagate using the full writer's traversal-order validation; partial
+    /// output is possible. Retrying starts over.
+    pub fn write_content_to_with_options<W: Write + ?Sized>(
+        &mut self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+    ) -> io::Result<()> {
+        match self {
+            Self::Part(part) => part.write_content_to_with_options(output, options),
+            Self::Multipart(multipart) => multipart.write_content_to_with_options(output, options),
+            Self::Message(part) => part.write_content_to_with_options(output, options),
+        }
+    }
 }
 
 impl<R: Read + Seek> Multipart<R> {
@@ -119,7 +160,44 @@ impl<R: Read + Seek> Multipart<R> {
         options: &MimePartWriteOptions,
     ) -> io::Result<()> {
         write_tree(
-            Task::Multipart(self, options.ensure_new_line),
+            Task::Multipart(self, options.ensure_new_line, false),
+            output,
+            options,
+        )
+    }
+
+    /// Writes multipart content without root headers, using default options.
+    ///
+    /// See [`Self::write_content_to_with_options`] for framing and validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata or I/O errors, possibly after partial output.
+    pub fn write_content_to<W: Write + ?Sized>(&mut self, output: &mut W) -> io::Result<()> {
+        self.write_content_to_with_options(output, &MimePartWriteOptions::default())
+    }
+
+    /// Writes the preamble, complete children, closing delimiter, and epilogue.
+    ///
+    /// Omits only this multipart's headers and blank separator. Child headers
+    /// and independent delimiter-owned newlines are retained. All options,
+    /// boundary/transfer-encoding checks, iterative traversal, source rewind,
+    /// and destination flush rules of [`Self::write_to_with_options`] apply.
+    /// Ancestor boundary checks include this root even though its headers
+    /// are omitted. No content is buffered in its entirety.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options or root metadata fail before I/O. Descendant metadata
+    /// and I/O errors may leave partial output. Nothing is rolled back; retrying
+    /// starts at the beginning.
+    pub fn write_content_to_with_options<W: Write + ?Sized>(
+        &mut self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+    ) -> io::Result<()> {
+        write_tree(
+            Task::Multipart(self, options.ensure_new_line, true),
             output,
             options,
         )
@@ -178,7 +256,48 @@ impl<R: Read + Seek> MessagePart<R> {
         options: &MimePartWriteOptions,
     ) -> io::Result<()> {
         write_tree(
-            Task::MessagePart(self, options.ensure_new_line, false),
+            Task::MessagePart(self, options.ensure_new_line, false, false),
+            output,
+            options,
+        )
+    }
+
+    /// Writes the enclosed message without wrapper headers, using default options.
+    ///
+    /// See [`Self::write_content_to_with_options`] for validation and framing.
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata or I/O errors, possibly after partial output.
+    pub fn write_content_to<W: Write + ?Sized>(&mut self, output: &mut W) -> io::Result<()> {
+        self.write_content_to_with_options(output, &MimePartWriteOptions::default())
+    }
+
+    /// Writes the complete enclosed message without this wrapper's header section.
+    ///
+    /// The message retains its headers, root-body headers, separator, and body.
+    /// An absent message writes nothing but still flushes; a present empty
+    /// message writes its own separator. Descendant wrapper and multipart
+    /// headers are retained. Bcc is not filtered and no metadata is generated.
+    ///
+    /// All wrapper validation and iterative traversal rules of
+    /// [`Self::write_to_with_options`] apply, including the explicit standalone
+    /// Content-Type requirement and rejection of encoded wrappers. Omitting
+    /// headers does not enable previously unsupported transfer encodings.
+    /// `ensure_new_line` still reaches the enclosed message's root body.
+    ///
+    /// # Errors
+    ///
+    /// Options and root wrapper metadata fail before I/O; descendant metadata
+    /// and I/O errors may leave partial output. Retrying starts over, without
+    /// restoring source positions on failure.
+    pub fn write_content_to_with_options<W: Write + ?Sized>(
+        &mut self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+    ) -> io::Result<()> {
+        write_tree(
+            Task::MessagePart(self, options.ensure_new_line, false, true),
             output,
             options,
         )
@@ -221,17 +340,26 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     },
                 )?,
                 MimeEntity::Multipart(multipart) => {
-                    stack.push(Task::Multipart(multipart, ensure_new_line));
+                    stack.push(Task::Multipart(multipart, ensure_new_line, false));
                 }
                 MimeEntity::Message(part) => {
-                    stack.push(Task::MessagePart(part, ensure_new_line, digest_child));
+                    stack.push(Task::MessagePart(
+                        part,
+                        ensure_new_line,
+                        digest_child,
+                        false,
+                    ));
                 }
             },
-            Task::MessagePart(part, ensure_new_line, digest_child) => {
+            Task::MessagePart(part, ensure_new_line, digest_child, content_only) => {
                 check_message_part(part, digest_child)?;
-                part.headers()
-                    .write_terminated(output, options.new_line_format)?;
-                output.write_all(newline)?;
+                // Content-only omits the wrapper, not the embedded message's
+                // header section. The message is still written in full.
+                if !content_only {
+                    part.headers()
+                        .write_terminated(output, options.new_line_format)?;
+                    output.write_all(newline)?;
+                }
                 if let Some(message) = part.message_mut() {
                     // The embedded message inherits its wrapper's final-newline
                     // policy, not the top-level formatting option.
@@ -248,7 +376,7 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     output.write_all(newline)?;
                 }
             }
-            Task::Multipart(multipart, ensure_new_line) => {
+            Task::Multipart(multipart, ensure_new_line, content_only) => {
                 let boundary = checked_boundary(multipart)?;
                 let digest = multipart
                     .content_type()
@@ -270,10 +398,12 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                         ));
                     }
                 }
-                multipart
-                    .headers()
-                    .write_terminated(output, options.new_line_format)?;
-                output.write_all(newline)?;
+                if !content_only {
+                    multipart
+                        .headers()
+                        .write_terminated(output, options.new_line_format)?;
+                    output.write_all(newline)?;
+                }
                 write_text(output, multipart.preamble(), options, true)?;
                 let (children, epilogue) = multipart.children_and_epilogue();
                 stack.push(Task::Children(Frame {
@@ -304,6 +434,8 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     frame.after_child = true;
                     let digest_child = frame.digest;
                     stack.push(Task::Children(frame));
+                    // As in MimeKit, every multipart child starts a complete
+                    // entity, even when its parent's headers were omitted.
                     stack.push(Task::Entity(child, false, digest_child));
                 } else {
                     output.write_all(b"--")?;
@@ -346,9 +478,9 @@ impl<W: Write + ?Sized> Write for EndingWriter<'_, W> {
 
 enum Task<'a, R> {
     Entity(&'a mut MimeEntity<R>, bool, bool),
-    MessagePart(&'a mut MessagePart<R>, bool, bool),
+    MessagePart(&'a mut MessagePart<R>, bool, bool, bool),
     Message(&'a mut MimeMessage<R>, bool),
-    Multipart(&'a mut Multipart<R>, bool),
+    Multipart(&'a mut Multipart<R>, bool, bool),
     Children(Frame<'a, R>),
 }
 

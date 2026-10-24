@@ -141,6 +141,68 @@ impl<R: Read + Seek> MimePart<R> {
         output: &mut W,
         options: &MimePartWriteOptions,
     ) -> io::Result<()> {
+        self.write_with_options(output, options, false)
+    }
+
+    /// Writes only the transfer-encoded content, using default options.
+    ///
+    /// Omits this part's headers and blank separator. This is serialization,
+    /// not raw copying or decoding; see [`Self::write_content_to_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata or I/O errors, potentially after partial output.
+    pub fn write_content_to<W: Write + ?Sized>(&mut self, output: &mut W) -> io::Result<()> {
+        self.write_content_to_with_options(output, &MimePartWriteOptions::default())
+    }
+
+    /// Writes the serialized body without headers or a header/body separator.
+    ///
+    /// Adapts MimeKit's content-only output. Uses the same transfer-encoding
+    /// selection, conversion, newline rules, and UU wrappers as
+    /// [`Self::write_to_with_options`]. Required metadata is still validated,
+    /// including filenames when generating UU wrappers. Unrelated headers are
+    /// neither parsed nor written.
+    ///
+    /// Unlike [`crate::MimeContent::write_to`], this honors the requested header
+    /// encoding even when it differs from the stored content's encoding. Unlike
+    /// [`crate::MimeContent::decode_to`], output is not necessarily decoded.
+    /// Headers and stored bytes are unchanged. Successful copying rewinds the
+    /// source; the destination is flushed, not closed. Nested encoding sinks
+    /// still require their own finalization.
+    ///
+    /// # Errors
+    ///
+    /// Options and required metadata are checked before any source or
+    /// destination I/O. Read, seek, write, and flush errors propagate, possibly
+    /// after partial or complete output. No position restoration or output
+    /// rollback occurs on failure. Retrying starts from the beginning.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{ContentEncoding, MimeContent, MimePart};
+    ///
+    /// let mut part = MimePart::new(MimeContent::new(Cursor::new(b"Cat")));
+    /// part.set_content_transfer_encoding(ContentEncoding::Base64);
+    /// let mut output = Vec::new();
+    /// part.write_content_to(&mut output)?;
+    /// assert_eq!(output, b"Q2F0\r\n");
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn write_content_to_with_options<W: Write + ?Sized>(
+        &mut self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+    ) -> io::Result<()> {
+        self.write_with_options(output, options, true)
+    }
+
+    fn write_with_options<W: Write + ?Sized>(
+        &mut self,
+        output: &mut W,
+        options: &MimePartWriteOptions,
+        content_only: bool,
+    ) -> io::Result<()> {
         let newline = options.validate()?;
         let encoding = self
             .content_transfer_encoding()
@@ -175,9 +237,11 @@ impl<R: Read + Seek> MimePart<R> {
             None
         };
 
-        self.headers()
-            .write_terminated(output, options.new_line_format)?;
-        output.write_all(newline)?;
+        if !content_only {
+            self.headers()
+                .write_terminated(output, options.new_line_format)?;
+            output.write_all(newline)?;
+        }
         if let Some(name) = &uu_name {
             output.write_all(b"begin 0644 ")?;
             output.write_all(name.as_bytes())?;
