@@ -59,6 +59,8 @@
 //! independent typed header access with checked parsing and canonical setters.
 //! Message identifiers and reply references also have raw-header-backed accessors,
 //! assignment-validated setters, and explicit parsing and recovery errors.
+//! Date, Resent-Date, and MIME-Version accessors reuse the existing value types,
+//! with explicit absence, parse errors, and independent canonical setters.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for

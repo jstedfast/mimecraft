@@ -91,6 +91,8 @@ MimeKit. The crate is not configured for publication.
   with raw headers, stored transfer encodings, and input/header/depth limits.
 - Message ownership, buffered loading, and synchronous writing, with separate
   message/body headers, optional bodies, and no generated metadata.
+- Typed Date, Resent-Date, and MIME-Version accessors with explicit absence,
+  parse errors, and canonical setters backed by current raw headers.
 - Typed importance and priority headers with independent raw-header access,
   checked numeric-prefix parsing, and canonical setters that preserve no-ops.
 - Structured attached-message ownership and iterative writing, with nested
@@ -1017,6 +1019,46 @@ transport preparation: **Bcc and Resent-Bcc are written as supplied**.
 Other message-specific typed convenience setters, safe complete unstructured-header
 authoring, offset-based header merging, and automatic
 transport preparation remain deferred.
+
+### Message dates and MIME version
+
+`MimeMessage::date()`, `resent_date()`, and `mime_version()` parse the first
+matching raw header with the existing `DateTimeOffset` and `MimeVersion` parsers.
+Absent fields return `None`, while values those parsers cannot interpret return
+errors. No current date, minimum date, or default MIME version is substituted.
+Date parsing retains its legacy recovery rules; version error offsets are
+relative to the raw value. Encoded words are not decoded, and later duplicates
+and body headers are ignored.
+
+```rust
+use mimecraft::{DateTimeOffset, MimeMessage, MimeVersion};
+
+let mut message: MimeMessage = MimeMessage::new();
+let date = DateTimeOffset::new(2007, 6, 28, 12, 47, 52, -300).unwrap();
+message.set_date(date);
+message.set_resent_date(date);
+message.set_mime_version(MimeVersion::V1_0);
+assert_eq!(message.date().unwrap(), Some(date));
+assert_eq!(message.mime_version().unwrap(), Some(MimeVersion::V1_0));
+```
+
+Setters accept checked values and perform no source I/O. Equal parsed values
+leave original bytes and duplicates unchanged. Otherwise they replace all
+occurrences at the first slot, or append if absent. New date records use English
+names, seconds, and numeric offsets; versions use decimal components. Both use
+CRLF. Malformed existing values are replaced, and raw removal restores absence.
+
+Date equality includes local components and offset, following the Rust value
+type rather than C#'s instant-only comparison: assigning the same instant in
+a different offset changes the header. Version component counts are significant,
+so `1.0`, `1.0.0`, and `1.0.0.0` remain distinct. Getters always reparse current
+bytes; no cache masks the date parser's narrower range. A checked date before
+1969 may fail to parse after assignment, and an offset below -12 hours recovers
+as UTC even though the constructor accepts offsets down to -14 hours.
+
+Date and Resent-Date remain independent. These APIs do not construct resent
+blocks, synthesize metadata during writing, or implement other MIME versions
+merely because a version other than 1.0 was assigned.
 
 ### Message identifiers and reply threading
 

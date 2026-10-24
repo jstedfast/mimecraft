@@ -4,10 +4,10 @@
 use std::io::{self, BufRead, Cursor, Read, Seek, Write};
 
 use crate::{
-    Attachments, BodyParts, Header, HeaderList, LeafParts, MessageId, MessageIdParseError,
-    MessageImportance, MessagePriority, MessagePriorityParseError, MimeEntity,
-    MimeEntityParseOptions, MimePart, MimePartWriteOptions, References, TextBodyError, TextFormat,
-    XMessagePriority,
+    Attachments, BodyParts, DateTimeOffset, DateTimeOffsetError, Header, HeaderList, LeafParts,
+    MessageId, MessageIdParseError, MessageImportance, MessagePriority, MessagePriorityParseError,
+    MimeEntity, MimeEntityParseOptions, MimePart, MimePartWriteOptions, MimeVersion,
+    MimeVersionParseError, References, TextBodyError, TextFormat, XMessagePriority,
 };
 
 /// An owned message with raw message headers and an optional MIME body tree.
@@ -27,6 +27,8 @@ use crate::{
 /// missing fields mean Normal, while invalid present values return errors.
 /// Identifier and reply-threading conveniences likewise read current headers,
 /// with explicit parse errors and assignment validation before edits.
+/// Date and MIME-Version accessors use existing value parsers, with no default
+/// for an absent field and no cache hiding subsequent raw edits.
 ///
 /// The body and every descendant share source type `R`. Ownership replaces
 /// disposal and parent tracking. Body removal returns the old tree without
@@ -84,6 +86,116 @@ impl<R> MimeMessage<R> {
     /// Edits message headers without moving fields to or from the body.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Reads the first Date header using [`DateTimeOffset::parse`].
+    ///
+    /// Returns `None` when absent, without supplying the current time or a
+    /// minimum date. Parsing uses raw bytes, not encoded-word decoding, and
+    /// retains the date parser's legacy recovery rules. Later duplicates and
+    /// body headers are ignored; raw edits are visible immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DateTimeOffsetError::InvalidSyntax`] if the first value cannot
+    /// be interpreted, rather than MimeKit's minimum-date fallback.
+    pub fn date(&self) -> Result<Option<DateTimeOffset>, DateTimeOffsetError> {
+        self.date_header("Date")
+    }
+
+    /// Assigns a checked Date without changing Resent-Date or reading sources.
+    ///
+    /// An equal parsed value preserves original bytes and duplicates. Equality
+    /// includes local components and offset, following [`DateTimeOffset`], not
+    /// just the instant: assigning the same instant with a different offset
+    /// rewrites the header. Otherwise replaces every occurrence at the first
+    /// slot, or appends if absent. Invalid existing values are replaced.
+    ///
+    /// New records use canonical English dates with seconds, a numeric zone,
+    /// and CRLF. No date is generated automatically; remove raw occurrences
+    /// to restore absence. Some checked values, such as dates before 1969,
+    /// cannot round-trip through the compatibility parser; no cache masks this.
+    pub fn set_date(&mut self, value: DateTimeOffset) {
+        self.set_date_header("Date", value);
+    }
+
+    /// Reads the first Resent-Date using [`Self::date`]'s rules.
+    ///
+    /// Does not inspect Date or try a later resent-header block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DateTimeOffsetError::InvalidSyntax`] for an uninterpretable
+    /// first value, without falling back to Date or a later Resent-Date.
+    pub fn resent_date(&self) -> Result<Option<DateTimeOffset>, DateTimeOffsetError> {
+        self.date_header("Resent-Date")
+    }
+
+    /// Assigns Resent-Date independently using [`Self::set_date`]'s rules.
+    ///
+    /// Does not create a resent-header block or update other resent fields.
+    pub fn set_resent_date(&mut self, value: DateTimeOffset) {
+        self.set_date_header("Resent-Date", value);
+    }
+
+    fn date_header(&self, field: &str) -> Result<Option<DateTimeOffset>, DateTimeOffsetError> {
+        self.headers
+            .get(field)
+            .map(|header| DateTimeOffset::parse(header.raw_value()))
+            .transpose()
+    }
+
+    fn set_date_header(&mut self, field: &str, value: DateTimeOffset) {
+        // Preserve an equal value's original header as MimeKit does, but use
+        // Rust's offset-sensitive equality so an explicit zone edit is not lost.
+        if self.date_header(field) != Ok(Some(value)) {
+            self.replace_formatted(Header::from_formatted(format!("{field}: {value}\r\n")));
+        }
+    }
+
+    /// Reads the first MIME-Version header using [`MimeVersion::parse`].
+    ///
+    /// Returns `None` when absent, without assuming version 1.0. Uses raw
+    /// bytes, not decoded text; comments and compatibility forms follow the
+    /// value parser. Later duplicates and body headers are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first value's parse error rather than MimeKit's null fallback.
+    /// Error offsets are relative to that header's raw value.
+    pub fn mime_version(&self) -> Result<Option<MimeVersion>, MimeVersionParseError> {
+        self.headers
+            .get("MIME-Version")
+            .map(|header| MimeVersion::parse(header.raw_value()))
+            .transpose()
+    }
+
+    /// Assigns a checked MIME-Version without changing the body or other fields.
+    ///
+    /// An equal parsed version preserves bytes and duplicates. Otherwise writes
+    /// canonical decimal components with CRLF at the first slot, removing later
+    /// duplicates, or appends if absent. Invalid existing values are replaced.
+    /// Component counts remain significant: `1.0` differs from `1.0.0`.
+    ///
+    /// No version is generated automatically; remove raw occurrences to restore
+    /// absence. Accepting a value other than 1.0 does not implement that version
+    /// of MIME or alter parsing/writing behavior. No source I/O occurs.
+    ///
+    /// ```
+    /// use mimecraft::{DateTimeOffset, MimeMessage, MimeVersion};
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// let date = DateTimeOffset::new(2007, 6, 28, 12, 47, 52, -300)?;
+    /// message.set_date(date);
+    /// message.set_mime_version(MimeVersion::V1_0);
+    /// assert_eq!(message.date()?, Some(date));
+    /// assert_eq!(message.mime_version()?, Some(MimeVersion::V1_0));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_mime_version(&mut self, value: MimeVersion) {
+        if self.mime_version() != Ok(Some(value)) {
+            self.replace_formatted(Header::from_formatted(format!("MIME-Version: {value}\r\n")));
+        }
     }
 
     /// Reads the first Message-Id header without decoding encoded words.
