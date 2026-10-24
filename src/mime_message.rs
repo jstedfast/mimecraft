@@ -36,6 +36,8 @@ use crate::{
 /// complete replacement before editing headers.
 /// Address-list accessors aggregate all matching message headers in order,
 /// returning detached lists with MimeKit-style recovery and diagnostics.
+/// Recipient collection selects ordinary or resent recipient fields and
+/// flattens groups without losing duplicate mailboxes.
 /// Subject uses tolerant decoding and checked unstructured-header authoring,
 /// replacing duplicate Subjects with one canonical record as in MimeKit.
 ///
@@ -79,6 +81,25 @@ pub struct MessageAddresses {
     pub addresses: AddressList,
     /// Syntax failures encountered while recovering addresses, in parse order.
     pub issues: Vec<MessageAddressIssue>,
+}
+
+/// Detached recipient mailboxes and diagnostics from the headers used to find them.
+///
+/// Preserves duplicates, mailbox names, routes, and mailbox decoding diagnostics.
+/// Group names and group structure are not included. This is header inspection,
+/// not a validated SMTP envelope or a list of unique delivery addresses.
+#[derive(Clone, Debug, Default)]
+#[must_use]
+pub struct MessageRecipients {
+    /// Mailboxes in To, Cc, then Bcc order (or their Resent-* counterparts).
+    pub mailboxes: Vec<MailboxAddress>,
+    /// Syntax diagnostics in evaluation order, with original header indices.
+    ///
+    /// Includes Resent-From recovery when it was needed to select the fields,
+    /// followed by diagnostics from the selected recipient fields.
+    pub issues: Vec<MessageAddressIssue>,
+    /// Whether Resent-To, Resent-Cc, and Resent-Bcc were selected.
+    pub uses_resent_headers: bool,
 }
 
 /// A syntax diagnostic from one message address header.
@@ -738,6 +759,92 @@ impl<R> MimeMessage<R> {
         options: &AddressHeaderFormatOptions,
     ) -> Result<(), AddressHeaderFormatError> {
         self.set_address_headers("Resent-Bcc", value, options)
+    }
+
+    /// Collects recipient mailboxes using default address parsing options.
+    ///
+    /// Like MimeKit's `GetRecipients(false)`, preserves duplicates and chooses
+    /// resent recipients when a Resent-Sender mailbox or any Resent-From address
+    /// exists. See [`Self::recipients_with_options`] for selection and recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid first Resent-Sender, not a silent fallback.
+    ///
+    /// ```
+    /// use mimecraft::MimeMessage;
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// message.set_to(&"Friends: alice@example.com, bob@example.com;".parse()?)?;
+    /// message.set_bcc(&"alice@example.com".parse()?)?;
+    /// let recipients = message.recipients()?;
+    /// assert!(!recipients.uses_resent_headers);
+    /// assert_eq!(recipients.mailboxes.len(), 3);
+    /// assert_eq!(recipients.mailboxes[2].address().as_str(), "alice@example.com");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn recipients(&self) -> Result<MessageRecipients, MailboxParseError> {
+        self.recipients_with_options(&AddressParseOptions::default())
+    }
+
+    /// Collects recipients with configurable mailbox parsing and group recovery.
+    ///
+    /// First checks Resent-Sender using [`Self::resent_sender_with_options`]
+    /// and `options.mailbox`. When absent, reads Resent-From with these address
+    /// options. Any recovered address, including an empty group, selects resent
+    /// fields; a missing or empty recovered list selects ordinary fields.
+    /// A present Resent-To alone does not select resent recipients.
+    ///
+    /// Aggregates To, Cc, then Bcc (or Resent-To, Resent-Cc, then Resent-Bcc).
+    /// Within each field, all occurrences retain header order and groups are
+    /// flattened depth-first in member order, skipping empty groups.
+    /// Senders, authors, and reply addresses are not recipients. Empty resent
+    /// recipient lists never fall back to ordinary recipients. This does not
+    /// identify the latest resent block: all selected occurrences participate.
+    ///
+    /// Uses the same tolerant header recovery as [`Self::from_with_options`].
+    /// Diagnostics from Resent-From, when evaluated, precede those from the
+    /// selected fields, so header indices need not be in ascending order.
+    /// Unselected recipient fields and unrelated sender/author headers are not
+    /// parsed. Returns owned mailbox copies, without changing raw headers,
+    /// reading body sources, deduplicating, or normalizing address spelling.
+    /// Bcc is included; this does not hide blind recipients during serialization
+    /// or validate an SMTP envelope.
+    ///
+    /// # Errors
+    ///
+    /// An empty, malformed, or disallowed first Resent-Sender returns its
+    /// [`MailboxParseError`] before reading other headers, even when a later
+    /// duplicate or Resent-From could otherwise select resent recipients.
+    /// Error offsets refer to that first header's raw value.
+    pub fn recipients_with_options(
+        &self,
+        options: &AddressParseOptions,
+    ) -> Result<MessageRecipients, MailboxParseError> {
+        let mut result = MessageRecipients::default();
+        result.uses_resent_headers = if self.resent_sender_with_options(&options.mailbox)?.is_some()
+        {
+            true
+        } else {
+            let from = self.resent_from_with_options(options);
+            result.issues = from.issues;
+            // MimeKit tests address count, not flattened mailbox count:
+            // even an empty Resent-From group selects resent recipients.
+            !from.addresses.is_empty()
+        };
+        let fields = if result.uses_resent_headers {
+            ["Resent-To", "Resent-Cc", "Resent-Bcc"]
+        } else {
+            ["To", "Cc", "Bcc"]
+        };
+        for field in fields {
+            let parsed = self.address_headers(field, options);
+            result
+                .mailboxes
+                .extend(parsed.addresses.mailboxes().cloned());
+            result.issues.extend(parsed.issues);
+        }
+        Ok(result)
     }
 
     fn address_headers(&self, field: &str, options: &AddressParseOptions) -> MessageAddresses {

@@ -247,8 +247,7 @@ impl<R: Read + Seek> TextPart<R> {
     /// The format parameter is Unicode-trimmed before comparing with `flowed`.
     ///
     /// Uses the same case-insensitive matching as body selection and the
-    /// predicates, including uppercase `PLAIN`, rather than MimeKit's
-    /// case-sensitive plain-subtype check in its Format property.
+    /// predicates, including uppercase `PLAIN`, matching MimeKit.
     /// The fallback does not make unknown text types candidates for a plain
     /// message body. Charset labels and payload syntax are not examined.
     ///

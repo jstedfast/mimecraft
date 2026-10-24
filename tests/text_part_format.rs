@@ -113,6 +113,8 @@ fn explicit_charset_format_construction_uses_the_existing_strict_codec() {
 fn classification_recognizes_aliases_case_and_trimmed_flowed_parameters() {
     for (content_type, format) in [
         ("text/plain", TextFormat::Plain),
+        ("text/PLAIN", TextFormat::Plain),
+        ("text/PLAIN; format=fixed", TextFormat::Plain),
         ("TeXt/PLAIN; FORMAT=\" Flowed \"", TextFormat::Flowed),
         (
             "text/plain; format*=utf-8''%20FLOWED%20",

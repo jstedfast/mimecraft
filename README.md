@@ -101,6 +101,8 @@ MimeKit. The crate is not configured for publication.
   checked address formatting, and atomic replacement.
 - From, Reply-To, To, Cc, Bcc, and Resent-* address-list accessors with
   MimeKit-style message-header recovery, diagnostics, and atomic setters.
+- Duplicate-preserving recipient collection with resent-field selection,
+  flattened groups, and header-indexed parsing diagnostics.
 - Subject accessors with tolerant decoding and checked, folded unstructured
   header authoring through reusable `Header::from_unstructured` factories.
 - Typed importance and priority headers with independent raw-header access,
@@ -943,9 +945,7 @@ counts as Enriched, not RTF. Charset labels, markup, and body bytes are not
 validated. Unknown `text/*` subtypes classify as Plain, matching MimeKit's
 fallback, but do not satisfy `is_plain()` or plain-body selection.
 
-Unlike MimeKit's Format property's case-sensitive plain-subtype branch,
-uppercase `PLAIN` is recognized consistently with `is_flowed`. The existing
-text-only wrapper policy remains: missing, invalid, or non-text Content-Type
+The existing text-only wrapper policy remains: missing, invalid, or non-text Content-Type
 returns `TextPartError`, including `application/rtf`. Such content can remain
 an ordinary `MimePart` and match RichText body selection instead. Format
 classification does not broaden which bodies are eligible for selection.
@@ -1380,6 +1380,53 @@ Sender inference, reply-address fallback, and resent-block selection are not
 provided. Resent accessors aggregate and replace across all matching blocks.
 **Bcc and Resent-Bcc are not automatically hidden when writing messages**;
 remove them explicitly before delivery when recipient privacy requires it.
+
+### Message recipient collection
+
+`MimeMessage::recipients()` returns `Result<MessageRecipients, MailboxParseError>`.
+`recipients_with_options(&AddressParseOptions)` configures both mailbox parsing
+and address-list recovery. The detached result contains `mailboxes`, header-indexed
+syntax `issues`, and `uses_resent_headers`.
+
+Like MimeKit's `GetRecipients(false)`, a parsed Resent-Sender selects resent
+recipients. Only when it is absent is Resent-From parsed: any recovered address,
+even an empty group, selects resent fields. Empty, comment-only, or wholly
+rejected Resent-From lists do not. A Resent-To header alone is insufficient.
+An invalid first Resent-Sender returns its existing mailbox error, rather than
+falling back to Resent-From or a later duplicate. Parsing options apply to that
+selector too.
+
+The selected fields are collected in To, Cc, Bcc order, or Resent-To,
+Resent-Cc, Resent-Bcc order. All matching occurrences retain header order within
+each field; groups flatten depth-first and empty groups contribute no mailboxes.
+All duplicates, mailbox spelling, names, routes, and mailbox decoding diagnostics
+survive. Sender, From, and Reply-To are not recipient sources. Empty resent
+recipient fields do not fall back to ordinary recipients, and this does not
+select the newest resent block: all matching recipient headers participate.
+
+```rust
+use mimecraft::MimeMessage;
+
+let mut message: MimeMessage = MimeMessage::new();
+message.set_to(&"Friends: alice@example.com, bob@example.com;".parse()?)?;
+message.set_bcc(&"alice@example.com".parse()?)?;
+let recipients = message.recipients()?;
+assert_eq!(recipients.mailboxes.len(), 3);
+assert!(!recipients.uses_resent_headers);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Recovery reuses the message address-list parser. Resent-From diagnostics, when
+that selector is evaluated, come first, followed by diagnostics from each
+selected field; original header indices and raw-value offsets are retained,
+not sorted. Group names/structure are omitted from the flattened result.
+Unselected recipient fields are not parsed. Each call reads current message
+headers without body I/O or raw edits, and modifying returned mailboxes never
+changes the message. Body headers and attached messages do not contribute.
+
+Case-insensitive recipient deduplication (`GetRecipients(true)`), sender-inclusive
+collection, and SMTP envelope validation remain deferred. Collection does not
+remove or hide Bcc/Resent-Bcc during serialization.
 
 ### Message sender mailboxes
 
@@ -5373,7 +5420,7 @@ normalization. Automatic detection and text-format conversion are not ported.
 Format-based construction maps the supported `TextFormat` variants to the
 source's text subtypes and flowed parameter. Classification and predicates
 reuse body-selection matching, retaining the unknown-text Plain fallback while
-making the plain-subtype comparison consistently case-insensitive. Enriched
+using MimeKit's case-insensitive subtype comparison. Enriched
 `text/richtext` stays distinct from RTF. The text wrapper's existing `text/*`
 validation remains stricter than MimeKit's support for `application/rtf`.
 Multipart ownership adapts `Multipart.cs` and `MimeEntity.cs` using an enum and

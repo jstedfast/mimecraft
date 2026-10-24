@@ -87,6 +87,8 @@
 //! Standard and resent address-list accessors aggregate matching headers with
 //! MimeKit-style recovery and [`MessageAddresses`] diagnostics. Their explicit
 //! setters validate complete replacements atomically; Bcc is not hidden on write.
+//! [`MimeMessage::recipients`] selects ordinary or resent recipient fields,
+//! returning flattened, duplicate-preserving [`MessageRecipients`] with diagnostics.
 //! Subject accessors reuse tolerant header decoding and checked
 //! [`Header::from_unstructured`] authoring with bounded folding, normalized
 //! assignment, and atomic duplicate-collapsing replacement.
@@ -359,7 +361,7 @@ pub use mime_entity::{AttachmentEditError, Attachments, BodyParts, LeafParts, Mi
 pub use mime_entity_load::MimeEntityParseOptions;
 pub use mime_entity_prepare::MimePrepareError;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
-pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};
+pub use mime_message::{MessageAddressIssue, MessageAddresses, MessageRecipients, MimeMessage};
 pub use mime_part::{
     BestEncodingError, FileNameEditError, InvalidContentDuration, MimePart, PartPrepareError,
 };
