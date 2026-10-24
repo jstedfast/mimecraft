@@ -47,6 +47,8 @@ MimeKit. The crate is not configured for publication.
   transfer-encoded payloads and UU wrappers.
 - Specialized decoded-field masking of delivery-status and disposition-
   notification bodies, with configurable preservation and parse limits.
+- Raw-byte masking output with newline conversion and optional termination
+  for supplied preamble/epilogue regions.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -439,6 +441,23 @@ Reset before an independent stream. For read-side I/O, nested `FilteredReader`
 adapters handle the finalization order automatically.
 
 ### Header and part-content masking
+
+`anonymize::write_bytes(input, output)` masks supplied raw bytes and converts
+newlines to CRLF, without forcing a final newline. Its `_with_options` variant
+takes `NewLineFormat` and an `ensure_new_line` boolean after the destination.
+It ports MimeKit's preamble/epilogue helper: every byte except SPACE, TAB, CR,
+and LF becomes `x`, then newlines are converted. No charset/transfer decoding,
+header interpretation, or automatic MIME-tree traversal occurs.
+
+For nonempty input, ensuring a newline adds one only if needed. A trailing
+bare CR becomes CRLF for DOS output or LF for Unix output; without ensuring,
+bare CR is retained. Empty input produces no bytes **and does not flush**, even
+when ensuring a newline, unlike using the newline filters directly. Each call
+starts fresh state, so supply a complete region instead of splitting CRLF
+across calls. Buffers are bounded and input remains unchanged. `Mixed` is
+rejected before I/O, including for empty input. Nonempty input flushes the
+destination but does not close or finalize caller-owned filters; I/O errors
+propagate with possible partial output. Retrying starts the region over.
 
 `anonymize::address_header_value(&[u8])` and
 `anonymize::unstructured_header_value(&[u8])` port MimeKit's raw-value masking

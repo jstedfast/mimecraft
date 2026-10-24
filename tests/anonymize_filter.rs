@@ -1,12 +1,132 @@
+// Raw-byte writer behavior adapted from MimeKit's MimeAnonymizer.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::io::{self, Cursor, Read, Write};
 
 use mimecraft::{
-    encodings::{Base64Decoder, Base64Encoder},
+    anonymize,
+    encodings::{Base64Decoder, Base64Encoder, NewLineFormat},
     filters::{AnonymizeFilter, DecoderFilter, EncoderFilter, MimeFilter},
     io::{FilteredReader, FilteredWriter},
 };
+
+#[test]
+fn raw_byte_writer_masks_all_bytes_before_newline_conversion() {
+    let input: Vec<_> = (0..=255).collect();
+    let before = input.clone();
+    for (format, newline) in [
+        (NewLineFormat::Dos, b"\r\n".as_slice()),
+        (NewLineFormat::Unix, b"\n".as_slice()),
+    ] {
+        for ensure in [false, true] {
+            let mut expected = Vec::new();
+            for &byte in &input {
+                match byte {
+                    b'\n' => expected.extend_from_slice(newline),
+                    b' ' | b'\t' | b'\r' => expected.push(byte),
+                    _ => expected.push(b'x'),
+                }
+            }
+            if ensure {
+                expected.extend_from_slice(newline);
+            }
+            let mut output = Vec::new();
+            anonymize::write_bytes_with_options(&input, &mut output, format, ensure).unwrap();
+            assert_eq!(output, expected);
+            assert_eq!(input, before);
+        }
+    }
+}
+
+#[test]
+fn raw_byte_writer_preserves_or_terminates_each_newline_suffix() {
+    for (input, dos, unix, ensured_dos, ensured_unix) in [
+        (
+            b"".as_slice(),
+            b"".as_slice(),
+            b"".as_slice(),
+            b"".as_slice(),
+            b"".as_slice(),
+        ),
+        (b"Ab", b"xx", b"xx", b"xx\r\n", b"xx\n"),
+        (b" \t", b" \t", b" \t", b" \t\r\n", b" \t\n"),
+        (b"A\n", b"x\r\n", b"x\n", b"x\r\n", b"x\n"),
+        (b"A\r\n", b"x\r\n", b"x\n", b"x\r\n", b"x\n"),
+        (b"\r", b"\r", b"\r", b"\r\n", b"\n"),
+        (b"\r\r", b"\r\r", b"\r\r", b"\r\r\n", b"\r\n"),
+        (b"\r\r\n", b"\r\r\n", b"\r\n", b"\r\r\n", b"\r\n"),
+        (
+            b"A\rB\nC\r",
+            b"x\rx\r\nx\r",
+            b"x\rx\nx\r",
+            b"x\rx\r\nx\r\n",
+            b"x\rx\nx\n",
+        ),
+        (b"\x0b\x0c\xff", b"xxx", b"xxx", b"xxx\r\n", b"xxx\n"),
+    ] {
+        let mut default = Vec::new();
+        anonymize::write_bytes(input, &mut default).unwrap();
+        assert_eq!(default, dos);
+        for (format, ensure, expected) in [
+            (NewLineFormat::Dos, false, dos),
+            (NewLineFormat::Unix, false, unix),
+            (NewLineFormat::Dos, true, ensured_dos),
+            (NewLineFormat::Unix, true, ensured_unix),
+        ] {
+            let mut output = b"prefix".to_vec();
+            anonymize::write_bytes_with_options(input, &mut output, format, ensure).unwrap();
+            assert_eq!(&output[..6], b"prefix");
+            assert_eq!(&output[6..], expected, "{input:?}, {format:?}, {ensure}");
+        }
+    }
+}
+
+#[test]
+fn raw_byte_writer_keeps_newline_state_across_internal_buffer_boundaries() {
+    for length in [4094, 4095, 4096, 4097, 8191] {
+        let input = [vec![b'A'; length], b"\r\nB\rC\nD\r".to_vec()].concat();
+        for (format, ensure, suffix) in [
+            (NewLineFormat::Dos, false, b"\r\nx\rx\r\nx\r".as_slice()),
+            (NewLineFormat::Dos, true, b"\r\nx\rx\r\nx\r\n"),
+            (NewLineFormat::Unix, false, b"\nx\rx\nx\r"),
+            (NewLineFormat::Unix, true, b"\nx\rx\nx\n"),
+        ] {
+            let mut output = Vec::new();
+            anonymize::write_bytes_with_options(&input, &mut output, format, ensure).unwrap();
+            let expected = [vec![b'x'; length], suffix.to_vec()].concat();
+            assert_eq!(output, expected, "{length}, {format:?}, {ensure}");
+        }
+    }
+    let mut output = Vec::new();
+    anonymize::write_bytes(&vec![b'\n'; 9000], &mut output).unwrap();
+    assert_eq!(output, b"\r\n".repeat(9000));
+}
+
+#[test]
+fn raw_byte_writer_regions_have_independent_newline_state() {
+    let mut output = Vec::new();
+    anonymize::write_bytes(b"A\r", &mut output).unwrap();
+    anonymize::write_bytes(b"\nB", &mut output).unwrap();
+    assert_eq!(output, b"x\r\r\nx");
+
+    let mut output = Vec::new();
+    for region in [b"A\r".as_slice(), b"\nB"] {
+        anonymize::write_bytes_with_options(region, &mut output, NewLineFormat::Unix, true)
+            .unwrap();
+    }
+    assert_eq!(output, b"x\n\nx\n");
+}
+
+#[test]
+fn raw_byte_writer_leaves_caller_owned_filters_unfinished() {
+    let mut output = Vec::new();
+    let mut encoder = FilteredWriter::new(&mut output, EncoderFilter::new(Base64Encoder::new()));
+    anonymize::write_bytes(b"A", &mut encoder).unwrap();
+    assert!(encoder.get_ref().is_empty());
+    encoder.write_all(b"BC").unwrap();
+    encoder.finish().unwrap();
+    assert_eq!(output, b"eEJD\r\n");
+}
 
 #[test]
 fn all_bytes_preserve_only_the_four_mime_whitespace_bytes() {

@@ -14,6 +14,8 @@
 //! leaf content after serialization, preserving only MIME whitespace.
 //! [`write_delivery_status_content`] and [`write_disposition_notification_content`]
 //! instead parse report bodies and mask their decoded header fields.
+//! [`write_bytes`] and [`write_bytes_with_options`] mask raw bytes with newline
+//! conversion, as used for multipart preambles and epilogues in MimeKit.
 //!
 //! This is not guaranteed removal of sensitive information. Lengths, selected
 //! syntax, and potential encoded-word charset/encoding labels remain visible;
@@ -339,6 +341,101 @@ fn write_filtered_headers<'a, W: Write + ?Sized, F: MimeFilter>(
     // MimeKit's filtered Flush finalizes filters; Rust's Write::flush does not.
     // Finish explicitly so a trailing CR held by Dos2Unix is not lost.
     filtered.finish()
+}
+
+/// Writes masked raw bytes using CRLF, without forcing a final newline.
+///
+/// See [`write_bytes_with_options`] for newline conversion and empty-input
+/// behavior. Does not interpret headers or serialize MIME content.
+///
+/// # Errors
+///
+/// Propagates destination write and flush errors, possibly after partial output.
+pub fn write_bytes<W: Write + ?Sized>(input: &[u8], output: &mut W) -> io::Result<()> {
+    write_bytes_with_options(input, output, NewLineFormat::Dos, false)
+}
+
+/// Masks raw bytes, converts newlines, and optionally ensures a final newline.
+///
+/// Adapts MimeKit's raw-byte writer used for multipart preambles and epilogues.
+/// Each byte except SPACE, TAB, CR, and LF becomes `x`, including non-ASCII,
+/// vertical tab, and form feed. Masking precedes newline conversion; there is
+/// no charset or transfer decoding, header interpretation, or MIME framing.
+/// Unlike [`write_part_content`], this writes supplied bytes, not serialized
+/// content. It does not visit a multipart or choose which regions to mask.
+///
+/// CRLF output expands bare LF; LF output removes the CR in CRLF pairs. Other
+/// CR bytes survive. With `ensure_new_line`, nonempty input that lacks a final
+/// LF gains the selected newline. A trailing CR becomes CRLF for DOS output
+/// or LF for Unix output. Existing final newlines are not doubled.
+///
+/// Empty input writes **and flushes nothing**, even with `ensure_new_line`.
+/// This matches MimeKit's raw-byte helper, not the newline filters themselves,
+/// which can emit a newline for empty input. Each call starts fresh filter
+/// state: supply a complete region, rather than splitting CRLF across calls.
+///
+/// Input is unchanged and processed with bounded streaming buffers. Nonempty
+/// input finalizes both internal filters and flushes the borrowed destination,
+/// without closing it or finalizing any caller-owned filter writer.
+///
+/// # Errors
+///
+/// [`NewLineFormat::Mixed`] returns [`io::ErrorKind::InvalidInput`] before any
+/// I/O, even for empty input. Write and flush errors propagate without rollback;
+/// output can be partial. Interrupted writes retry; zero writes return
+/// [`io::ErrorKind::WriteZero`]. Retrying this helper starts the region over.
+///
+/// ```
+/// use mimecraft::{anonymize, encodings::NewLineFormat};
+///
+/// let mut output = Vec::new();
+/// anonymize::write_bytes_with_options(
+///     b"Private preamble\r\nSecond line\r", &mut output, NewLineFormat::Unix, true,
+/// )?;
+/// assert_eq!(output, b"xxxxxxx xxxxxxxx\nxxxxxx xxxx\n");
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn write_bytes_with_options<W: Write + ?Sized>(
+    input: &[u8],
+    output: &mut W,
+    format: NewLineFormat,
+    ensure_new_line: bool,
+) -> io::Result<()> {
+    match format {
+        NewLineFormat::Dos => write_filtered_bytes(
+            input,
+            output,
+            Unix2DosFilter::with_ensure_new_line(ensure_new_line),
+        ),
+        NewLineFormat::Unix => write_filtered_bytes(
+            input,
+            output,
+            Dos2UnixFilter::with_ensure_new_line(ensure_new_line),
+        ),
+        NewLineFormat::Mixed => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "byte new-line format must be Dos or Unix",
+        )),
+    }
+}
+
+fn write_filtered_bytes<W: Write + ?Sized, F: MimeFilter>(
+    input: &[u8],
+    output: &mut W,
+    filter: F,
+) -> io::Result<()> {
+    // MimeKit skips empty preambles and epilogues before creating its filters:
+    // ensuring a newline must not turn an absent region into a blank line.
+    if input.is_empty() {
+        return Ok(());
+    }
+    let mut newline = FilteredWriter::new(output, filter);
+    let mut masked = FilteredWriter::new(&mut newline, AnonymizeFilter::new());
+    masked.write_all(input)?;
+    // Finalize in pipeline order. Rust's flush only drains the next writer;
+    // its pending CR or ensured final newline still needs an explicit finish.
+    masked.finish()?;
+    newline.finish()
 }
 
 /// Writes masked ordinary-part content using default serialization options.

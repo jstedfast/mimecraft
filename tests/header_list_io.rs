@@ -1036,6 +1036,100 @@ fn report_masking_validates_the_entire_parsed_report_before_destination_io() {
     assert_eq!(output, b"X: x\n x\n");
 }
 
+#[test]
+fn raw_byte_masking_skips_empty_io_but_always_validates_newlines() {
+    let mut output = TestWriter::new();
+    output.fail_flush = true;
+    anonymize::write_bytes(b"", &mut output).unwrap();
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        for ensure in [false, true] {
+            anonymize::write_bytes_with_options(b"", &mut output, format, ensure).unwrap();
+        }
+    }
+    for input in [b"".as_slice(), b"private"] {
+        for ensure in [false, true] {
+            let error = anonymize::write_bytes_with_options(
+                input,
+                &mut output,
+                NewLineFormat::Mixed,
+                ensure,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+    assert_eq!(output.writes + output.flushes, 0);
+    assert!(output.bytes.is_empty());
+}
+
+#[test]
+fn raw_byte_masking_retries_interrupts_and_reports_exact_failed_prefixes() {
+    for (format, expected) in [
+        (NewLineFormat::Dos, b"xxx\r\nxxx\r\n".as_slice()),
+        (NewLineFormat::Unix, b"xxx\nxxx\n".as_slice()),
+    ] {
+        let mut output = TestWriter::new();
+        output.interrupt_once = true;
+        let borrowed: &mut dyn Write = &mut output;
+        anonymize::write_bytes_with_options(b"one\r\ntwo\r", borrowed, format, true).unwrap();
+        assert_eq!(output.bytes, expected);
+        assert!(output.flushes > 0);
+        for limit in 0..expected.len() {
+            let mut output = TestWriter::new();
+            output.fail_after = Some(limit);
+            let error =
+                anonymize::write_bytes_with_options(b"one\r\ntwo\r", &mut output, format, true)
+                    .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(output.bytes, &expected[..limit]);
+            output.fail_after = None;
+            anonymize::write_bytes_with_options(b"one\r\ntwo\r", &mut output, format, true)
+                .unwrap();
+            assert_eq!(&output.bytes[limit..], expected);
+        }
+    }
+}
+
+#[test]
+fn raw_byte_masking_propagates_zero_writes_and_each_internal_flush_failure() {
+    let mut output = TestWriter::new();
+    output.zero_write = true;
+    assert_eq!(
+        anonymize::write_bytes(b"secret", &mut output)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WriteZero,
+    );
+    assert!(output.bytes.is_empty());
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let mut complete = TestWriter::new();
+        anonymize::write_bytes_with_options(b"A\r", &mut complete, format, true).unwrap();
+        for flush in 1..=complete.flushes {
+            let mut output = TestWriter::new();
+            output.fail_flush_at = Some(flush);
+            let error =
+                anonymize::write_bytes_with_options(b"A\r", &mut output, format, true).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(output.flushes, flush);
+            assert!(complete.bytes.starts_with(&output.bytes));
+            // A failed upstream flush must not finish the downstream newline
+            // filter and append a terminator after reporting failure.
+            if flush == 1 {
+                assert_eq!(
+                    output.bytes,
+                    if format == NewLineFormat::Dos {
+                        b"x\r".as_slice()
+                    } else {
+                        b"x"
+                    }
+                );
+            } else {
+                assert_eq!(output.bytes, complete.bytes);
+            }
+        }
+    }
+}
+
 struct ScriptedReader<'a> {
     input: &'a [u8],
     position: usize,
@@ -1092,6 +1186,7 @@ struct TestWriter {
     fail_after: Option<usize>,
     zero_write: bool,
     fail_flush: bool,
+    fail_flush_at: Option<usize>,
 }
 
 impl TestWriter {
@@ -1104,6 +1199,7 @@ impl TestWriter {
             fail_after: None,
             zero_write: false,
             fail_flush: false,
+            fail_flush_at: None,
         }
     }
 }
@@ -1130,7 +1226,7 @@ impl Write for TestWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         self.flushes += 1;
-        if self.fail_flush {
+        if self.fail_flush || self.fail_flush_at == Some(self.flushes) {
             Err(io::Error::other("flush failed"))
         } else {
             Ok(())
