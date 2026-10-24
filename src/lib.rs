@@ -31,6 +31,8 @@
 //! selected preservation and CRLF/LF conversion, without serializing bodies.
 //! [`anonymize::write_part_content_with_options`] masks ordinary leaf content
 //! after transfer encoding and newline handling, without writing its headers.
+//! Specialized delivery-status and disposition-notification masking in
+//! [`anonymize`] instead parses decoded report fields with explicit limits.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

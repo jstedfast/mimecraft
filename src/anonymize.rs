@@ -12,6 +12,8 @@
 //! [`write_headers_with_options`] mask records and normalize output newlines.
 //! [`write_part_content`] and [`write_part_content_with_options`] mask ordinary
 //! leaf content after serialization, preserving only MIME whitespace.
+//! [`write_delivery_status_content`] and [`write_disposition_notification_content`]
+//! instead parse report bodies and mask their decoded header fields.
 //!
 //! This is not guaranteed removal of sensitive information. Lengths, selected
 //! syntax, and potential encoded-word charset/encoding labels remain visible;
@@ -36,7 +38,9 @@
 use std::io::{self, Read, Seek, Write};
 
 use crate::{
-    DateTimeOffset, Header, HeaderId, MimePart, MimePartWriteOptions,
+    DateTimeOffset, DeliveryStatusError, DeliveryStatusParseOptions, DispositionNotificationError,
+    DispositionNotificationParseOptions, Header, HeaderId, MessageDeliveryStatus,
+    MessageDispositionNotification, MimePart, MimePartWriteOptions,
     encodings::NewLineFormat,
     filters::{AnonymizeFilter, Dos2UnixFilter, MimeFilter, Unix2DosFilter},
     io::FilteredWriter,
@@ -59,9 +63,10 @@ const WHITESPACE: &[u8] = b" \t\r\n";
 /// ordering, and duplicates, but order and duplicates do not affect masking.
 /// Matching scans the list without allocating a normalized field name.
 ///
-/// These options affect [`header_with_options`] and [`write_headers_with_options`],
-/// not the raw-value helpers. They do not traverse a message, MIME tree, or
-/// structured report body. Writers still normalize preserved records' newlines.
+/// These options affect configured header and specialized report writers,
+/// not the raw-value helpers or ordinary-part body masking. They do not trigger
+/// automatic MIME-tree traversal. Writers still normalize preserved records'
+/// newlines.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HeaderOptions {
     /// Additional field names whose complete raw records are copied verbatim.
@@ -296,6 +301,7 @@ pub fn write_headers_with_options<'a, W: Write + ?Sized>(
     options: &HeaderOptions,
     format: NewLineFormat,
 ) -> io::Result<()> {
+    header_new_line_bytes(format)?;
     match format {
         NewLineFormat::Dos => {
             write_filtered_headers(headers, output, options, Unix2DosFilter::new())
@@ -303,6 +309,14 @@ pub fn write_headers_with_options<'a, W: Write + ?Sized>(
         NewLineFormat::Unix => {
             write_filtered_headers(headers, output, options, Dos2UnixFilter::new())
         }
+        NewLineFormat::Mixed => unreachable!("header newlines were validated"),
+    }
+}
+
+fn header_new_line_bytes(format: NewLineFormat) -> io::Result<&'static [u8]> {
+    match format {
+        NewLineFormat::Dos => Ok(b"\r\n"),
+        NewLineFormat::Unix => Ok(b"\n"),
         NewLineFormat::Mixed => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "header new-line format must be Dos or Unix",
@@ -361,7 +375,8 @@ pub fn write_part_content<R: Read + Seek, W: Write + ?Sized>(
 /// No headers or separator are written. This does not traverse MIME entities,
 /// attached messages, or parse structured report bodies; such content is opaque
 /// here. [`HeaderOptions`] does not affect body masking. It does not provide
-/// MimeKit's specialized delivery-status or disposition-notification masking.
+/// specialized report masking; use [`write_delivery_status_content`] or
+/// [`write_disposition_notification_content`] for that.
 ///
 /// Uses bounded streaming buffers, without collecting the whole body. Headers,
 /// content bytes, encoding labels, and newline hints remain unchanged. Copying
@@ -399,6 +414,159 @@ pub fn write_part_content_with_options<R: Read + Seek, W: Write + ?Sized>(
     part.write_content_to_with_options(&mut filtered, options)?;
     // The part writer flushes its destination, but does not finalize our filter.
     filtered.finish()
+}
+
+/// Writes masked delivery-status groups using default limits, rules, and CRLF.
+///
+/// See [`write_delivery_status_content_with_options`] for decoded-body framing,
+/// preservation, and errors. No outer MIME headers or separator are written.
+///
+/// # Errors
+///
+/// Propagates report metadata, parse-limit, and source/destination I/O errors.
+pub fn write_delivery_status_content<R: Read + Seek, W: Write + ?Sized>(
+    status: &mut MessageDeliveryStatus<R>,
+    output: &mut W,
+) -> Result<(), DeliveryStatusError> {
+    write_delivery_status_content_with_options(
+        status,
+        output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+        &DeliveryStatusParseOptions::default(),
+    )
+}
+
+/// Parses and masks a delivery-status body as decoded header groups.
+///
+/// Uses [`MessageDeliveryStatus::status_groups_with_options`], including global
+/// subtypes, skipped empty groups, and the one-time Office365 encoded-remainder
+/// workaround. Stored content encoding controls decoding, not the outer transfer
+/// header. Parsing completes before writing any output and holds decoded data
+/// and groups in memory within the parser's documented limits.
+///
+/// Each group uses [`write_headers_with_options`], including configured field
+/// preservation, default pass-through fields, and malformed-record masking.
+/// Writes one selected newline **between** groups, never after the last group.
+/// Existing record terminators are converted but missing ones are not repaired.
+/// An empty body produces no bytes and still flushes the destination.
+///
+/// As in MimeKit, output is decoded field text, not re-encoded to match retained
+/// outer or group Content-Transfer-Encoding fields. Those fields may therefore
+/// be inconsistent with the output: this is diagnostic masking, not round-trip
+/// report serialization. No outer headers or header/body separator are written.
+///
+/// Source bytes, metadata, and headers remain unchanged. Successful decoding
+/// rewinds the source, even if later parsing or writing fails. The destination
+/// is flushed, not closed; caller-owned filters still need finalization.
+///
+/// # Errors
+///
+/// `Mixed` output newlines, zero limits, and invalid media metadata fail before
+/// source/destination I/O. Parse limits, active group encodings, and source
+/// errors propagate before destination I/O; no partial parsed report is written.
+/// Unlike MimeKit's exception fallback, failures never silently switch to
+/// ordinary-part byte masking. Destination errors use [`DeliveryStatusError::Io`]
+/// and may leave partial output. No rollback occurs; retrying starts over.
+///
+/// ```
+/// use mimecraft::{Header, MessageDeliveryStatus, anonymize};
+///
+/// let mut status = MessageDeliveryStatus::new();
+/// status.set_status_groups(&[
+///     vec![Header::parse(b"Action: failed")?].into(),
+///     vec![Header::parse(b"Status: 5.1.1")?].into(),
+/// ])?;
+/// let mut output = Vec::new();
+/// anonymize::write_delivery_status_content(&mut status, &mut output)?;
+/// assert_eq!(output, b"Action: xxxxxx\r\n\r\nStatus: xxxxx\r\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_delivery_status_content_with_options<R: Read + Seek, W: Write + ?Sized>(
+    status: &mut MessageDeliveryStatus<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+    parse_options: &DeliveryStatusParseOptions,
+) -> Result<(), DeliveryStatusError> {
+    let newline = header_new_line_bytes(format).map_err(DeliveryStatusError::Io)?;
+    // Parse detached groups before output; do not rewrite the stored report
+    // or hide parse failures behind the source anonymizer's byte-mask fallback.
+    let groups = status.status_groups_with_options(parse_options)?;
+    for (index, group) in groups.iter().enumerate() {
+        if index > 0 {
+            // MimeKit separates groups, but adds no trailing blank separator.
+            output.write_all(newline).map_err(DeliveryStatusError::Io)?;
+        }
+        write_headers_with_options(group, output, options, format)
+            .map_err(DeliveryStatusError::Io)?;
+    }
+    if groups.is_empty() {
+        output.flush().map_err(DeliveryStatusError::Io)?;
+    }
+    Ok(())
+}
+
+/// Writes masked disposition-notification fields using default limits and CRLF.
+///
+/// See [`write_disposition_notification_content_with_options`] for first-block
+/// selection and errors. No outer MIME headers or separator are written.
+///
+/// # Errors
+///
+/// Propagates report metadata, parse-limit, and source/destination I/O errors.
+pub fn write_disposition_notification_content<R: Read + Seek, W: Write + ?Sized>(
+    notification: &mut MessageDispositionNotification<R>,
+    output: &mut W,
+) -> Result<(), DispositionNotificationError> {
+    write_disposition_notification_content_with_options(
+        notification,
+        output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+        &DispositionNotificationParseOptions::default(),
+    )
+}
+
+/// Parses and masks the first decoded disposition-notification field block.
+///
+/// Uses [`MessageDispositionNotification::fields_with_options`], including global
+/// subtypes and stored-encoding decoding. Initial blank lines yield an empty
+/// block; later blocks are not emitted. The entire body, including ignored
+/// trailing data, is decoded and counted toward limits before any output.
+/// Field-level transfer-encoding headers are ordinary data, not decoding commands.
+///
+/// Writes via [`write_headers_with_options`], applying configured preservation
+/// and newline conversion. Adds no outer headers, blank separator, or missing
+/// record terminator. Empty fields still flush the destination. Output remains
+/// decoded field text, even if retained transfer-encoding metadata says otherwise.
+/// This is diagnostic masking, not round-trip report serialization.
+///
+/// Headers, stored bytes, and metadata are unchanged; successful decoding
+/// rewinds the source even before a subsequent parsing or writing failure.
+/// Decoded data and fields are held in memory under the parser's limits.
+/// The destination is flushed, not closed or finalized if it is another filter.
+///
+/// # Errors
+///
+/// Invalid newlines, zero limits, and invalid media metadata fail before I/O.
+/// Parse-limit and source errors propagate before destination I/O, without
+/// silently falling back to ordinary-part masking. Destination errors use
+/// [`DispositionNotificationError::Io`] and can leave partial output.
+/// No rollback occurs; retrying starts over.
+pub fn write_disposition_notification_content_with_options<R: Read + Seek, W: Write + ?Sized>(
+    notification: &mut MessageDispositionNotification<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+    parse_options: &DispositionNotificationParseOptions,
+) -> Result<(), DispositionNotificationError> {
+    header_new_line_bytes(format).map_err(DispositionNotificationError::Io)?;
+    // Use the detached field view, not WriteContent: the source's MDN path
+    // masks decoded fields without emitting the first block's blank separator.
+    let fields = notification.fields_with_options(parse_options)?;
+    write_headers_with_options(&fields, output, options, format)
+        .map_err(DispositionNotificationError::Io)
 }
 
 /// Masks an unstructured raw header value, retaining potential encoded-word syntax.

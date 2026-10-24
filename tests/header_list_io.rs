@@ -4,18 +4,36 @@
 
 use std::{
     collections::VecDeque,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Cursor, Read, Write},
     num::NonZeroUsize,
 };
 
 use mimecraft::{
-    Header, HeaderList, HeaderParser, HeaderTooLong,
+    ContentEncoding, DeliveryStatusError, DeliveryStatusParseOptions, DispositionNotificationError,
+    DispositionNotificationParseOptions, Header, HeaderList, HeaderParser, HeaderTooLong,
+    MessageDeliveryStatus, MessageDispositionNotification, MimeContent,
     anonymize::{self, HeaderOptions},
     encodings::NewLineFormat,
 };
 
 fn load(input: &[u8]) -> HeaderList {
     HeaderList::load(&mut &input[..]).unwrap()
+}
+
+fn delivery_status(bytes: &[u8]) -> MessageDeliveryStatus {
+    let mut report = MessageDeliveryStatus::new();
+    report
+        .part_mut()
+        .set_content(MimeContent::new(Cursor::new(bytes.to_vec())));
+    report
+}
+
+fn disposition_notification(bytes: &[u8]) -> MessageDispositionNotification {
+    let mut report = MessageDispositionNotification::new();
+    report
+        .part_mut()
+        .set_content(MimeContent::new(Cursor::new(bytes.to_vec())));
+    report
 }
 
 #[test]
@@ -682,6 +700,340 @@ fn masked_writer_does_not_finalize_the_callers_filter() {
     assert_eq!(destination.get_ref(), b"WDog");
     destination.finish().unwrap();
     assert_eq!(destination.get_ref(), b"WDogeA==\r\n");
+}
+
+#[test]
+fn delivery_status_masking_preserves_selected_fields_in_every_group() {
+    let raw = b"\r\nX: first\nAction: failed\r\nAction: kept\nBad Name: secret\n\r\n\nTo: Bob <b@x>\nAction: next\nStatus: 5.1.1";
+    let expected = "X: xxxxx\nAction: failed\nAction: kept\nxxx xxxxx xxxxxx\n\nTo: xxx <x@x>\nAction: next\nStatus: xxxxx";
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let mut report = delivery_status(raw);
+        report
+            .part_mut()
+            .headers_mut()
+            .replace_all(Header::parse(b"Content-Type: MESSAGE/GLOBAL-DELIVERY-STATUS").unwrap())
+            .unwrap();
+        report
+            .part_mut()
+            .set_content_transfer_encoding(ContentEncoding::Base64);
+        report
+            .part_mut()
+            .content_mut()
+            .set_new_line_format(Some(NewLineFormat::Mixed));
+        report.part_mut().content_mut().get_mut().set_position(3);
+        let before = report.part().headers().clone();
+        let options = HeaderOptions {
+            preserve_headers: vec!["aCtIoN".into(), "Bad Name".into()],
+        };
+        let mut output = Vec::new();
+        anonymize::write_delivery_status_content_with_options(
+            &mut report,
+            &mut output,
+            &options,
+            format,
+            &DeliveryStatusParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            if format == NewLineFormat::Dos {
+                expected.replace('\n', "\r\n").into_bytes()
+            } else {
+                expected.as_bytes().to_vec()
+            }
+        );
+        assert_eq!(report.part().headers(), &before);
+        assert_eq!(report.part().content().get_ref().get_ref(), raw);
+        assert_eq!(report.part().content().get_ref().position(), 0);
+        assert_eq!(
+            report.part().content().encoding(),
+            ContentEncoding::Unspecified
+        );
+        assert_eq!(
+            report.part().content().new_line_format(),
+            Some(NewLineFormat::Mixed)
+        );
+    }
+}
+
+#[test]
+fn notification_masking_emits_only_the_first_decoded_field_block() {
+    let raw = b"Content-Transfer-Encoding: unknown\r\nOriginal-Message-ID: <ab@cd>\nStatus: private\nBad Name: private\n\nX-Trailing: secret";
+    let expected = "Content-Transfer-Encoding: unknown\nOriginal-Message-ID: <xx@xx>\nStatus: private\nxxx xxxxx xxxxxxx\n";
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let mut report = disposition_notification(raw);
+        report
+            .part_mut()
+            .headers_mut()
+            .replace_all(
+                Header::parse(b"Content-Type: MESSAGE/GLOBAL-DISPOSITION-NOTIFICATION").unwrap(),
+            )
+            .unwrap();
+        report
+            .part_mut()
+            .set_content_transfer_encoding(ContentEncoding::Base64);
+        let before = report.part().headers().clone();
+        let options = HeaderOptions {
+            preserve_headers: vec!["status".into()],
+        };
+        let mut output = Vec::new();
+        anonymize::write_disposition_notification_content_with_options(
+            &mut report,
+            &mut output,
+            &options,
+            format,
+            &DispositionNotificationParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            if format == NewLineFormat::Dos {
+                expected.replace('\n', "\r\n").into_bytes()
+            } else {
+                expected.as_bytes().to_vec()
+            }
+        );
+        assert_eq!(report.part().headers(), &before);
+        assert_eq!(report.part().content().get_ref().get_ref(), raw);
+        assert_eq!(report.part().content().get_ref().position(), 0);
+        assert_eq!(
+            report.part().content().encoding(),
+            ContentEncoding::Unspecified
+        );
+    }
+}
+
+#[test]
+fn report_masking_decodes_stored_and_office365_encodings_without_reencoding() {
+    let encoded = b"QWN0aW9uOiBmYWlsZWQNCg0K";
+    let mut delivery = delivery_status(b"");
+    delivery.part_mut().set_content(MimeContent::with_encoding(
+        Cursor::new(encoded.to_vec()),
+        ContentEncoding::Base64,
+    ));
+    let mut output = Vec::new();
+    anonymize::write_delivery_status_content(&mut delivery, &mut output).unwrap();
+    assert_eq!(output, b"Action: xxxxxx\r\n");
+    assert_eq!(delivery.part().content().get_ref().get_ref(), encoded);
+
+    let mut notification = disposition_notification(b"");
+    notification
+        .part_mut()
+        .set_content(MimeContent::with_encoding(
+            Cursor::new(encoded.to_vec()),
+            ContentEncoding::Base64,
+        ));
+    output.clear();
+    anonymize::write_disposition_notification_content(&mut notification, &mut output).unwrap();
+    assert_eq!(output, b"Action: xxxxxx\r\n");
+    assert_eq!(notification.part().content().get_ref().get_ref(), encoded);
+
+    let raw = b"Content-Transfer-Encoding: base64\r\n\r\nQWN0aW9uOiBmYWlsZWQNCg0K";
+    let mut delivery = delivery_status(raw);
+    let mut parse = DeliveryStatusParseOptions {
+        max_decoded_bytes: raw.len() + b"Action: failed\r\n\r\n".len(),
+        ..Default::default()
+    };
+    output.clear();
+    anonymize::write_delivery_status_content_with_options(
+        &mut delivery,
+        &mut output,
+        &HeaderOptions::default(),
+        NewLineFormat::Dos,
+        &parse,
+    )
+    .unwrap();
+    // The encoding field survives even though the recipient group is decoded.
+    assert_eq!(
+        output,
+        b"Content-Transfer-Encoding: base64\r\n\r\nAction: xxxxxx\r\n"
+    );
+    parse.max_decoded_bytes -= 1;
+    let mut untouched = TestWriter::new();
+    assert!(matches!(
+        anonymize::write_delivery_status_content_with_options(
+            &mut delivery, &mut untouched, &HeaderOptions::default(), NewLineFormat::Dos, &parse,
+        ),
+        Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+    ));
+    assert_eq!(untouched.writes + untouched.flushes, 0);
+    assert_eq!(delivery.part().content().get_ref().position(), 0);
+}
+
+#[test]
+fn report_masking_empty_and_truncated_bodies_have_no_added_separator() {
+    for (raw, expected) in [
+        (b"".as_slice(), b"".as_slice()),
+        (b"\r", b""),
+        (b"\r\n", b""),
+        (b"X: a", b"X: x"),
+        (b"X: a\r", b"X: x\r"),
+    ] {
+        let mut output = TestWriter::new();
+        anonymize::write_delivery_status_content(&mut delivery_status(raw), &mut output).unwrap();
+        assert_eq!(output.bytes, expected);
+        assert_eq!(output.flushes, 1);
+        let mut output = TestWriter::new();
+        anonymize::write_disposition_notification_content(
+            &mut disposition_notification(raw),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.bytes, expected);
+        assert_eq!(output.flushes, 1);
+    }
+    let mut output = Vec::new();
+    anonymize::write_disposition_notification_content(
+        &mut disposition_notification(b"\nX: ignored"),
+        &mut output,
+    )
+    .unwrap();
+    assert!(output.is_empty());
+}
+
+#[test]
+fn report_masking_write_failures_include_group_separators_and_support_retry() {
+    let raw = b"X: first\n\nY: second\r";
+    let expected = b"X: xxxxx\r\n\r\nY: xxxxxx\r";
+    for limit in 0..expected.len() {
+        let mut report = delivery_status(raw);
+        let mut output = TestWriter::new();
+        output.fail_after = Some(limit);
+        output.interrupt_once = true;
+        assert!(matches!(
+            anonymize::write_delivery_status_content(&mut report, &mut output),
+            Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(output.bytes, expected[..limit]);
+        assert_eq!(report.part().content().get_ref().position(), 0);
+        let mut retry = Vec::new();
+        anonymize::write_delivery_status_content(&mut report, &mut retry as &mut dyn Write)
+            .unwrap();
+        assert_eq!(retry, expected);
+    }
+    let expected = b"X: xxxxx\r\n";
+    for limit in 0..expected.len() {
+        let mut report = disposition_notification(raw);
+        let mut output = TestWriter::new();
+        output.fail_after = Some(limit);
+        output.interrupt_once = true;
+        assert!(matches!(
+            anonymize::write_disposition_notification_content(&mut report, &mut output),
+            Err(DispositionNotificationError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(output.bytes, expected[..limit]);
+        assert_eq!(report.part().content().get_ref().position(), 0);
+        let mut retry = Vec::new();
+        anonymize::write_disposition_notification_content(
+            &mut report,
+            &mut retry as &mut dyn Write,
+        )
+        .unwrap();
+        assert_eq!(retry, expected);
+    }
+}
+
+#[test]
+fn report_masking_zero_writes_and_flush_errors_are_not_hidden() {
+    let mut delivery = delivery_status(b"X: a\n\nY: b\n");
+    let mut notification = disposition_notification(b"X: a\n");
+    for zero_write in [false, true] {
+        let mut output = TestWriter::new();
+        output.zero_write = zero_write;
+        output.fail_flush = !zero_write;
+        let kind = if zero_write {
+            io::ErrorKind::WriteZero
+        } else {
+            io::ErrorKind::Other
+        };
+        assert!(matches!(
+            anonymize::write_delivery_status_content(&mut delivery, &mut output),
+            Err(DeliveryStatusError::Io(error)) if error.kind() == kind
+        ));
+        assert_eq!(
+            output.bytes,
+            if zero_write {
+                b"".as_slice()
+            } else {
+                b"X: x\r\n"
+            }
+        );
+        let mut output = TestWriter::new();
+        output.zero_write = zero_write;
+        output.fail_flush = !zero_write;
+        assert!(matches!(
+            anonymize::write_disposition_notification_content(&mut notification, &mut output),
+            Err(DispositionNotificationError::Io(error)) if error.kind() == kind
+        ));
+    }
+    let mut output = TestWriter::new();
+    output.fail_flush = true;
+    assert!(matches!(
+        anonymize::write_delivery_status_content(&mut delivery_status(b""), &mut output),
+        Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::Other
+    ));
+    assert!(matches!(
+        anonymize::write_disposition_notification_content(&mut disposition_notification(b""), &mut output),
+        Err(DispositionNotificationError::Io(error)) if error.kind() == io::ErrorKind::Other
+    ));
+}
+
+#[test]
+fn report_masking_validates_the_entire_parsed_report_before_destination_io() {
+    for (raw, limit) in [
+        (
+            b"X: a\n\nContent-Transfer-Encoding: bogus\n".as_slice(),
+            16384,
+        ),
+        (b"X: a\n\nY: too long\n", 5),
+    ] {
+        let mut report = delivery_status(raw);
+        let mut output = TestWriter::new();
+        assert!(matches!(
+            anonymize::write_delivery_status_content_with_options(
+                &mut report, &mut output, &HeaderOptions::default(), NewLineFormat::Unix,
+                &DeliveryStatusParseOptions { max_header_length: limit, ..Default::default() },
+            ),
+            Err(DeliveryStatusError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(output.writes + output.flushes, 0);
+        assert_eq!(report.part().content().get_ref().position(), 0);
+    }
+    let raw = b"X: a\r\n b\r\n\r\nignored tail";
+    for parse in [
+        DispositionNotificationParseOptions {
+            max_decoded_bytes: raw.len() - 1,
+            ..Default::default()
+        },
+        DispositionNotificationParseOptions {
+            max_header_length: 9,
+            ..Default::default()
+        },
+    ] {
+        let mut report = disposition_notification(raw);
+        let mut output = TestWriter::new();
+        assert!(matches!(
+            anonymize::write_disposition_notification_content_with_options(
+                &mut report, &mut output, &HeaderOptions::default(), NewLineFormat::Unix, &parse,
+            ),
+            Err(DispositionNotificationError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(output.writes + output.flushes, 0);
+    }
+    let mut report = disposition_notification(raw);
+    let mut output = Vec::new();
+    anonymize::write_disposition_notification_content_with_options(
+        &mut report,
+        &mut output,
+        &HeaderOptions::default(),
+        NewLineFormat::Unix,
+        &DispositionNotificationParseOptions {
+            max_decoded_bytes: raw.len(),
+            max_header_length: b"X: a\r\n b\r\n".len(),
+        },
+    )
+    .unwrap();
+    assert_eq!(output, b"X: x\n x\n");
 }
 
 struct ScriptedReader<'a> {

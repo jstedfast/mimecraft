@@ -45,6 +45,8 @@ MimeKit. The crate is not configured for publication.
   fields, plus masked header-list output with CRLF/LF conversion.
 - Streaming masking of ordinary part content after serialization, including
   transfer-encoded payloads and UU wrappers.
+- Specialized decoded-field masking of delivery-status and disposition-
+  notification bodies, with configurable preservation and parse limits.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -609,7 +611,34 @@ and flush errors propagate without rollback. The destination is flushed, not
 closed or finalized if it is another filter writer. Retrying starts over.
 These helpers treat even report/message payloads as opaque ordinary-part content:
 they do not apply `HeaderOptions` inside bodies, interpret status groups, or
-traverse MIME trees. Specialized report and full-message masking remain deferred.
+traverse MIME trees.
+
+`anonymize::write_delivery_status_content(&mut status, output)` and
+`write_disposition_notification_content(&mut notification, output)` instead parse
+the typed report views and mask their decoded fields. Their `_with_options`
+variants take `&HeaderOptions`, `NewLineFormat`, and the corresponding report
+parse options after the destination. Defaults use CRLF and the existing parser
+limits. Both global report subtypes are supported.
+
+Delivery-status output has one newline between parsed groups and no trailing
+blank separator. The parser skips empty groups and handles the one-time
+Office365 encoded remainder. Disposition notifications emit only the first
+field block; leading blank lines give empty output, and later data is not
+emitted. Both decode the entire stored body before writing, even ignored MDN
+trailing data, which counts toward limits. Missing record terminators are not
+repaired. Empty output still flushes the destination.
+
+These specialized writers emit decoded text, not transfer-reencoded content.
+Retained outer or group encoding fields may no longer describe that output.
+They neither write outer headers nor mutate stored bytes or metadata. Parsing
+uses stored encoding, not a newly edited outer encoding header; successful
+decoding rewinds the source. Parsing buffers decoded data and records within
+the documented resource limits.
+
+Invalid newlines, limits, and media metadata fail before I/O. Source and parse
+errors occur before any destination I/O; unlike MimeKit's fallback, failures do
+not silently switch to byte masking. Destination errors can leave partial
+output; retrying starts over. Full-message/tree masking remains deferred.
 
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header

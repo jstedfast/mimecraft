@@ -8,6 +8,7 @@ use std::{
 use mimecraft::{
     ContentEncoding, DispositionNotificationError, DispositionNotificationParseOptions, Header,
     HeaderList, MessageDispositionNotification, MimeContent, MimeEntity, MimePart,
+    anonymize::{self, HeaderOptions},
     encodings::NewLineFormat,
 };
 
@@ -407,6 +408,45 @@ fn read_initial_seek_final_rewind_and_trailing_read_failures_propagate() {
 }
 
 #[test]
+fn masked_content_source_and_trailing_read_failures_do_not_emit_fields() {
+    for (fail_after, fail_seek) in [
+        (Some(0), None),
+        (Some(8), None),
+        (None, Some(1)),
+        (None, Some(2)),
+    ] {
+        let mut source = Source {
+            fail_after,
+            fail_seek,
+            ..Source::new()
+        };
+        let mut mdn = MessageDispositionNotification::from_part(part(
+            &mut source,
+            ContentEncoding::Unspecified,
+        ))
+        .unwrap();
+        let mut output = b"prefix".to_vec();
+        io_error(
+            anonymize::write_disposition_notification_content(&mut mdn, &mut output).unwrap_err(),
+            io::ErrorKind::Other,
+        );
+        assert_eq!(output, b"prefix");
+    }
+    let mut source = Source {
+        interrupt_once: true,
+        ..Source::new()
+    };
+    let mut mdn =
+        MessageDispositionNotification::from_part(part(&mut source, ContentEncoding::Unspecified))
+            .unwrap();
+    let mut output = Vec::new();
+    anonymize::write_disposition_notification_content(&mut mdn, &mut output).unwrap();
+    assert_eq!(output, b"X: x\r\n");
+    assert_eq!(source.bytes.position(), 0);
+    assert_eq!(source.seeks, 2);
+}
+
+#[test]
 fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
     let mut source = Source::new();
     {
@@ -429,13 +469,39 @@ fn invalid_options_and_media_edits_fail_before_io_and_preserve_owned_body() {
                 mdn.fields_with_options(&options).unwrap_err(),
                 io::ErrorKind::InvalidInput,
             );
+            io_error(
+                anonymize::write_disposition_notification_content_with_options(
+                    &mut mdn,
+                    &mut Vec::new(),
+                    &HeaderOptions::default(),
+                    NewLineFormat::Dos,
+                    &options,
+                )
+                .unwrap_err(),
+                io::ErrorKind::InvalidInput,
+            );
         }
+        io_error(
+            anonymize::write_disposition_notification_content_with_options(
+                &mut mdn,
+                &mut Vec::new(),
+                &HeaderOptions::default(),
+                NewLineFormat::Mixed,
+                &DispositionNotificationParseOptions::default(),
+            )
+            .unwrap_err(),
+            io::ErrorKind::InvalidInput,
+        );
         mdn.part_mut()
             .headers_mut()
             .replace_all(Header::parse(b"Content-Type: text/plain").unwrap())
             .unwrap();
         assert!(matches!(
             mdn.fields(),
+            Err(DispositionNotificationError::NotDispositionNotification(_))
+        ));
+        assert!(matches!(
+            anonymize::write_disposition_notification_content(&mut mdn, &mut Vec::new()),
             Err(DispositionNotificationError::NotDispositionNotification(_))
         ));
     }

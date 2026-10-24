@@ -7,7 +7,9 @@ use std::{
 
 use mimecraft::{
     ContentEncoding, DeliveryStatusError, DeliveryStatusParseOptions, Header, HeaderList,
-    MessageDeliveryStatus, MimeContent, MimeEntity, MimePart, encodings::NewLineFormat,
+    MessageDeliveryStatus, MimeContent, MimeEntity, MimePart,
+    anonymize::{self, HeaderOptions},
+    encodings::NewLineFormat,
 };
 
 fn raw_part<R: Read + Seek>(source: R, encoding: ContentEncoding) -> MimePart<R> {
@@ -498,6 +500,36 @@ fn source_failures_are_propagated_including_final_rewind() {
 }
 
 #[test]
+fn masked_content_source_failures_produce_no_output_or_fallback() {
+    for (fail_read, fail_seek) in [(true, None), (false, Some(1)), (false, Some(2))] {
+        let mut source = Source {
+            fail_read,
+            fail_seek,
+            ..Source::new()
+        };
+        let mut delivery =
+            MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
+                .unwrap();
+        let mut output = b"prefix".to_vec();
+        io_error(
+            anonymize::write_delivery_status_content(&mut delivery, &mut output).unwrap_err(),
+            io::ErrorKind::Other,
+        );
+        assert_eq!(output, b"prefix");
+    }
+    let mut source = Source {
+        interrupt_once: true,
+        ..Source::new()
+    };
+    let mut delivery =
+        MessageDeliveryStatus::from_part(raw_part(&mut source, ContentEncoding::Unspecified))
+            .unwrap();
+    anonymize::write_delivery_status_content(&mut delivery, &mut Vec::new()).unwrap();
+    assert_eq!(source.bytes.position(), 0);
+    assert_eq!(source.seeks, 2);
+}
+
+#[test]
 fn invalid_options_and_raw_media_edits_fail_before_source_io() {
     let mut source = Source::new();
     {
@@ -518,7 +550,29 @@ fn invalid_options_and_raw_media_edits_fail_before_source_io() {
                 delivery.status_groups_with_options(&options).unwrap_err(),
                 io::ErrorKind::InvalidInput,
             );
+            io_error(
+                anonymize::write_delivery_status_content_with_options(
+                    &mut delivery,
+                    &mut Vec::new(),
+                    &HeaderOptions::default(),
+                    NewLineFormat::Dos,
+                    &options,
+                )
+                .unwrap_err(),
+                io::ErrorKind::InvalidInput,
+            );
         }
+        io_error(
+            anonymize::write_delivery_status_content_with_options(
+                &mut delivery,
+                &mut Vec::new(),
+                &HeaderOptions::default(),
+                NewLineFormat::Mixed,
+                &DeliveryStatusParseOptions::default(),
+            )
+            .unwrap_err(),
+            io::ErrorKind::InvalidInput,
+        );
         delivery
             .part_mut()
             .headers_mut()
@@ -526,6 +580,10 @@ fn invalid_options_and_raw_media_edits_fail_before_source_io() {
             .unwrap();
         assert!(matches!(
             delivery.status_groups(),
+            Err(DeliveryStatusError::NotDeliveryStatus(_))
+        ));
+        assert!(matches!(
+            anonymize::write_delivery_status_content(&mut delivery, &mut Vec::new()),
             Err(DeliveryStatusError::NotDeliveryStatus(_))
         ));
     }
