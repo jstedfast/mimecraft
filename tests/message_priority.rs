@@ -220,9 +220,9 @@ fn decoded_word_headers_and_raw_x_priority_follow_distinct_paths() {
 }
 
 #[test]
-fn matching_setters_preserve_first_values_duplicate_headers_and_allocations() {
+fn matching_setters_without_duplicates_preserve_bytes_and_allocations() {
     let mut message: MimeMessage<()> = MimeMessage::from_parts(
-        headers(b"iMpOrTaNcE: HIGH\nImportance: low\nPriority: urgent\nPriority: non-urgent\nX-Priority: 0 (custom)\nX-Priority: 5\n"),
+        headers(b"iMpOrTaNcE: HIGH\nPriority: urgent\nX-Priority: 0 (custom)\n"),
         None,
     );
     let original = message.headers().clone();
@@ -243,6 +243,41 @@ fn matching_setters_preserve_first_values_duplicate_headers_and_allocations() {
             .collect::<Vec<_>>(),
         pointers
     );
+}
+
+#[test]
+fn matching_setters_collapse_duplicates_including_normal_values() {
+    for (importance, priority, x_priority, raw) in [
+        (
+            MessageImportance::High,
+            MessagePriority::Urgent,
+            XMessagePriority::Highest,
+            "iMpOrTaNcE: HIGH\nPriority: urgent\nX-Priority: 0 (custom)\n",
+        ),
+        (
+            MessageImportance::Normal,
+            MessagePriority::Normal,
+            XMessagePriority::Normal,
+            "importance: NORMAL\npriority: NORMAL\nx-priority: 3 (custom)\n",
+        ),
+    ] {
+        let raw = format!(
+            "X-Before: unchanged\n{raw}X-Middle: unchanged\nImportance: low\nPRIORITY: non-urgent\nX-PRIORITY: 5\nimportance: invalid\npriority: invalid\nx-priority: invalid\nX-After: unchanged\n"
+        );
+        let mut message: MimeMessage<()> = MimeMessage::from_parts(headers(raw.as_bytes()), None);
+        let unrelated = message.headers().get("X-Middle").unwrap().raw().as_ptr();
+        message.set_importance(importance);
+        message.set_priority(priority);
+        message.set_x_priority(x_priority);
+        let expected = format!(
+            "X-Before: unchanged\nImportance: {importance}\r\nPriority: {priority}\r\nX-Priority: {x_priority}\r\nX-Middle: unchanged\nX-After: unchanged\n"
+        );
+        assert_eq!(message.headers(), &headers(expected.as_bytes()));
+        assert_eq!(
+            message.headers().get("X-Middle").unwrap().raw().as_ptr(),
+            unrelated
+        );
+    }
 }
 
 #[test]

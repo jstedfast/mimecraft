@@ -38,6 +38,65 @@ pub struct Header {
 }
 
 impl Header {
+    /// Creates a checked unstructured header, such as Subject or Comments.
+    ///
+    /// Uses [`Self::from_unstructured_with_options`] with default options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::UnstructuredHeaderFormatError`] without a partial record.
+    pub fn from_unstructured(
+        field: &str,
+        value: &str,
+    ) -> Result<Self, crate::UnstructuredHeaderFormatError> {
+        Self::from_unstructured_with_options(
+            field,
+            value,
+            &crate::UnstructuredHeaderFormatOptions::default(),
+        )
+    }
+
+    /// Creates an ASCII unstructured header with explicit formatting options.
+    ///
+    /// The field must be nonempty printable ASCII without a colon. Its spelling
+    /// is preserved. Like MimeKit's value assignment, trims Unicode whitespace
+    /// and removes internal CR/LF before encoding; other controls are encoded,
+    /// not silently removed. The value is literal text: encoded-word lookalikes
+    /// are encoded again so readers do not reinterpret them.
+    ///
+    /// Uses [`rfc2047::encode_text_with_options`]'s whole-value encoding policy,
+    /// not MimeKit's mixed plain/encoded-word heuristics. Folds at spaces without
+    /// splitting words or changing interior whitespace. Empty normalized text
+    /// creates `field:` plus the selected newline, not an absent field.
+    ///
+    /// This does not dispatch on the field name or validate structured grammar.
+    /// Use address/content/identifier formatters for those fields. Decoded
+    /// controls remain controls: this is safe header framing, not sanitization
+    /// for terminals, HTML, or other display contexts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::UnstructuredHeaderFormatError`] for invalid fields or
+    /// options, an oversized field name, or text that cannot be encoded.
+    /// Encoding offsets refer to the trimmed, unfolded text.
+    ///
+    /// ```
+    /// use mimecraft::Header;
+    ///
+    /// let header = Header::from_unstructured("Subject", " Hello Ren\u{e9}e ")?;
+    /// assert!(header.raw().is_ascii());
+    /// assert_eq!(header.decode_value().text, "Hello Ren\u{e9}e");
+    /// # Ok::<(), mimecraft::UnstructuredHeaderFormatError>(())
+    /// ```
+    pub fn from_unstructured_with_options(
+        field: &str,
+        value: &str,
+        options: &crate::UnstructuredHeaderFormatOptions,
+    ) -> Result<Self, crate::UnstructuredHeaderFormatError> {
+        crate::unstructured_header_format::format_header(field, value, options)
+            .map(Self::from_formatted)
+    }
+
     /// Parses a standalone header from the entire byte slice.
     ///
     /// Matches MimeKit's public header parser: requires an ASCII field followed

@@ -35,6 +35,8 @@ use crate::{
 /// complete replacement before editing headers.
 /// Address-list accessors aggregate all matching message headers in order,
 /// returning detached lists with MimeKit-style recovery and diagnostics.
+/// Subject uses tolerant decoding and checked unstructured-header authoring,
+/// replacing duplicate Subjects with one canonical record as in MimeKit.
 ///
 /// The body and every descendant share source type `R`. Ownership replaces
 /// disposal and parent tracking. Body removal returns the old tree without
@@ -115,6 +117,81 @@ impl<R> MimeMessage<R> {
     /// Edits message headers without moving fields to or from the body.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Decodes the first Subject header with default RFC 2047 options.
+    ///
+    /// Returns `None` only when absent. An empty Subject is present empty text.
+    /// See [`Self::subject_with_options`] for decoding and diagnostic details.
+    pub fn subject(&self) -> Option<crate::rfc2047::DecodedHeader> {
+        self.subject_with_options(&crate::rfc2047::DecodeOptions::default())
+    }
+
+    /// Decodes the first Subject header using explicit RFC 2047 options.
+    ///
+    /// Uses [`Header::decode_value_with_options`]: tolerant encoded-word decoding,
+    /// charset fallback diagnostics, then display unfolding. Malformed wrappers
+    /// remain literal text. Issue ranges refer to the first header's raw value.
+    /// Later duplicates and body headers are ignored.
+    ///
+    /// Reads current bytes without caching or source I/O. Returned text is owned;
+    /// editing it does not change the message. Decoded controls other than CR/LF
+    /// remain present; this is not display-context sanitization.
+    pub fn subject_with_options(
+        &self,
+        options: &crate::rfc2047::DecodeOptions,
+    ) -> Option<crate::rfc2047::DecodedHeader> {
+        self.headers
+            .get("Subject")
+            .map(|header| header.decode_value_with_options(options))
+    }
+
+    /// Assigns Subject with default unstructured-header formatting.
+    ///
+    /// See [`Self::set_subject_with_options`] for normalization and replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_subject(&mut self, value: &str) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        self.set_subject_with_options(value, &crate::UnstructuredHeaderFormatOptions::default())
+    }
+
+    /// Assigns Subject using checked, atomic unstructured-header formatting.
+    ///
+    /// Like MimeKit, trims Unicode whitespace and removes CR/LF before encoding.
+    /// Other controls and literal encoded-word lookalikes are encoded, not
+    /// discarded or interpreted. See [`Header::from_unstructured_with_options`].
+    ///
+    /// Replaces all Subjects with one canonical `Subject` at the first slot,
+    /// as in MimeKit's Subject setter. If absent, appends `Subject`.
+    /// Always reformats, even for equal decoded text. Empty text writes an empty
+    /// header; use [`HeaderList::remove_all`] through [`Self::headers_mut`] to
+    /// remove Subject entirely.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options or encoding failures leave all headers unchanged.
+    ///
+    /// ```
+    /// use mimecraft::MimeMessage;
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// assert!(message.subject().is_none());
+    /// message.set_subject("  Hello\r\n world  ")?;
+    /// assert_eq!(message.subject().unwrap().text, "Hello world");
+    /// # Ok::<(), mimecraft::UnstructuredHeaderFormatError>(())
+    /// ```
+    pub fn set_subject_with_options(
+        &mut self,
+        value: &str,
+        options: &crate::UnstructuredHeaderFormatOptions,
+    ) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        let header = Header::from_unstructured_with_options("Subject", value, options)?;
+        // Singleton assignment replaces duplicates even when the value is equal.
+        // Finish formatting before removing any original headers.
+        self.replace_formatted(header);
+        Ok(())
     }
 
     /// Reads all From headers with default address parsing options.
@@ -785,8 +862,8 @@ impl<R> MimeMessage<R> {
 
     /// Assigns a checked Date without changing Resent-Date or reading sources.
     ///
-    /// An equal parsed value preserves original bytes and duplicates. Equality
-    /// includes local components and offset, following [`DateTimeOffset`], not
+    /// An equal parsed value preserves original bytes only without duplicates.
+    /// Equality includes local components and offset, following [`DateTimeOffset`], not
     /// just the instant: assigning the same instant with a different offset
     /// rewrites the header. Otherwise replaces every occurrence at the first
     /// slot, or appends if absent. Invalid existing values are replaced.
@@ -813,6 +890,7 @@ impl<R> MimeMessage<R> {
 
     /// Assigns Resent-Date independently using [`Self::set_date`]'s rules.
     ///
+    /// Unlike Date, an equal parsed value preserves any duplicate occurrences.
     /// Does not create a resent-header block or update other resent fields.
     pub fn set_resent_date(&mut self, value: DateTimeOffset) {
         self.set_date_header("Resent-Date", value);
@@ -826,9 +904,11 @@ impl<R> MimeMessage<R> {
     }
 
     fn set_date_header(&mut self, field: &str, value: DateTimeOffset) {
-        // Preserve an equal value's original header as MimeKit does, but use
-        // Rust's offset-sensitive equality so an explicit zone edit is not lost.
-        if self.date_header(field) != Ok(Some(value)) {
+        // Preserve equal values unless a singleton has duplicates, as in MimeKit.
+        // Use Rust's offset-sensitive equality so an explicit zone edit is not lost.
+        if self.date_header(field) != Ok(Some(value))
+            || (field == "Date" && self.has_duplicate_header(field))
+        {
             self.replace_formatted(Header::from_formatted(format!("{field}: {value}\r\n")));
         }
     }
@@ -852,8 +932,8 @@ impl<R> MimeMessage<R> {
 
     /// Assigns a checked MIME-Version without changing the body or other fields.
     ///
-    /// An equal parsed version preserves bytes and duplicates. Otherwise writes
-    /// canonical decimal components with CRLF at the first slot, removing later
+    /// An equal parsed version preserves bytes only without duplicates. Otherwise
+    /// writes canonical decimal components with CRLF at the first slot, removing later
     /// duplicates, or appends if absent. Invalid existing values are replaced.
     /// Component counts remain significant: `1.0` differs from `1.0.0`.
     ///
@@ -873,7 +953,7 @@ impl<R> MimeMessage<R> {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn set_mime_version(&mut self, value: MimeVersion) {
-        if self.mime_version() != Ok(Some(value)) {
+        if self.mime_version() != Ok(Some(value)) || self.has_duplicate_header("MIME-Version") {
             self.replace_formatted(Header::from_formatted(format!("MIME-Version: {value}\r\n")));
         }
     }
@@ -896,7 +976,7 @@ impl<R> MimeMessage<R> {
     /// Assigns Message-Id using [`MessageId::from_value`]'s compatibility rules.
     ///
     /// Validates before editing, even when the value compares equal. An equal
-    /// normalized identifier leaves the first header and any duplicates intact.
+    /// normalized identifier leaves original bytes intact only without duplicates.
     /// Otherwise replaces all occurrences at the first slot, or appends if absent.
     /// Malformed existing values are replaced. No source I/O occurs.
     ///
@@ -924,6 +1004,7 @@ impl<R> MimeMessage<R> {
 
     /// Assigns Resent-Message-Id independently using [`Self::set_message_id`]'s rules.
     ///
+    /// Unlike Message-Id, an equal normalized ID preserves duplicate occurrences.
     /// Does not create a resent-header block or change any other field.
     ///
     /// # Errors
@@ -953,8 +1034,9 @@ impl<R> MimeMessage<R> {
     ///
     /// `Some` follows [`Self::set_message_id`]'s validation, formatting, and
     /// equality rules, comparing with [`Self::in_reply_to`]. An equal first ID
-    /// therefore preserves other IDs in that same raw header. `None` removes
-    /// every occurrence, including malformed values and duplicates.
+    /// preserves other IDs in that same raw header only without duplicate
+    /// headers. `None` removes every occurrence, including malformed values
+    /// and duplicates.
     ///
     /// # Errors
     ///
@@ -1064,7 +1146,9 @@ impl<R> MimeMessage<R> {
         } else {
             self.identifier(field)
         };
-        if !matches!(current, Ok(Some(current)) if current == id) {
+        if !matches!(current, Ok(Some(current)) if current == id)
+            || (matches!(field, "Message-Id" | "In-Reply-To") && self.has_duplicate_header(field))
+        {
             self.replace_formatted(Header::from_formatted(format!("{field}: <{id}>\r\n")));
         }
         Ok(())
@@ -1090,7 +1174,7 @@ impl<R> MimeMessage<R> {
 
     /// Sets Importance without changing either priority header or the body.
     ///
-    /// An equal parsed value is a no-op, preserving bytes and duplicates;
+    /// An equal parsed value is a no-op only without duplicates, preserving bytes;
     /// setting an absent field to Normal does not add it. Otherwise writes a
     /// canonical CRLF record at the first slot and removes later duplicates,
     /// appending if absent. Invalid existing values are replaced, not defaulted.
@@ -1098,7 +1182,7 @@ impl<R> MimeMessage<R> {
     pub fn set_importance(&mut self, value: MessageImportance) {
         // As in MimeKit, setting an absent field to Normal changes nothing.
         // Compare freshly parsed metadata rather than a potentially stale cache.
-        if self.importance() != Ok(value) {
+        if self.importance() != Ok(value) || self.has_duplicate_header("Importance") {
             self.replace_formatted(value.to_header());
         }
     }
@@ -1137,7 +1221,7 @@ impl<R> MimeMessage<R> {
     /// # Ok::<(), mimecraft::MessagePriorityParseError>(())
     /// ```
     pub fn set_priority(&mut self, value: MessagePriority) {
-        if self.priority() != Ok(value) {
+        if self.priority() != Ok(value) || self.has_duplicate_header("Priority") {
             self.replace_formatted(value.to_header());
         }
     }
@@ -1162,11 +1246,16 @@ impl<R> MimeMessage<R> {
     /// Sets X-Priority independently, with [`Self::set_importance`]'s edit rules.
     ///
     /// New records include the numeric value and a comment, e.g. `2 (High)`.
-    /// An equal clamped value is a no-op: setting `0` to Highest preserves `0`.
+    /// Without duplicates, an equal clamped value is a no-op: setting `0` to
+    /// Highest preserves `0`.
     pub fn set_x_priority(&mut self, value: XMessagePriority) {
-        if self.x_priority() != Ok(value) {
+        if self.x_priority() != Ok(value) || self.has_duplicate_header("X-Priority") {
             self.replace_formatted(value.to_header());
         }
+    }
+
+    fn has_duplicate_header(&self, field: &str) -> bool {
+        self.headers.get_all(field).nth(1).is_some()
     }
 
     fn replace_formatted(&mut self, header: Header) {

@@ -66,6 +66,9 @@
 //! Standard and resent address-list accessors aggregate matching headers with
 //! MimeKit-style recovery and [`MessageAddresses`] diagnostics. Their explicit
 //! setters validate complete replacements atomically; Bcc is not hidden on write.
+//! Subject accessors reuse tolerant header decoding and checked
+//! [`Header::from_unstructured`] authoring with bounded folding, normalized
+//! assignment, and atomic duplicate-collapsing replacement.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for
@@ -274,6 +277,7 @@ pub mod text;
 mod text_body;
 mod text_part;
 mod text_rfc822_headers;
+mod unstructured_header_format;
 pub mod utils;
 
 pub use addr_spec::{
@@ -335,3 +339,6 @@ pub use parameter::{
 pub use text_body::{TextBodyError, TextFormat};
 pub use text_part::{TextPart, TextPartError};
 pub use text_rfc822_headers::{TextRfc822Headers, TextRfc822HeadersError};
+pub use unstructured_header_format::{
+    UnstructuredHeaderFormatError, UnstructuredHeaderFormatOptions,
+};

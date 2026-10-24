@@ -219,16 +219,33 @@ fn assignments_normalize_compatibility_values_and_emit_canonical_headers() {
 }
 
 #[test]
-fn equal_normalized_assignments_preserve_raw_bytes_and_duplicates() {
+fn equal_normalized_assignments_preserve_bytes_but_collapse_singleton_duplicates() {
     for field in ID_FIELDS {
         let raw = format!(
-            "X-Before: untouched\n{}: (comment)\n\t<same@x> <another@x>\nX-Middle: untouched\n{field}: <duplicate@x>\n",
+            "X-Before: untouched\n{}: (comment)\n\t<same@x> <another@x>\nX-Middle: untouched\n",
             field.to_ascii_lowercase()
         );
         let mut message: MimeMessage = MimeMessage::from_parts(headers(raw.as_bytes()), None);
         let before = snapshot(&message);
         set(&mut message, field, "\t<same@x> ").unwrap();
         assert_eq!(snapshot(&message), before);
+        message
+            .headers_mut()
+            .add(Header::parse(format!("{field}: <duplicate@x>\n").as_bytes()).unwrap());
+        let before = snapshot(&message);
+        set(&mut message, field, "\t<same@x> ").unwrap();
+        if field == "Resent-Message-Id" {
+            assert_eq!(snapshot(&message), before);
+        } else {
+            assert_eq!(
+                snapshot(&message),
+                [
+                    b"X-Before: untouched\n".to_vec(),
+                    format!("{field}: <same@x>\r\n").into_bytes(),
+                    b"X-Middle: untouched\n".to_vec(),
+                ]
+            );
+        }
     }
 }
 

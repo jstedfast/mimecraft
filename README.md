@@ -97,6 +97,8 @@ MimeKit. The crate is not configured for publication.
   checked address formatting, and atomic replacement.
 - From, Reply-To, To, Cc, Bcc, and Resent-* address-list accessors with
   MimeKit-style message-header recovery, diagnostics, and atomic setters.
+- Subject accessors with tolerant decoding and checked, folded unstructured
+  header authoring through reusable `Header::from_unstructured` factories.
 - Typed importance and priority headers with independent raw-header access,
   checked numeric-prefix parsing, and canonical setters that preserve no-ops.
 - Structured attached-message ownership and iterative writing, with nested
@@ -1020,9 +1022,58 @@ body copying rewinds sources. Headers and stored bytes are not mutated.
 
 No Date, Message-Id, From, Subject, or MIME-Version is generated. This is not
 transport preparation: **Bcc and Resent-Bcc are written as supplied**.
-Other message-specific typed convenience setters, safe complete unstructured-header
-authoring, offset-based header merging, and automatic
-transport preparation remain deferred.
+Other message-specific typed convenience setters, offset-based header merging,
+and automatic transport preparation remain deferred.
+
+### Message subjects and unstructured headers
+
+`MimeMessage::subject()` reads the first Subject and returns an owned
+`Option<rfc2047::DecodedHeader>`. Absence is distinct from present empty text.
+Decoding is tolerant: malformed encoded-word wrappers remain literal and
+charset fallback/replacement is reported in `issues`. The `_with_options`
+getter accepts `rfc2047::DecodeOptions`. Like `Header::decode_value`, decoding
+precedes display unfolding; diagnostic ranges refer to the raw header value.
+Getters never modify headers or inspect body sources.
+
+`set_subject` and `set_subject_with_options` format a complete replacement
+before editing. Like MimeKit, they trim surrounding Unicode whitespace and
+remove CR/LF without inserting replacement spaces. Other controls are encoded,
+not silently removed. Assigned encoded-word lookalikes are literal text, not
+pre-encoded input.
+
+```rust
+use mimecraft::{Header, MimeMessage};
+
+let mut message: MimeMessage = MimeMessage::new();
+message.set_subject("  Hello\r\n world  ").unwrap();
+assert_eq!(message.subject().unwrap().text, "Hello world");
+let header = Header::from_unstructured("Comments", "caf\u{e9}").unwrap();
+assert!(header.raw().is_ascii());
+assert_eq!(header.decode_value().text, "caf\u{e9}");
+```
+
+Subject assignment replaces all occurrences with one canonical `Subject` at
+the first slot, matching MimeKit's singleton-header replacement.
+It always reformats, even for equal decoded text. Empty input creates an empty
+Subject; remove all occurrences through `headers_mut().remove_all("Subject")`
+when absence is desired. Formatting failures leave all headers unchanged.
+
+`Header::from_unstructured` and its `_with_options` variant provide the same
+authoring path for arbitrary unstructured fields. `UnstructuredHeaderFormatOptions`
+defaults to ASCII output, UTF-8 encoded words, CRLF, and enforced 78-byte physical
+lines. It accepts limits in `60..=998`, LF endings, and explicit RFC 2047 encoding
+options. Field names must be nonempty printable ASCII without a colon and fit
+with their colon on one line.
+
+Folding preserves interior spaces without splitting tokens or encoded words.
+Oversized plain tokens are encoded instead of having spaces inserted into them.
+The existing encoder's whole-value policy is retained rather than MimeKit's
+mixed plain/encoded-word heuristics. Unmappable text and invalid options return
+explicit errors; encoding offsets refer to the normalized text.
+
+These factories do not dispatch on field names or validate structured grammar:
+use address/content/identifier formatters for those fields. Safe header framing
+is not display sanitization; decoded NUL and other controls can remain present.
 
 ### Message address lists
 
@@ -1143,7 +1194,8 @@ assert_eq!(message.mime_version().unwrap(), Some(MimeVersion::V1_0));
 ```
 
 Setters accept checked values and perform no source I/O. Equal parsed values
-leave original bytes and duplicates unchanged. Otherwise they replace all
+leave original bytes unchanged only without duplicates for Date and MIME-Version;
+Resent-Date retains duplicates on equal assignments. Otherwise they replace all
 occurrences at the first slot, or append if absent. New date records use English
 names, seconds, and numeric offsets; versions use decimal components. Both use
 CRLF. Malformed existing values are replaced, and raw removal restores absence.
@@ -1192,8 +1244,9 @@ assert_eq!(message.message_id().unwrap().unwrap().as_str(), "reply@example.com")
 ```
 
 Setters apply `MessageId::from_value` before changing any headers. Single-ID
-setters preserve original bytes and duplicate fields when the normalized ID
-equals the current getter result. Otherwise they replace all occurrences at
+setters preserve original bytes when the normalized ID equals the current getter
+result and no duplicate headers exist. Resent-Message-Id also preserves duplicates
+on equal assignments. Otherwise they replace all occurrences at
 the first slot, or append if absent, using angle brackets, UTF-8, and CRLF.
 Malformed old values are replaced. Single IDs are never folded or truncated,
 and no identifier is generated. `set_in_reply_to(None)` removes all occurrences;
@@ -1248,10 +1301,10 @@ ASCII decimal prefix in `0..=i32::MAX`, then clamp to 1 through 5. Remaining
 bytes are ignored, even malformed comments or non-UTF-8; leading signs,
 comments, encoded words, missing digits, and numeric overflow are errors.
 
-Setters compare the freshly parsed value, not a cached field. Equal values
-leave all raw bytes and duplicates untouched, including Normal on an absent
-header and Highest on a raw `0`. Changed or invalid values are replaced at the
-first slot, later duplicates removed, and missing non-Normal values appended.
+Setters compare the freshly parsed value, not a cached field. Without duplicates,
+equal values leave raw bytes untouched, including Normal on an absent
+header and Highest on a raw `0`. Duplicate, changed, or invalid values are replaced
+at the first slot, later duplicates removed, and missing non-Normal values appended.
 New X-Priority values include comments such as `2 (High)`. To materialize an
 explicit Normal field even when absent, use the enum's `to_header` with
 `HeaderList::replace_all`; remove raw occurrences to restore absence.
@@ -4460,8 +4513,9 @@ All three header payload encoders are stateless and append to caller-owned
 buffers, with no `finish` or `reset`. They do not write `=?charset?B?...?=` or
 `=?charset?Q?...?=` wrappers, convert character sets, split characters or words,
 enforce encoded-word length limits, or fold headers. Complete-value encoding
-and decoding are available separately in `mimecraft::rfc2047`; folding
-unstructured fields and address headers remains unported.
+and decoding are available separately in `mimecraft::rfc2047`. Complete folded
+headers are available through `Header::from_unstructured` and
+`AddressList::to_header`.
 
 ### RFC 2047 header decoding
 
@@ -4572,9 +4626,10 @@ limitations remain those documented by `Charset::encode`. Errors return no
 partial output.
 
 The word limit is **not** a physical-line limit; the returned value can be
-longer than one header line. Complete unstructured/address-field folding
-and comment encoding are still unported. Do not use these
-helpers for addr-specs or MIME parameters; Content-Type and Content-Disposition
+longer than one header line. Use `Header::from_unstructured` or
+`AddressList::to_header` for complete folded fields; comment encoding remains
+unported. Do not use the text/phrase helpers for addr-specs or MIME parameters;
+Content-Type and Content-Disposition
 serialization uses the separate RFC 2231 path.
 
 ### MIME parameters
@@ -4958,7 +5013,8 @@ X-Priority's checked 32-bit numeric-prefix rules; the shared MIME whitespace
 helper is reused. Overflow and absent-Normal no-op comments are preserved or
 adapted inline. Raw-authoritative getters replace lazy caches and change events.
 Canonical setters compare newly parsed values instead of stale cached defaults;
-equal values preserve raw records, and explicit edits repair invalid metadata.
+equal values preserve raw records only without duplicates, and explicit edits
+repair invalid metadata.
 Missing headers still mean Normal, but present invalid values return errors
 rather than silently selecting Normal. Priority fields remain independent.
 Attached-message ownership adapts `MessagePart.cs` with optional owned messages

@@ -119,16 +119,32 @@ fn date_setters_format_and_update_independently() {
 }
 
 #[test]
-fn equal_date_assignments_preserve_comments_spelling_folding_and_duplicates() {
+fn equal_date_assignments_preserve_bytes_but_collapse_singleton_duplicates() {
     for field in ["Date", "Resent-Date"] {
         let raw = format!(
-            "{}: Thu, 28 Jun 2007\n\t12:47:52 EST (zone)\nX-Middle: unchanged\n{field}: invalid\n",
+            "{}: Thu, 28 Jun 2007\n\t12:47:52 EST (zone)\nX-Middle: unchanged\n",
             field.to_ascii_lowercase()
         );
         let mut message: MimeMessage = MimeMessage::from_parts(headers(raw.as_bytes()), None);
         let before = snapshot(&message);
         set_date(&mut message, field, date());
         assert_eq!(snapshot(&message), before);
+        message
+            .headers_mut()
+            .add(Header::parse(format!("{field}: invalid\n").as_bytes()).unwrap());
+        let before = snapshot(&message);
+        set_date(&mut message, field, date());
+        if field == "Date" {
+            assert_eq!(
+                snapshot(&message),
+                [
+                    format!("Date: {}\r\n", date()).into_bytes(),
+                    b"X-Middle: unchanged\n".to_vec(),
+                ]
+            );
+        } else {
+            assert_eq!(snapshot(&message), before);
+        }
     }
 }
 
@@ -240,12 +256,23 @@ fn invalid_version_errors_retain_raw_value_offsets_without_fallback() {
 #[test]
 fn equal_version_preserves_bytes_but_component_counts_are_significant() {
     let mut message: MimeMessage = MimeMessage::from_parts(
-        headers(b"mime-version: (comment) 01.\n\t00\nX-Middle: untouched\nMIME-Version: 2.0\n"),
+        headers(b"mime-version: (comment) 01.\n\t00\nX-Middle: untouched\n"),
         None,
     );
     let before = snapshot(&message);
     message.set_mime_version(MimeVersion::V1_0);
     assert_eq!(snapshot(&message), before);
+    message
+        .headers_mut()
+        .add(Header::parse(b"MIME-Version: 2.0\n").unwrap());
+    message.set_mime_version(MimeVersion::V1_0);
+    assert_eq!(
+        snapshot(&message),
+        [
+            b"MIME-Version: 1.0\r\n".to_vec(),
+            b"X-Middle: untouched\n".to_vec(),
+        ]
+    );
     for raw in [
         "1.0.0",
         "1.0.0.0",
