@@ -15,6 +15,7 @@
 // Factory and trait APIs adapted from MimeKit's IO/Filters.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
+mod anonymize;
 mod best_encoding;
 mod charset;
 mod codec;
@@ -31,6 +32,7 @@ use crate::{
     },
 };
 
+pub use anonymize::AnonymizeFilter;
 pub use best_encoding::BestEncodingFilter;
 pub use charset::CharsetFilter;
 pub use codec::{DecoderFilter, EncoderFilter};

@@ -18,6 +18,8 @@
 //! The [`filters`] module adds codec adapters, pass-through filtering, and
 //! streaming CRLF/LF conversion, `From ` escaping/armoring, and trailing-whitespace
 //! removal; these operate on buffers, not I/O streams.
+//! [`filters::AnonymizeFilter`] masks non-whitespace bytes while preserving byte
+//! counts and layout; it does not provide full-message anonymization.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

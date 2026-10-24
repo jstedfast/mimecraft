@@ -36,6 +36,8 @@ MimeKit. The crate is not configured for publication.
   encoding/decoding, with enum-based transfer-encoding factories.
 - Mbox `From ` escaping, quoted-printable `From ` armoring, and trailing-space/tab
   removal, including markers and whitespace runs split across input chunks.
+- Byte masking that preserves MIME whitespace and byte counts, for explicit
+  use in filtering pipelines rather than automatic message anonymization.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -385,6 +387,28 @@ yEnc retains its checksum, and decoder finish passes empty input through the
 decoder without flushing or discarding incomplete groups. Cloning an adapter
 copies its state when the underlying codec implements `Clone`.
 `PassThroughFilter` simply copies bytes; its finish and reset do nothing.
+
+`AnonymizeFilter` replaces every byte except SPACE, TAB, CR, and LF with ASCII
+`x`, matching MimeKit's byte-whitespace rules. Vertical tabs, form feeds, NUL,
+and all non-ASCII bytes are masked. Multibyte characters produce one `x` per
+byte, including Unicode whitespace. It appends output without changing input
+or existing output; finish and reset do nothing.
+
+```rust
+use mimecraft::filters::AnonymizeFilter;
+
+let mut output = Vec::new();
+AnonymizeFilter::new().filter(b"Hello\tworld!\r\n", &mut output);
+assert_eq!(output, b"xxxxx\txxxxxx\r\n");
+```
+
+This is not full-message anonymization: byte counts and whitespace layout
+remain visible, and headers or other content outside the supplied bytes are
+untouched. It performs no transfer decoding, charset conversion, MIME parsing,
+or secure erasure. Decode content before masking when decoded layout is wanted,
+then re-encode explicitly if needed. `FilteredReader` and `FilteredWriter`
+provide the existing streaming adapters. The full `MimeAnonymizer` remains
+deferred; filtered data still needs review before sharing.
 
 `encoder_filter(encoding)` and `decoder_filter(encoding)` return
 `Box<dyn MimeFilter>`. Base64, quoted-printable, and UU select their codecs;
