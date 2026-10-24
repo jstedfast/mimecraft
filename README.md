@@ -1412,11 +1412,11 @@ multipart contribute no body parts; an attached-message wrapper contributes
 one body part even when its contained message is absent.
 
 ```rust
-use mimecraft::{Header, MessagePart, MimeEntity, MimeMessage, TextPart};
+use mimecraft::{MessagePart, MimeEntity, MimeMessage, TextPart};
 
 let inner = MimeMessage::with_body(TextPart::new("plain", "attached").unwrap().into());
 let mut part = MessagePart::new(inner);
-part.headers_mut().add(Header::parse(b"Content-Disposition: attachment").unwrap());
+part.set_is_attachment(true).unwrap();
 let message = MimeMessage::with_body(part.into());
 let attachments = message.attachments().collect::<Result<Vec<_>, _>>().unwrap();
 assert_eq!(attachments.len(), 1);
@@ -1424,11 +1424,34 @@ assert!(matches!(attachments[0], MimeEntity::Message(_)));
 assert_eq!(message.leaf_parts().count(), 1);
 ```
 
-`MimeEntity::is_attachment()` parses only that node's first Content-Disposition
+`is_attachment()` on `MimeEntity`, `MimePart`, `Multipart`, and `MessagePart`
+parses only that node's first Content-Disposition
 and compares its disposition with `attachment`, ignoring ASCII case. Missing
 disposition is false; filenames, media types, message-level headers, and inner
 attachments do not imply attachment status. Raw header edits are immediately
 visible, and later duplicates do not override the first record.
+
+`set_is_attachment(true)` creates a missing disposition or changes the first
+disposition to `attachment`, retaining its decoded parameters.
+`set_is_attachment(false)` changes an attachment to `inline`; it does not remove
+the header, create a missing one, or replace non-attachment extension tokens.
+Text parts expose these methods through `part()`/`part_mut()`.
+
+When the first header already has the requested flag, every raw record,
+including duplicate dispositions, is preserved. For an actual flag change,
+checked formatting occurs before replacing the first matching slot and removing
+duplicates. Filenames, dates, sizes, and extension parameters from the first
+disposition survive; comments, original folds, and malformed fragments skipped
+by tolerant parsing do not. The `_with_options` setter accepts
+`HeaderFormatOptions`, checked only when a changed header needs formatting.
+No-op assignments ignore invalid formatting options.
+
+`AttachmentEditError::ContentDisposition` reports a malformed first header;
+`AttachmentEditError::HeaderFormat` reports a formatting failure. Neither error
+modifies headers or sources, and later valid duplicates are not used as fallback.
+Setters require no source I/O traits and do not modify nested entities or infer
+filenames, encodings, or media types. Selection and attachment enumeration
+observe the edited raw headers on their next call.
 
 Malformed dispositions produce errors, not silent skips or attachment
 fallbacks. `Attachments` yields the error and can resume at the next body part;
@@ -5120,6 +5143,12 @@ parser and checked value validator across all entity kinds. Explicit accessor
 errors replace the upstream invalid-value null fallback; raw edits need no
 cache invalidation. Assignment always canonicalizes and collapses duplicates,
 without implicit ID generation or changes to related references.
+Attachment flag editing follows `MimeEntity.IsAttachment`: setting true creates
+or promotes a disposition; setting false only demotes an attachment to inline.
+Matching flags preserve raw headers, including duplicates, while actual changes
+preserve parsed parameters and use atomic duplicate-collapsing formatting.
+Explicit parse errors replace implicit malformed-header fallback behavior;
+checked formatting failures preserve the original metadata.
 Content-Description and Content-Duration follow the same source's nullable
 properties: tolerant decoded descriptions and nonnegative integer seconds,
 with explicit errors replacing the duration getter's implicit null fallback.

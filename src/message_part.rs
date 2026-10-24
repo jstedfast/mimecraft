@@ -136,6 +136,45 @@ impl<R> MessagePart<R> {
         crate::mime_entity::set_content_id(&mut self.headers, value)
     }
 
+    /// Returns whether the wrapper's own disposition is `attachment`.
+    ///
+    /// Missing disposition is false; the contained message is not inspected.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first matching header's parse error.
+    pub fn is_attachment(&self) -> Result<bool, ContentHeaderParseError> {
+        crate::mime_entity::is_attachment(&self.headers)
+    }
+
+    /// Changes the wrapper's attachment flag, retaining its parameters.
+    ///
+    /// See [`crate::MimeEntity::set_is_attachment`] for no-op and duplicate
+    /// behavior. The contained message and its sources are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Parse or formatting errors leave all headers unchanged.
+    pub fn set_is_attachment(&mut self, value: bool) -> Result<(), crate::AttachmentEditError> {
+        self.set_is_attachment_with_options(value, &HeaderFormatOptions::default())
+    }
+
+    /// Changes the attachment flag with explicit header formatting options.
+    ///
+    /// Options are ignored for no-op assignments, as described by
+    /// [`crate::MimeEntity::set_is_attachment_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// Parse or formatting errors leave all headers unchanged.
+    pub fn set_is_attachment_with_options(
+        &mut self,
+        value: bool,
+        options: &HeaderFormatOptions,
+    ) -> Result<(), crate::AttachmentEditError> {
+        crate::mime_entity::set_is_attachment(&mut self.headers, value, options)
+    }
+
     /// Returns the attached message, if present.
     pub fn message(&self) -> Option<&MimeMessage<R>> {
         self.message.as_deref()

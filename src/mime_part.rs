@@ -153,6 +153,46 @@ impl<R> MimePart<R> {
         crate::mime_entity::set_content_id(&mut self.headers, value)
     }
 
+    /// Returns whether this part's first disposition is `attachment`.
+    ///
+    /// Missing disposition is false; filenames and content do not imply a flag.
+    /// See [`crate::MimeEntity::is_attachment`] for raw-header semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first matching header's parse error.
+    pub fn is_attachment(&self) -> Result<bool, ContentHeaderParseError> {
+        crate::mime_entity::is_attachment(&self.headers)
+    }
+
+    /// Changes the attachment flag without discarding disposition parameters.
+    ///
+    /// See [`crate::MimeEntity::set_is_attachment`] for no-op and duplicate
+    /// behavior. Does not inspect or reposition the source.
+    ///
+    /// # Errors
+    ///
+    /// Parse or formatting errors leave all headers unchanged.
+    pub fn set_is_attachment(&mut self, value: bool) -> Result<(), crate::AttachmentEditError> {
+        self.set_is_attachment_with_options(value, &HeaderFormatOptions::default())
+    }
+
+    /// Changes the attachment flag with explicit header formatting options.
+    ///
+    /// Options are ignored for no-op assignments, as described by
+    /// [`crate::MimeEntity::set_is_attachment_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// Parse or formatting errors leave all headers unchanged.
+    pub fn set_is_attachment_with_options(
+        &mut self,
+        value: bool,
+        options: &HeaderFormatOptions,
+    ) -> Result<(), crate::AttachmentEditError> {
+        crate::mime_entity::set_is_attachment(&mut self.headers, value, options)
+    }
+
     /// Decodes the first Content-Description header, or returns `None` if absent.
     ///
     /// Uses tolerant RFC 2047 decoding followed by unfolding and Unicode

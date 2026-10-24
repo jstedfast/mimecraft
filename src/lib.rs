@@ -89,6 +89,9 @@
 //! replacement; neither operation reads sources or generates identifiers.
 //! [`BodyParts`] traverses non-multipart nodes without entering attached messages;
 //! [`Attachments`] filters their dispositions with explicit parse errors.
+//! [`MimeEntity::set_is_attachment`] and concrete entity setters preserve
+//! disposition parameters, with atomic edits and MimeKit-compatible no-ops.
+//! [`AttachmentEditError`] distinguishes parse failures from formatting errors.
 //! [`MimeIterator`] visits every entity, including attached-message bodies, with
 //! part paths, ancestry, subtree skipping, and direct depth-proportional navigation.
 //! [`MimeMessage::entity_at`] distinguishes malformed paths from missing parts.
@@ -336,7 +339,7 @@ pub use message_priority::{
     MessageImportance, MessagePriority, MessagePriorityParseError, XMessagePriority,
 };
 pub use mime_content::MimeContent;
-pub use mime_entity::{Attachments, BodyParts, LeafParts, MimeEntity};
+pub use mime_entity::{AttachmentEditError, Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_load::MimeEntityParseOptions;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
 pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};

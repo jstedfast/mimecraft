@@ -125,6 +125,45 @@ impl<R> Multipart<R> {
         crate::mime_entity::set_content_id(&mut self.headers, value)
     }
 
+    /// Returns whether this container's own disposition is `attachment`.
+    ///
+    /// Missing disposition is false; children are not inspected.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first matching header's parse error.
+    pub fn is_attachment(&self) -> Result<bool, ContentHeaderParseError> {
+        crate::mime_entity::is_attachment(&self.headers)
+    }
+
+    /// Changes this container's attachment flag, retaining its parameters.
+    ///
+    /// See [`MimeEntity::set_is_attachment`] for no-op and duplicate behavior.
+    /// Does not edit children or change attachment traversal rules.
+    ///
+    /// # Errors
+    ///
+    /// Parse or formatting errors leave all headers unchanged.
+    pub fn set_is_attachment(&mut self, value: bool) -> Result<(), crate::AttachmentEditError> {
+        self.set_is_attachment_with_options(value, &HeaderFormatOptions::default())
+    }
+
+    /// Changes the attachment flag with explicit header formatting options.
+    ///
+    /// Options are ignored for no-op assignments, as described by
+    /// [`MimeEntity::set_is_attachment_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// Parse or formatting errors leave all headers unchanged.
+    pub fn set_is_attachment_with_options(
+        &mut self,
+        value: bool,
+        options: &HeaderFormatOptions,
+    ) -> Result<(), crate::AttachmentEditError> {
+        crate::mime_entity::set_is_attachment(&mut self.headers, value, options)
+    }
+
     /// Returns immediate children in their stored order.
     pub fn children(&self) -> &[MimeEntity<R>] {
         &self.children

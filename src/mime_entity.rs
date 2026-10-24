@@ -2,16 +2,18 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
+    error::Error,
+    fmt,
     io::{Cursor, Read, Seek},
     iter::FusedIterator,
     slice,
 };
 
 use crate::{
-    ContentHeaderParseError, Header, HeaderList, MessageDeliveryStatus,
-    MessageDispositionNotification, MessageFeedbackReport, MessageId, MessageIdParseError,
-    MessagePart, MessagePartial, MimePart, Multipart, MultipartRelated, MultipartReport,
-    TextBodyError, TextFormat, TextPart, TextRfc822Headers,
+    ContentDisposition, ContentHeaderParseError, Header, HeaderFormatError, HeaderFormatOptions,
+    HeaderList, MessageDeliveryStatus, MessageDispositionNotification, MessageFeedbackReport,
+    MessageId, MessageIdParseError, MessagePart, MessagePartial, MimePart, Multipart,
+    MultipartRelated, MultipartReport, TextBodyError, TextFormat, TextPart, TextRfc822Headers,
 };
 
 /// An owned MIME tree node: a body stream, multipart container, or attached message.
@@ -40,6 +42,35 @@ pub enum MimeEntity<R = Cursor<Vec<u8>>> {
     Multipart(Multipart<R>),
     /// A wrapper around an optional structured message.
     Message(MessagePart<R>),
+}
+
+/// An attachment flag could not be changed without losing existing metadata.
+///
+/// The original header list and content remain unchanged on either failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachmentEditError {
+    /// The first Content-Disposition could not be parsed.
+    ContentDisposition(ContentHeaderParseError),
+    /// The changed Content-Disposition could not be formatted.
+    HeaderFormat(HeaderFormatError),
+}
+
+impl fmt::Display for AttachmentEditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ContentDisposition(error) => error.fmt(f),
+            Self::HeaderFormat(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for AttachmentEditError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ContentDisposition(error) => Some(error),
+            Self::HeaderFormat(error) => Some(error),
+        }
+    }
 }
 
 impl<R> MimeEntity<R> {
@@ -126,10 +157,62 @@ impl<R> MimeEntity<R> {
     /// Returns the first matching header's parse error; later duplicates do not
     /// override it. Raw header edits are observed without a metadata cache.
     pub fn is_attachment(&self) -> Result<bool, ContentHeaderParseError> {
-        match self.headers().get("Content-Disposition") {
-            Some(header) => Ok(header.parse_content_disposition()?.is_attachment()),
-            None => Ok(false),
-        }
+        is_attachment(self.headers())
+    }
+
+    /// Changes this node's attachment flag, preserving disposition parameters.
+    ///
+    /// `true` creates an `attachment` disposition when absent, or changes an
+    /// existing disposition to `attachment`. `false` changes an attachment to
+    /// `inline`; it does not create a missing header or change extension tokens.
+    /// Uses default [`HeaderFormatOptions`].
+    ///
+    /// When the first header already has the requested attachment status, all
+    /// raw records (including duplicates) are preserved without reformatting.
+    /// Otherwise the first disposition is parsed with default parameter options,
+    /// its decoded parameters are retained, and checked formatting precedes
+    /// replacement at the first slot and removal of later duplicates.
+    /// Malformed parameter fragments skipped by tolerant parsing are not copied
+    /// into the changed header; its raw spelling and folds are not preserved.
+    ///
+    /// Does not change filenames, Content-Type, children, enclosed messages, or
+    /// source positions. Text parts expose this through `part_mut()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttachmentEditError`] for an invalid first disposition or
+    /// formatting failure, without modifying headers or content. Invalid first
+    /// values are not silently replaced or bypassed for a valid duplicate.
+    ///
+    /// ```
+    /// use mimecraft::{MessagePart, MimeMessage};
+    ///
+    /// let mut part = MessagePart::new(MimeMessage::<()>::new());
+    /// part.set_is_attachment(true)?;
+    /// assert!(part.is_attachment()?);
+    /// part.set_is_attachment(false)?;
+    /// assert!(!part.is_attachment()?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_is_attachment(&mut self, value: bool) -> Result<(), AttachmentEditError> {
+        self.set_is_attachment_with_options(value, &HeaderFormatOptions::default())
+    }
+
+    /// Changes the attachment flag with explicit header formatting options.
+    ///
+    /// Uses [`Self::set_is_attachment`]'s first-header and parameter semantics.
+    /// Options are checked only when writing a changed disposition. No-op
+    /// assignments preserve bytes even with invalid formatting options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttachmentEditError`] without changing any headers or content.
+    pub fn set_is_attachment_with_options(
+        &mut self,
+        value: bool,
+        options: &HeaderFormatOptions,
+    ) -> Result<(), AttachmentEditError> {
+        set_is_attachment(self.headers_mut(), value, options)
     }
 
     /// Visits non-multipart nodes in depth-first child order, including this root.
@@ -244,6 +327,43 @@ pub(crate) fn content_id(headers: &HeaderList) -> Result<Option<MessageId>, Mess
         .get("Content-Id")
         .map(|header| MessageId::parse_prefix(header.raw_value()).map(|(id, _)| id))
         .transpose()
+}
+
+pub(crate) fn is_attachment(headers: &HeaderList) -> Result<bool, ContentHeaderParseError> {
+    match headers.get("Content-Disposition") {
+        Some(header) => Ok(header.parse_content_disposition()?.is_attachment()),
+        None => Ok(false),
+    }
+}
+
+pub(crate) fn set_is_attachment(
+    headers: &mut HeaderList,
+    value: bool,
+    options: &HeaderFormatOptions,
+) -> Result<(), AttachmentEditError> {
+    let disposition = match headers.get("Content-Disposition") {
+        Some(header) => {
+            let mut disposition = header
+                .parse_content_disposition()
+                .map_err(AttachmentEditError::ContentDisposition)?;
+            if disposition.is_attachment() == value {
+                return Ok(());
+            }
+            disposition.set_is_attachment(value);
+            disposition
+        }
+        None if value => ContentDisposition::default(),
+        // Like MimeKit, clearing the flag does not create an inline header.
+        // Likewise, a non-attachment extension token above is left unchanged.
+        None => return Ok(()),
+    };
+    let header = disposition
+        .to_header_with_options(options)
+        .map_err(AttachmentEditError::HeaderFormat)?;
+    headers
+        .replace_all(header)
+        .expect("formatted Content-Disposition always has a parsed field name");
+    Ok(())
 }
 
 pub(crate) fn set_content_id(
