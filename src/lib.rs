@@ -61,6 +61,8 @@
 //! assignment-validated setters, and explicit parsing and recovery errors.
 //! Date, Resent-Date, and MIME-Version accessors reuse the existing value types,
 //! with explicit absence, parse errors, and independent canonical setters.
+//! Sender accessors return owned mailbox prefixes and provide atomic, checked
+//! replacement with configurable parsing and address-header formatting.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for

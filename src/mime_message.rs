@@ -4,10 +4,12 @@
 use std::io::{self, BufRead, Cursor, Read, Seek, Write};
 
 use crate::{
-    Attachments, BodyParts, DateTimeOffset, DateTimeOffsetError, Header, HeaderList, LeafParts,
-    MessageId, MessageIdParseError, MessageImportance, MessagePriority, MessagePriorityParseError,
-    MimeEntity, MimeEntityParseOptions, MimePart, MimePartWriteOptions, MimeVersion,
-    MimeVersionParseError, References, TextBodyError, TextFormat, XMessagePriority,
+    AddressHeaderFormatError, AddressHeaderFormatOptions, AddressList, Attachments, BodyParts,
+    DateTimeOffset, DateTimeOffsetError, Header, HeaderList, LeafParts, MailboxAddress,
+    MailboxParseError, MailboxParseOptions, MessageId, MessageIdParseError, MessageImportance,
+    MessagePriority, MessagePriorityParseError, MimeEntity, MimeEntityParseOptions, MimePart,
+    MimePartWriteOptions, MimeVersion, MimeVersionParseError, References, TextBodyError,
+    TextFormat, XMessagePriority,
 };
 
 /// An owned message with raw message headers and an optional MIME body tree.
@@ -29,6 +31,8 @@ use crate::{
 /// with explicit parse errors and assignment validation before edits.
 /// Date and MIME-Version accessors use existing value parsers, with no default
 /// for an absent field and no cache hiding subsequent raw edits.
+/// Sender accessors return detached mailboxes; explicit setters format a
+/// complete replacement before editing headers.
 ///
 /// The body and every descendant share source type `R`. Ownership replaces
 /// disposal and parent tracking. Body removal returns the old tree without
@@ -86,6 +90,179 @@ impl<R> MimeMessage<R> {
     /// Edits message headers without moving fields to or from the body.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Reads the first Sender header with default mailbox parsing options.
+    ///
+    /// See [`Self::sender_with_options`] for prefix and ownership rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first header's mailbox parse error, not a null fallback.
+    pub fn sender(&self) -> Result<Option<MailboxAddress>, MailboxParseError> {
+        self.sender_with_options(&MailboxParseOptions::default())
+    }
+
+    /// Reads the first Sender header using explicit mailbox parsing options.
+    ///
+    /// Returns `None` only when absent. Like MimeKit, parses one mailbox prefix,
+    /// not an entire address list. Trailing comments and whitespace are consumed;
+    /// other suffixes are ignored after a successful prefix parse. Groups are
+    /// not accepted. Later duplicate headers and body headers are ignored.
+    ///
+    /// Name decoding, compatibility recovery, and diagnostics follow
+    /// [`MailboxAddress::parse_prefix_with_options`]. No preliminary unstructured
+    /// decoding occurs. Each call parses current raw bytes without caching or
+    /// source I/O. The returned mailbox is owned: editing it does not update
+    /// the message until assigned back with [`Self::set_sender`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a parse error for an empty, malformed, or disallowed first value,
+    /// without trying later duplicates. Offsets refer to that raw header value.
+    pub fn sender_with_options(
+        &self,
+        options: &MailboxParseOptions,
+    ) -> Result<Option<MailboxAddress>, MailboxParseError> {
+        self.mailbox_header("Sender", options)
+    }
+
+    /// Assigns or removes Sender with default address-header formatting.
+    ///
+    /// See [`Self::set_sender_with_options`] for validation and replacement rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_sender(
+        &mut self,
+        value: Option<&MailboxAddress>,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_sender_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns or removes Sender using explicit address-header formatting.
+    ///
+    /// `Some` formats one mailbox through [`AddressList::to_header_with_options`],
+    /// including name encoding, IDNA conversion, and enforced physical-line
+    /// limits. Defaults use ASCII output, UTF-8 encoded names, CRLF, and 78-byte
+    /// lines. International local parts are rejected; SMTPUTF8 is not supported.
+    ///
+    /// Formatting finishes before editing. Replaces all occurrences at the
+    /// first slot, or appends if absent. Every `Some` assignment reformats,
+    /// even when the mailbox compares equal, so route-only edits are retained.
+    /// `None` removes all occurrences and ignores unused formatting options.
+    /// The supplied mailbox, other headers, and body sources are unchanged.
+    /// No From header, sender address, or transport envelope is synthesized.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options, unencodable addresses/routes/names, and unbreakable
+    /// pieces exceeding the line limit leave all existing headers unchanged.
+    ///
+    /// ```
+    /// use mimecraft::{MailboxAddress, MimeMessage};
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// let sender = MailboxAddress::parse(b"Agent <agent@example.com>")?;
+    /// message.set_sender(Some(&sender))?;
+    /// let mut edited = message.sender()?.unwrap();
+    /// edited.set_display_name("Delivery Agent");
+    /// assert_eq!(message.sender()?.unwrap().display_name(), "Agent");
+    /// message.set_sender(Some(&edited))?;
+    /// assert_eq!(message.sender()?.unwrap().display_name(), "Delivery Agent");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_sender_with_options(
+        &mut self,
+        value: Option<&MailboxAddress>,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_mailbox_header("Sender", value, options)
+    }
+
+    /// Reads the first Resent-Sender using [`Self::sender`]'s rules.
+    ///
+    /// Does not fall back to Sender or infer a resent sender from Resent-From.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first header's mailbox parse error.
+    pub fn resent_sender(&self) -> Result<Option<MailboxAddress>, MailboxParseError> {
+        self.resent_sender_with_options(&MailboxParseOptions::default())
+    }
+
+    /// Reads Resent-Sender using [`Self::sender_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first header's mailbox parse error, with raw-value offsets.
+    pub fn resent_sender_with_options(
+        &self,
+        options: &MailboxParseOptions,
+    ) -> Result<Option<MailboxAddress>, MailboxParseError> {
+        self.mailbox_header("Resent-Sender", options)
+    }
+
+    /// Assigns or removes Resent-Sender using [`Self::set_sender`]'s rules.
+    ///
+    /// Does not create a resent-header block or change other resent fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_sender(
+        &mut self,
+        value: Option<&MailboxAddress>,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_resent_sender_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Resent-Sender using [`Self::set_sender_with_options`]'s rules.
+    ///
+    /// `None` removes all occurrences without validating unused options.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_sender_with_options(
+        &mut self,
+        value: Option<&MailboxAddress>,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_mailbox_header("Resent-Sender", value, options)
+    }
+
+    fn mailbox_header(
+        &self,
+        field: &str,
+        options: &MailboxParseOptions,
+    ) -> Result<Option<MailboxAddress>, MailboxParseError> {
+        self.headers
+            .get(field)
+            .map(|header| {
+                MailboxAddress::parse_prefix_with_options(header.raw_value(), options)
+                    .map(|(mailbox, _)| mailbox)
+            })
+            .transpose()
+    }
+
+    fn set_mailbox_header(
+        &mut self,
+        field: &str,
+        value: Option<&MailboxAddress>,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        if let Some(value) = value {
+            // Mailbox equality ignores source routes. Always format the supplied
+            // mailbox so a route-only edit is not mistaken for an unchanged value.
+            let list = AddressList::from(vec![value.clone().into()]);
+            let header = list.to_header_with_options(field, options)?;
+            self.replace_formatted(header);
+        } else {
+            self.headers.remove_all(field);
+        }
+        Ok(())
     }
 
     /// Reads the first Date header using [`DateTimeOffset::parse`].

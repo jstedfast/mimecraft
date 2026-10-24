@@ -93,6 +93,8 @@ MimeKit. The crate is not configured for publication.
   message/body headers, optional bodies, and no generated metadata.
 - Typed Date, Resent-Date, and MIME-Version accessors with explicit absence,
   parse errors, and canonical setters backed by current raw headers.
+- Sender and Resent-Sender mailbox accessors with configurable prefix parsing,
+  checked address formatting, and atomic replacement.
 - Typed importance and priority headers with independent raw-header access,
   checked numeric-prefix parsing, and canonical setters that preserve no-ops.
 - Structured attached-message ownership and iterative writing, with nested
@@ -1019,6 +1021,50 @@ transport preparation: **Bcc and Resent-Bcc are written as supplied**.
 Other message-specific typed convenience setters, safe complete unstructured-header
 authoring, offset-based header merging, and automatic
 transport preparation remain deferred.
+
+### Message sender mailboxes
+
+`MimeMessage::sender()` and `resent_sender()` read only the first matching raw
+header, returning `None` when absent and explicit `MailboxParseError` values
+for malformed or disallowed input. Like MimeKit, they parse a single mailbox
+prefix, not a whole address list. Trailing comments/whitespace are consumed;
+other suffixes after a successful prefix are ignored. Groups are rejected,
+and later duplicate headers are not used as fallbacks.
+
+The `_with_options` getters accept `MailboxParseOptions` for compatibility and
+name decoding. Error offsets refer to the raw header value; returned mailboxes
+retain name/address decoding diagnostics and source routes. Getters reparse
+current bytes without caching, inspecting body headers, or reading sources.
+Returned mailboxes are owned, detached values:
+
+```rust
+use mimecraft::{MailboxAddress, MimeMessage};
+
+let mut message: MimeMessage = MimeMessage::new();
+let sender: MailboxAddress = "Agent <agent@example.com>".parse().unwrap();
+message.set_sender(Some(&sender)).unwrap();
+let mut edited = message.sender().unwrap().unwrap();
+edited.set_display_name("Delivery Agent");
+assert_eq!(message.sender().unwrap().unwrap().display_name(), "Agent");
+message.set_sender(Some(&edited)).unwrap();
+message.set_resent_sender(Some(&sender)).unwrap();
+```
+
+Setters accept `Option<&MailboxAddress>` and format through the existing address
+header writer before changing any headers. `Some` replaces all occurrences at
+the first slot, or appends if absent. Every assignment reformats, even for equal
+mailboxes: mailbox equality ignores source routes, so it cannot safely suppress
+route-only changes. `None` removes all occurrences, including malformed values.
+
+Defaults use ASCII output, UTF-8 encoded display names, IDNA-normalized domains
+and routes, CRLF, and an enforced 78-byte physical-line limit. The `_with_options`
+setters accept `AddressHeaderFormatOptions`. Invalid options, encoding errors,
+international local parts, and unbreakable oversized pieces leave all headers
+unchanged. Removal ignores unused formatting options. Input mailboxes and body
+sources are never modified.
+
+Sender and Resent-Sender are independent. No From/Resent-From inference, resent
+block construction, SMTP envelope generation, or SMTPUTF8 output is provided.
 
 ### Message dates and MIME version
 
