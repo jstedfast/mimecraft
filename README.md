@@ -752,6 +752,25 @@ MimeKit's cache-dependent no-op. Both accessors observe raw edits immediately
 and need no source I/O trait bounds. Text parts expose them through
 `part()`/`part_mut()`; no media inspection or duration inference is performed.
 
+`content_md5()` reads the first Content-MD5 as detached decoded text with
+charset-recovery diagnostics, using the same tolerant decoding, unfolding, and
+Unicode trimming as Content-Description. `content_md5_with_options` accepts
+`rfc2047::DecodeOptions`. Missing and present-empty headers remain distinct;
+arbitrary or malformed checksum text is preserved rather than rejected.
+Raw edits are observed immediately, and later duplicates do not override the
+first. This does not Base64-decode a digest, validate its length, or verify it.
+
+`set_content_md5(Some(value))` assigns caller-supplied metadata using checked
+unstructured-header formatting; `_with_options` accepts
+`UnstructuredHeaderFormatOptions`. Assignment trims and unfolds, safely encodes
+controls and literal encoded-word lookalikes, and replaces duplicates at the
+first slot with canonical `Content-Md5` spelling. Equal values are reformatted.
+Empty text leaves an empty header; `None` removes all occurrences without
+validating options. Formatting errors leave headers intact. No source I/O,
+checksum computation, or cryptographic dependency is involved. Later body edits
+do not recompute or remove this metadata. Text parts expose it through
+`part()`/`part_mut()`.
+
 The stored encoding belongs to `MimeContent`, independently of the requested
 transfer-encoding header. Metadata edits do no I/O or transcoding, do not move
 the source cursor, and do not validate body structure or transport suitability.
@@ -5292,6 +5311,11 @@ with explicit errors replacing the duration getter's implicit null fallback.
 Unstructured formatting is shared with Subject; the numeric parser retains
 the source runtime's trailing-NUL compatibility behavior. Cache-dependent
 setter no-ops are replaced by deterministic canonical header replacement.
+Content-MD5 metadata follows `MimePart.ContentMd5` and its generic header-value
+handling, not checksum computation or verification. Tolerant decoded reads and
+checked unstructured formatting preserve arbitrary caller-supplied text, while
+canonical assignment replaces the source's cache-dependent no-op. Formatting
+and atomic replacement are shared with Content-Description.
 Part-level encoding recommendation follows `MimePart.GetBestEncoding`, reusing
 the existing analyzer through a bounded streaming writer over a discard sink.
 It retains decoded text/message analysis and the non-text media-type shortcut,

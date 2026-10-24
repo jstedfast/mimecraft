@@ -30,6 +30,8 @@
 //! typed metadata, and checked setters without source I/O or automatic transcoding.
 //! Content descriptions use tolerant header decoding and checked unstructured
 //! authoring; content durations expose whole seconds with explicit value errors.
+//! Content-MD5 accessors retain tolerant text metadata and checked formatting,
+//! without computing or verifying checksums.
 //! [`MimePart::file_name`] reads disposition-first decoded filenames, and
 //! [`MimePart::set_file_name`] atomically updates both MIME filename parameters.
 //! [`FileNameEditError`] reports missing metadata, parse, and formatting failures.

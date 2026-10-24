@@ -359,14 +359,7 @@ impl<R> MimePart<R> {
         value: Option<&str>,
         options: &crate::UnstructuredHeaderFormatOptions,
     ) -> Result<(), crate::UnstructuredHeaderFormatError> {
-        if let Some(value) = value {
-            let header =
-                Header::from_unstructured_with_options("Content-Description", value, options)?;
-            self.replace_formatted(header);
-        } else {
-            self.headers.remove_all("Content-Description");
-        }
-        Ok(())
+        self.set_unstructured_header("Content-Description", value, options)
     }
 
     /// Reads the first Content-Duration as nonnegative whole seconds.
@@ -441,6 +434,103 @@ impl<R> MimePart<R> {
             )));
         } else {
             self.headers.remove_all("Content-Duration");
+        }
+        Ok(())
+    }
+
+    /// Decodes the first Content-MD5 header, or returns `None` when absent.
+    ///
+    /// Adapts MimeKit's `ContentMd5` property: tolerant RFC 2047 decoding,
+    /// unfolding, and Unicode trimming produce a detached text value with
+    /// charset-recovery diagnostics. Empty or malformed checksum text remains
+    /// present; later duplicate headers do not override the first.
+    ///
+    /// This is metadata access, not Base64 decoding, digest-length validation,
+    /// checksum computation, or verification against the content. No source I/O
+    /// occurs, and raw header edits are visible on the next call.
+    pub fn content_md5(&self) -> Option<crate::rfc2047::DecodedHeader> {
+        self.content_md5_with_options(&crate::rfc2047::DecodeOptions::default())
+    }
+
+    /// Decodes Content-MD5 using explicit charset and compliance options.
+    ///
+    /// See [`Self::content_md5`] and [`Header::decode_value_with_options`].
+    /// Diagnostic offsets refer to the original raw header value.
+    pub fn content_md5_with_options(
+        &self,
+        options: &crate::rfc2047::DecodeOptions,
+    ) -> Option<crate::rfc2047::DecodedHeader> {
+        // MimeKit exposes Header.Value here, not decoded checksum bytes; retain
+        // arbitrary text rather than rejecting malformed or non-Base64 values.
+        self.headers
+            .get("Content-Md5")
+            .map(|header| header.decode_value_with_options(options))
+    }
+
+    /// Assigns Content-MD5 text, or removes all occurrences for `None`.
+    ///
+    /// Uses default checked unstructured-header formatting, without validating
+    /// the checksum. See [`Self::set_content_md5_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// Formatting failures leave headers and stored content unchanged.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContent, MimePart};
+    ///
+    /// let mut part = MimePart::new(MimeContent::new(Cursor::new(b"body")));
+    /// // Assign metadata supplied by the caller; no checksum is computed.
+    /// part.set_content_md5(Some(" XYZ "))?;
+    /// assert_eq!(part.content_md5().unwrap().text, "XYZ");
+    /// part.set_content_md5(None)?;
+    /// assert!(part.content_md5().is_none());
+    /// # Ok::<(), mimecraft::UnstructuredHeaderFormatError>(())
+    /// ```
+    pub fn set_content_md5(
+        &mut self,
+        value: Option<&str>,
+    ) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        self.set_content_md5_with_options(value, &crate::UnstructuredHeaderFormatOptions::default())
+    }
+
+    /// Assigns Content-MD5 text using explicit unstructured-header formatting.
+    ///
+    /// Like MimeKit's generic header formatter, trims Unicode whitespace and
+    /// unfolds input before encoding. Controls and literal encoded-word
+    /// lookalikes are safely encoded, not interpreted. This does not enforce
+    /// Base64 syntax, digest length, or consistency with the body.
+    ///
+    /// Writes canonical `Content-Md5` spelling, replacing duplicates at the
+    /// first slot or appending if absent. Equal assignments are reformatted,
+    /// as with Content-Description, rather than using MimeKit's cache-dependent
+    /// no-op. Empty text leaves an empty header. `None` removes all occurrences
+    /// without validating options. Content bytes, encoding, and newline hints
+    /// are untouched; later body edits do not refresh or remove this metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors before editing any header. No source I/O occurs.
+    pub fn set_content_md5_with_options(
+        &mut self,
+        value: Option<&str>,
+        options: &crate::UnstructuredHeaderFormatOptions,
+    ) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        self.set_unstructured_header("Content-Md5", value, options)
+    }
+
+    fn set_unstructured_header(
+        &mut self,
+        field: &str,
+        value: Option<&str>,
+        options: &crate::UnstructuredHeaderFormatOptions,
+    ) -> Result<(), crate::UnstructuredHeaderFormatError> {
+        if let Some(value) = value {
+            let header = Header::from_unstructured_with_options(field, value, options)?;
+            self.replace_formatted(header);
+        } else {
+            self.headers.remove_all(field);
         }
         Ok(())
     }
