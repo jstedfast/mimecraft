@@ -38,8 +38,8 @@ MimeKit. The crate is not configured for publication.
   removal, including markers and whitespace runs split across input chunks.
 - Byte masking that preserves MIME whitespace and byte counts, for explicit
   use in filtering pipelines rather than automatic message anonymization.
-- Raw address, unstructured, and content-header masking with preserved quoting,
-  escapes, potential encoded-word labels, and parameter structure for inspection.
+- Raw address, unstructured, content-header, and Received masking with preserved
+  syntax, parameters, trace keywords, and recognized date suffixes for inspection.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -489,14 +489,33 @@ assert_eq!(
 );
 ```
 
+`anonymize::received_header_value(&[u8])` preserves MIME whitespace, `<>[]:@,.`,
+and semicolons outside comments. It retains `from`, `by`, `via`, `with`, `id`,
+and `for` case-insensitively at token boundaries, keeping their original spelling.
+Keywords require following SPACE, TAB, CR, or LF; an exact word at EOF is masked.
+Comments delimit tokens, but other punctuation does not introduce keywords.
+
+Nested comments retain parentheses, backslashes, whitespace, and the same
+punctuation, but mask keyword text. An odd backslash run masks the following
+byte, even whitespace or a parenthesis. Unclosed comments extend through EOF;
+unmatched closing parentheses outside comments are masked.
+
+After an outside-comment semicolon, the helper skips MIME whitespace and tries
+`DateTimeOffset::parse` on the remainder. If accepted, it preserves the entire
+suffix verbatim, including any comments, ignored tokens, or unrelated trailing
+data. Rejected suffixes resume masking. This reuses the tolerant date parser,
+not strict date validation, and never reformats the date. Keyword and date
+lookahead mean a masked prefix can differ from that prefix of a complete result.
+
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header
-text, parameter names, and selected values remain visible, even when malformed.
+text, parameter names, selected values, and accepted date suffixes remain visible,
+even when malformed or containing unrelated private data.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Header-type dispatch, configurable preservation settings, Received masking,
-and complete message/entity anonymization remain deferred.
+Header-type dispatch, configurable preservation settings, and complete
+message/entity anonymization remain deferred.
 
 ### Incremental charset conversion
 

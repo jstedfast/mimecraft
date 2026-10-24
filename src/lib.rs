@@ -20,9 +20,9 @@
 //! removal; these operate on buffers, not I/O streams.
 //! [`filters::AnonymizeFilter`] masks non-whitespace bytes while preserving byte
 //! counts and layout; it does not provide full-message anonymization.
-//! [`anonymize`] masks raw address, unstructured, and content-header values while
-//! retaining syntax for inspection, including potential encoded-word labels,
-//! escapes, parameter names, and selected parameter values.
+//! [`anonymize`] masks raw address, unstructured, content-header, and Received
+//! values while retaining syntax for inspection, including potential encoded-word
+//! labels, escapes, parameters, trace keywords, and recognized date suffixes.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

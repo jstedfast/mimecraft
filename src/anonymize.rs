@@ -12,18 +12,21 @@
 //! address masking also preserves escaped bytes. Even malformed labels can pass
 //! through verbatim. Content-header masking preserves the leading type or
 //! disposition, parameter names, and selected parameter values, even if malformed.
+//! Received masking preserves an entire suffix if the date parser accepts it,
+//! including any unrelated text ignored by that parser.
 //! Output may contain non-ASCII bytes, controls, or invalid UTF-8 and is not
 //! necessarily valid MIME or safe display text.
 //!
 //! Pass values such as [`crate::Header::raw_value`], not complete header records.
-//! Header dispatch, configurable preservation policies, Received masking, and
+//! Header dispatch, configurable preservation policies, and
 //! full-message anonymization are not implemented here. Review output before
 //! sharing it. Use [`crate::filters::AnonymizeFilter`] for simpler byte masking
 //! that preserves only SPACE, TAB, CR, and LF.
 
-use crate::parse_utils::is_whitespace;
+use crate::{DateTimeOffset, parse_utils::is_whitespace};
 
 const ADDRESS_SPECIALS: &[u8] = b" \t\r\n()<>[]:;@,.";
+const RECEIVED_SPECIALS: &[u8] = b"<>[]:@,.";
 const WHITESPACE: &[u8] = b" \t\r\n";
 
 /// Masks an unstructured raw header value, retaining potential encoded-word syntax.
@@ -116,6 +119,119 @@ pub fn address_header_value(raw_value: &[u8]) -> Vec<u8> {
         output.push(masked);
     }
     output
+}
+
+/// Masks a raw Received value, retaining trace syntax and recognized date suffixes.
+///
+/// Preserves SPACE, TAB, CR, LF, `<>[]:@,.`, and semicolons outside comments.
+/// The keywords `from`, `by`, `via`, `with`, `id`, and `for` retain their original
+/// spelling when matched ASCII-case-insensitively at a token boundary and
+/// followed by MIME whitespace. An exact keyword at EOF is masked. Comments
+/// also delimit tokens; punctuation such as `<` does not start a new token.
+///
+/// Nested comments are scanned iteratively. Parentheses, backslashes, the same
+/// punctuation, and whitespace survive inside comments, but keywords do not.
+/// An odd backslash run masks the following byte, including whitespace or a
+/// parenthesis, instead of interpreting it. Unclosed comments remain comments
+/// through EOF; unmatched closing parentheses outside comments are masked.
+///
+/// After each semicolon outside comments, skips MIME whitespace and tries
+/// [`DateTimeOffset::parse`] on the remaining slice. If accepted, the **entire
+/// suffix** is copied verbatim, including comments, ignored tokens, and trailing
+/// data. Otherwise masking resumes. This is tolerant date recognition, not
+/// validation or formatting; missing times and other recovered forms can pass.
+///
+/// Returns a new buffer of exactly the input length. Each call starts fresh;
+/// lookahead means masking a prefix can differ from that prefix of the full
+/// result. No encoded-word or charset decoding occurs. Preserved dates and
+/// unrelated suffix data may be sensitive; see the [module documentation](self).
+///
+/// ```
+/// use mimecraft::anonymize::received_header_value;
+///
+/// assert_eq!(
+///     received_header_value(b" from mail.example; 15 Nov 2017 14:16:18 -0000\r\n"),
+///     b" from xxxx.xxxxxxx; 15 Nov 2017 14:16:18 -0000\r\n",
+/// );
+/// ```
+pub fn received_header_value(raw_value: &[u8]) -> Vec<u8> {
+    let mut output = raw_value.to_vec();
+    let mut index = 0;
+
+    while index < raw_value.len() {
+        if is_whitespace(raw_value[index]) {
+            index += 1;
+        } else if raw_value[index] == b'(' {
+            // Consume '(' and scan the comment, including nested comments.
+            let mut depth = 1usize;
+            let mut escaped = false;
+            index += 1;
+
+            while index < raw_value.len() && depth > 0 {
+                let byte = raw_value[index];
+                match byte {
+                    b'\\' => escaped = !escaped,
+                    _ if escaped => {
+                        // Escaped bytes are masked even when they are whitespace
+                        // or would otherwise open or close a comment.
+                        output[index] = b'x';
+                        escaped = false;
+                    }
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ if !is_whitespace(byte) && !RECEIVED_SPECIALS.contains(&byte) => {
+                        // Mask everything else in the comment.
+                        output[index] = b'x';
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+        } else if raw_value[index] == b';' {
+            index += 1;
+            while index < raw_value.len() && is_whitespace(raw_value[index]) {
+                index += 1;
+            }
+
+            // This might be a date. Like MimeKit, don't mask any of the suffix
+            // if the date parser accepts it, even bytes the parser ignores.
+            if DateTimeOffset::parse(&raw_value[index..]).is_ok() {
+                break;
+            }
+        } else if let Some(length) = received_keyword_length(&raw_value[index..]) {
+            index += length;
+        } else {
+            while index < raw_value.len() {
+                let byte = raw_value[index];
+                if is_whitespace(byte) || matches!(byte, b';' | b'(') {
+                    break;
+                }
+                if !RECEIVED_SPECIALS.contains(&byte) {
+                    output[index] = b'x';
+                }
+                index += 1;
+            }
+        }
+    }
+    output
+}
+
+fn received_keyword_length(input: &[u8]) -> Option<usize> {
+    // Look for: from, by, via, with, id, for. All are at most four bytes,
+    // and even an exact match must have a following MIME whitespace byte.
+    let length = input.iter().take(5).position(|&byte| is_whitespace(byte))?;
+    let word = &input[..length];
+    if word.eq_ignore_ascii_case(b"from")
+        || word.eq_ignore_ascii_case(b"by")
+        || word.eq_ignore_ascii_case(b"via")
+        || word.eq_ignore_ascii_case(b"with")
+        || word.eq_ignore_ascii_case(b"id")
+        || word.eq_ignore_ascii_case(b"for")
+    {
+        Some(length)
+    } else {
+        None
+    }
 }
 
 /// Masks parameter values in a raw Content-Type value, preserving MIME structure.
