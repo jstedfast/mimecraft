@@ -147,6 +147,37 @@ impl Error for BestEncodingError {
     }
 }
 
+/// A leaf part could not be prepared for the requested transport constraint.
+#[derive(Debug)]
+pub enum PartPrepareError {
+    /// The serialization options have an invalid newline format or line limit.
+    InvalidOptions(io::Error),
+    /// The first Content-Transfer-Encoding is empty or unrecognized.
+    ContentTransferEncoding(UnknownContentEncoding),
+    /// Required metadata or decoded content could not be analyzed.
+    BestEncoding(BestEncodingError),
+}
+
+impl fmt::Display for PartPrepareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidOptions(error) => error.fmt(f),
+            Self::ContentTransferEncoding(error) => error.fmt(f),
+            Self::BestEncoding(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for PartPrepareError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidOptions(error) => Some(error),
+            Self::ContentTransferEncoding(error) => Some(error),
+            Self::BestEncoding(error) => Some(error),
+        }
+    }
+}
+
 impl<R: Read + Seek> MimePart<R> {
     /// Creates a part with `Content-Type: application/octet-stream`.
     ///
@@ -532,6 +563,96 @@ impl<R: Read + Seek> MimePart<R> {
             .filter()
             .best_encoding_with_line_length(constraint, max_line_length)
             .map_err(BestEncodingError::InvalidLineLength)
+    }
+
+    /// Prepares this leaf's transfer-encoding header using default write options.
+    ///
+    /// Adapts MimeKit's `MimePart.Prepare`; see [`Self::prepare_with_options`].
+    /// This is encoding selection, not validation of the entire MIME entity or
+    /// a guarantee that arbitrary raw headers and stored data are transport-safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PartPrepareError`] without changing headers or stored bytes.
+    pub fn prepare(&mut self, constraint: EncodingConstraint) -> Result<(), PartPrepareError> {
+        self.prepare_with_options(constraint, &crate::MimePartWriteOptions::default())
+    }
+
+    /// Prepares this leaf's transfer encoding for serialization with `options`.
+    ///
+    /// Retains requested Base64, quoted-printable, and UU encodings without
+    /// reading the content or Content-Type. Binary is likewise retained for
+    /// an unrestricted transport. Otherwise uses [`Self::best_encoding_with_line_length`]
+    /// on decoded content and assigns the result only when it changes. An absent
+    /// transfer-encoding header stays absent when SevenBit suffices. No-op paths
+    /// preserve raw spelling, folding, and duplicates; changes replace all
+    /// duplicates at the first slot with a canonical header.
+    ///
+    /// Unlike MimeKit's private encoder-width setting, line width stays in
+    /// explicit [`crate::MimePartWriteOptions`]: pass the same options when
+    /// writing. No settings are stored in the part. Existing encoded bodies
+    /// are not rewrapped or verified; safe-encoding shortcuts trust the header.
+    /// Raw headers are not refolded. This does not prepare multipart children
+    /// or enclosed messages, transcode stored bytes, or change newline hints.
+    ///
+    /// # Errors
+    ///
+    /// Validates all write options before metadata or I/O, even for no-ops.
+    /// Unknown first transfer encodings are errors rather than implicitly
+    /// unspecified. Paths needing analysis also report missing/invalid first
+    /// Content-Type and source I/O errors. Headers remain unchanged on failure;
+    /// source positioning and rewind failures follow [`Self::best_encoding`].
+    ///
+    /// ```
+    /// use mimecraft::{ContentEncoding, EncodingConstraint, MimePartWriteOptions, TextPart};
+    ///
+    /// let mut text = TextPart::new("plain", &"x".repeat(70))?;
+    /// let options = MimePartWriteOptions { max_line_length: 60, ..Default::default() };
+    /// text.part_mut().prepare_with_options(EncodingConstraint::SevenBit, &options)?;
+    /// assert_eq!(text.part().content_transfer_encoding()?, ContentEncoding::QuotedPrintable);
+    /// let mut output = Vec::new();
+    /// text.part_mut().write_content_to_with_options(&mut output, &options)?;
+    /// assert!(output.split(|&byte| byte == b'\n')
+    ///     .all(|line| line.strip_suffix(b"\r").unwrap_or(line).len() <= 60));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn prepare_with_options(
+        &mut self,
+        constraint: EncodingConstraint,
+        options: &crate::MimePartWriteOptions,
+    ) -> Result<(), PartPrepareError> {
+        options
+            .validate()
+            .map_err(PartPrepareError::InvalidOptions)?;
+        let encoding = self
+            .content_transfer_encoding()
+            .map_err(PartPrepareError::ContentTransferEncoding)?;
+        match encoding {
+            ContentEncoding::QuotedPrintable
+            | ContentEncoding::UuEncode
+            | ContentEncoding::Base64 => {
+                // These encodings are safe no matter what the constraints are.
+                return Ok(());
+            }
+            ContentEncoding::Binary if constraint == EncodingConstraint::None => {
+                // No need to re-encode anything on an unrestricted transport.
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        let best = self
+            .best_encoding_with_line_length(constraint, options.max_line_length)
+            .map_err(PartPrepareError::BestEncoding)?;
+        if encoding == best
+            || (encoding == ContentEncoding::Unspecified && best == ContentEncoding::SevenBit)
+        {
+            // MimeKit's setter preserves equal encodings. Keep that no-op here
+            // instead of canonicalizing raw headers through our typed setter.
+            return Ok(());
+        }
+        self.set_content_transfer_encoding(best);
+        Ok(())
     }
 }
 

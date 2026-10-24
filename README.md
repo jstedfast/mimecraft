@@ -780,7 +780,29 @@ Read failures do not trigger a cleanup seek, and a final rewind failure is
 reported even after the whole body was analyzed. Selection is never cached.
 No headers, stored encoding, or newline hints change: explicitly call
 `set_content_transfer_encoding` to apply a recommendation. Text parts expose
-selection through `part_mut()`; full transport preparation remains deferred.
+selection through `part_mut()`.
+
+`prepare(constraint)` applies MimeKit's leaf-part transport encoding selection
+using default `MimePartWriteOptions`. `prepare_with_options(constraint, &options)`
+uses the supplied content-line limit (`60..=998`). Pass those same options to
+subsequent serialization: unlike MimeKit, the part does not retain a private
+encoder-width setting. Preparation does not transcode or replace stored bytes.
+
+Requested Base64, quoted-printable, and UU encodings are retained without reading
+Content-Type or content. Binary is likewise retained for an unrestricted
+transport. Other cases use decoded-content analysis and the media-type shortcut
+above. An absent transfer-encoding header stays absent if SevenBit suffices.
+Equal encodings and safe shortcuts preserve raw headers, including duplicates;
+changes write one canonical header at the first matching slot.
+
+`PartPrepareError` distinguishes invalid write options, invalid first
+Content-Transfer-Encoding, and underlying `BestEncodingError` failures. All write
+options are validated before metadata or I/O, even for shortcuts. Failure leaves
+headers unchanged; scans retain the analyzer's source positioning rules.
+Preparation trusts already-safe requested encodings: it does not verify their
+payloads, rewrap stored encoded content, or refold raw headers. It is not a full
+transport-safety validator. Multipart/message-tree preparation remains deferred;
+text parts expose leaf preparation through `part_mut()`.
 
 Complete entity loading is available through `MimeEntity::load`, and message
 loading through `MimeMessage::load`, including transparent attached messages.
@@ -1013,7 +1035,8 @@ Invalid options return `InvalidInput`, invalid metadata returns `InvalidData`,
 and source/destination errors propagate. No rollback occurs; retries restart
 serialization. Sources follow the leaf writer's rewind rules, the destination
 is flushed but not closed, and stored headers, text, bodies, and structure are
-unchanged. Transport preparation and signature-specific handling are deferred.
+unchanged. Tree-wide transport preparation and signature-specific handling
+are deferred.
 
 `Multipart` and `MimeEntity` also provide `write_content_to` and
 `write_content_to_with_options`. Only the root header section is omitted:
@@ -5220,13 +5243,20 @@ the existing analyzer through a bounded streaming writer over a discard sink.
 It retains decoded text/message analysis and the non-text media-type shortcut,
 but validates line limits before any source access, including shortcut cases.
 Missing raw Content-Type is an explicit error rather than an implicit default.
+Leaf preparation follows `MimePart.Prepare`, preserving safe-encoding shortcuts,
+the unspecified/SevenBit no-op, and equal-encoding header preservation. Selection
+succeeds before any header mutation. Explicit serialization options replace the
+source's private encoder-width state; callers use the same options for preparation
+and writing. Invalid first transfer encodings and invalid options produce errors
+instead of implicit fallback; preparation is not whole-message validation.
 Single-part writing follows `MimePart.WriteContent` and `MimeWriter.cs`, reusing
 the existing transfer codecs, newline filters, and normalized header writer.
 Stored/requested encoding comparisons, binary pass-through, UU wrappers, and
 empty-body newline handling are retained. Options and required metadata errors
 are explicit, UU filename controls are rejected, and truncated header records
 are terminated in output to keep the separator distinct. Signature verification,
-configurable message-level formatting, and transport preparation are not implemented.
+configurable message-level formatting, and tree-wide transport preparation
+are not implemented.
 Text parts adapt `TextPart.cs`'s subtype construction, explicit charset text
 access, and text/charset replacement. Composition over `MimePart<R>` replaces
 inheritance, while in-memory-only setters respect Rust source types. Existing
