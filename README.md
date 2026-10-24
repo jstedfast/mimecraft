@@ -691,6 +691,35 @@ through `part()`/`part_mut()`. IDs are not generated or checked for uniqueness;
 changing one does not update HTML references or parent `multipart/related`
 selectors. Related-root lookup observes the current raw headers on each call.
 
+`file_name()` returns `Result<Option<String>, ContentHeaderParseError>`, checking
+the first Content-Disposition's `filename` parameter before the first
+Content-Type's `name`. The decoded value is Unicode-trimmed. An empty filename
+prevents fallback; an invalid disposition reports an error rather than falling
+back. Content-Type is not parsed when a disposition filename is available.
+`file_name_with_options()` accepts `ParameterParseOptions`; recovery diagnostics
+remain available through the corresponding parsed header's parameter issues.
+The returned name is untrusted metadata, **not a sanitized filesystem path**.
+
+`set_file_name(Some(name))` updates both parameters atomically. It preserves
+existing disposition tokens and other parameters, creating an `attachment`
+disposition only when absent. It requires an existing valid Content-Type rather
+than guessing a media type. The assignment is stored literally, without the
+getter's trimming; Unicode, controls, and encoded-word lookalikes are encoded
+by the checked header formatter. Empty text writes empty parameters.
+
+`set_file_name(None)` removes both parameters while preserving existing headers
+and other parameters; it does not create missing fields or clear the attachment
+flag. Present headers are always reformatted, with duplicate replacement at
+their first positions. `_with_options` accepts `HeaderFormatOptions`. Neither
+header changes if parsing or formatting either replacement fails; errors are
+reported through `FileNameEditError`. Removing a name when both headers are
+absent is a no-op, even with invalid formatting options.
+
+Filename accessors and the underlying content-header metadata methods require
+no source I/O traits. Text parts expose them through `part()`/`part_mut()`.
+The UU writer shares the same lookup precedence, but still rejects control
+characters **before trimming** and uses `unknown` only when no name exists.
+
 `content_description()` returns the first Content-Description as an owned
 `Option<rfc2047::DecodedHeader>`, retaining tolerant decoding diagnostics.
 Its `_with_options` variant accepts explicit decoding settings. Missing and
@@ -5149,6 +5178,13 @@ Matching flags preserve raw headers, including duplicates, while actual changes
 preserve parsed parameters and use atomic duplicate-collapsing formatting.
 Explicit parse errors replace implicit malformed-header fallback behavior;
 checked formatting failures preserve the original metadata.
+Filename metadata follows `MimePart.FileName`: disposition-first lookup,
+Unicode trimming on read, and updates to both MIME parameter collections.
+Detached parsing and formatting make the two-header update atomic. Unlike
+MimeKit's always-present ContentType object, missing raw Content-Type prevents
+non-null assignments instead of silently supplying a media type. Removal
+preserves missing fields; equal assignments use canonical duplicate replacement.
+UU writing shares untrimmed lookup so its existing control checks remain intact.
 Content-Description and Content-Duration follow the same source's nullable
 properties: tolerant decoded descriptions and nonnegative integer seconds,
 with explicit errors replacing the duration getter's implicit null fallback.

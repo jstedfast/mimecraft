@@ -275,17 +275,10 @@ impl<R: Read + Seek> MimePart<R> {
     }
 
     fn uu_file_name(&self) -> io::Result<String> {
-        let disposition = self
-            .content_disposition()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let name = match disposition.as_ref().and_then(|value| value.file_name()) {
-            Some(name) => name.to_owned(),
-            None => self
-                .content_type()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
-                .and_then(|value| value.name().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned()),
-        };
+        let name = self
+            .file_name_untrimmed_with_options(&crate::ParameterParseOptions::default())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .unwrap_or_else(|| "unknown".to_owned());
         if name.chars().any(char::is_control) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

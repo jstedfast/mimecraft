@@ -74,6 +74,41 @@ impl fmt::Display for InvalidContentDuration {
 
 impl Error for InvalidContentDuration {}
 
+/// A filename could not be assigned to both MIME content headers atomically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileNameEditError {
+    /// Assigning a name requires an explicit Content-Type.
+    MissingContentType,
+    /// The first Content-Disposition could not be parsed.
+    ContentDisposition(ContentHeaderParseError),
+    /// The first Content-Type could not be parsed.
+    ContentType(ContentHeaderParseError),
+    /// One of the replacement headers could not be formatted.
+    HeaderFormat(HeaderFormatError),
+}
+
+impl fmt::Display for FileNameEditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingContentType => {
+                f.write_str("setting a filename requires a Content-Type header")
+            }
+            Self::ContentDisposition(error) | Self::ContentType(error) => error.fmt(f),
+            Self::HeaderFormat(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for FileNameEditError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MissingContentType => None,
+            Self::ContentDisposition(error) | Self::ContentType(error) => Some(error),
+            Self::HeaderFormat(error) => Some(error),
+        }
+    }
+}
+
 impl<R: Read + Seek> MimePart<R> {
     /// Creates a part with `Content-Type: application/octet-stream`.
     ///
@@ -372,7 +407,9 @@ impl<R: Read + Seek> MimePart<R> {
     pub fn into_parts(self) -> (HeaderList, MimeContent<R>) {
         (self.headers, self.content)
     }
+}
 
+impl<R> MimePart<R> {
     /// Parses the first Content-Type header, or returns `None` if absent.
     ///
     /// No implicit media-type default is substituted after raw edits or
@@ -492,6 +529,149 @@ impl<R: Read + Seek> MimePart<R> {
             self.replace_formatted(header);
         } else {
             self.headers.remove_all("Content-Disposition");
+        }
+        Ok(())
+    }
+
+    /// Returns a decoded, Unicode-trimmed filename, or `None` when absent.
+    ///
+    /// Checks the first Content-Disposition's `filename` parameter, then the
+    /// first Content-Type's `name` only if no disposition filename exists.
+    /// An empty filename is present and prevents fallback. Missing headers have
+    /// no implicit values; later duplicates do not override the first records.
+    /// Raw edits are visible immediately, and no source I/O occurs.
+    ///
+    /// Filenames are untrusted metadata, not safe filesystem paths. This does
+    /// not strip directory components or reject controls, reserved names, or
+    /// traversal syntax. Sanitize appropriately before using a returned value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a parse error only for a visited header, with offsets relative
+    /// to its raw value. Invalid dispositions do not fall back to Content-Type.
+    /// A valid disposition filename bypasses even a malformed Content-Type.
+    pub fn file_name(&self) -> Result<Option<String>, ContentHeaderParseError> {
+        self.file_name_with_options(&ParameterParseOptions::default())
+    }
+
+    /// Reads a filename with explicit parameter parsing and decoding options.
+    ///
+    /// Uses [`Self::file_name`]'s precedence and trimming. The returned string
+    /// does not carry recovery diagnostics; inspect the corresponding parsed
+    /// header's [`crate::ParameterList::issues`] for those.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first visited header's parse error without changing metadata.
+    pub fn file_name_with_options(
+        &self,
+        options: &ParameterParseOptions,
+    ) -> Result<Option<String>, ContentHeaderParseError> {
+        self.file_name_untrimmed_with_options(options)
+            .map(|name| name.map(|name| name.trim().to_owned()))
+    }
+
+    pub(crate) fn file_name_untrimmed_with_options(
+        &self,
+        options: &ParameterParseOptions,
+    ) -> Result<Option<String>, ContentHeaderParseError> {
+        // MimeKit prefers filename over name, even when filename is empty.
+        // Keep trimming separate so UU output can reject controls first.
+        let disposition = self.content_disposition_with_options(options)?;
+        match disposition.as_ref().and_then(ContentDisposition::file_name) {
+            Some(name) => Ok(Some(name.to_owned())),
+            None => Ok(self
+                .content_type_with_options(options)?
+                .and_then(|value| value.name().map(str::to_owned))),
+        }
+    }
+
+    /// Assigns both disposition `filename` and content-type `name` parameters.
+    ///
+    /// `Some` requires an existing valid Content-Type; no media type is guessed.
+    /// Creates an `attachment` disposition when absent, but preserves an existing
+    /// disposition token. Values are stored literally, not trimmed: the checked
+    /// formatter encodes Unicode, controls, and encoded-word lookalikes safely.
+    /// Empty text writes empty parameters; only `None` removes them.
+    ///
+    /// `None` keeps existing header fields and unrelated parameters, without
+    /// creating missing headers. Present headers are always reformatted, even
+    /// when values are equal or a removed parameter was absent. Both replacements
+    /// are prepared before editing, retaining each first position and collapsing
+    /// its duplicates. Unrelated raw records and the content source are unchanged.
+    ///
+    /// Uses default parsing and [`HeaderFormatOptions`]. As with other typed
+    /// metadata edits, skipped malformed parameter fragments are not preserved.
+    /// This does not rename files, change stored content, infer media types,
+    /// or make a filename safe for filesystem use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileNameEditError`] without changing either header on failure.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContent, MimePart};
+    ///
+    /// let mut part = MimePart::new(MimeContent::new(Cursor::new(b"report")));
+    /// part.set_file_name(Some("report.txt"))?;
+    /// assert_eq!(part.file_name()?.as_deref(), Some("report.txt"));
+    /// assert!(part.is_attachment()?);
+    /// part.set_file_name(None)?;
+    /// assert_eq!(part.file_name()?, None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_file_name(&mut self, value: Option<&str>) -> Result<(), FileNameEditError> {
+        self.set_file_name_with_options(value, &HeaderFormatOptions::default())
+    }
+
+    /// Assigns both filename parameters with explicit header formatting options.
+    ///
+    /// Uses [`Self::set_file_name`]'s atomic replacement and absence rules.
+    /// With `None` and neither header present, no options are checked or headers
+    /// created. Otherwise every present or newly created header is formatted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileNameEditError`] without changing headers or content.
+    pub fn set_file_name_with_options(
+        &mut self,
+        value: Option<&str>,
+        options: &HeaderFormatOptions,
+    ) -> Result<(), FileNameEditError> {
+        let mut disposition = self
+            .content_disposition()
+            .map_err(FileNameEditError::ContentDisposition)?;
+        let mut content_type = self
+            .content_type()
+            .map_err(FileNameEditError::ContentType)?;
+        if value.is_some() && content_type.is_none() {
+            return Err(FileNameEditError::MissingContentType);
+        }
+        if value.is_some() {
+            disposition.get_or_insert_with(ContentDisposition::default);
+        }
+        if let Some(disposition) = &mut disposition {
+            disposition.set_file_name(value);
+        }
+        if let Some(content_type) = &mut content_type {
+            content_type.set_name(value);
+        }
+        // MimeKit updates both parameter collections. Format both detached
+        // replacements first so failure in the second cannot leave them at odds.
+        let disposition = disposition
+            .map(|value| value.to_header_with_options(options))
+            .transpose()
+            .map_err(FileNameEditError::HeaderFormat)?;
+        let content_type = content_type
+            .map(|value| value.to_header_with_options(options))
+            .transpose()
+            .map_err(FileNameEditError::HeaderFormat)?;
+        if let Some(header) = disposition {
+            self.replace_formatted(header);
+        }
+        if let Some(header) = content_type {
+            self.replace_formatted(header);
         }
         Ok(())
     }
