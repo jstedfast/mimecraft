@@ -20,6 +20,8 @@
 //! instead parse report bodies and mask their decoded header fields.
 //! [`write_delivery_status`] and [`write_disposition_notification`] add masked
 //! outer headers and a separator to those specialized report-content paths.
+//! [`write_entity`] and [`write_message`] traverse complete MIME trees, retaining
+//! delimiters and dispatching report leaves to those decoded-field paths.
 //! [`write_bytes`] and [`write_bytes_with_options`] mask raw bytes with newline
 //! conversion, as used for multipart preambles and epilogues in MimeKit.
 //!
@@ -38,8 +40,7 @@
 //! necessarily valid MIME or safe display text.
 //!
 //! Pass a [`Header`] to [`header`], or [`Header::raw_value`] to the value helpers.
-//! Writers support CRLF/LF conversion, not value reformatting or full-message
-//! anonymization.
+//! Writers support CRLF/LF conversion, not value reformatting.
 //! Review output before sharing it. Use [`crate::filters::AnonymizeFilter`] for
 //! simpler byte masking that preserves only SPACE, TAB, CR, and LF.
 
@@ -48,7 +49,7 @@ use std::io::{self, Read, Seek, Write};
 use crate::{
     DateTimeOffset, DeliveryStatusError, DeliveryStatusParseOptions, DispositionNotificationError,
     DispositionNotificationParseOptions, Header, HeaderId, MessageDeliveryStatus,
-    MessageDispositionNotification, MimeMessage, MimePart, MimePartWriteOptions,
+    MessageDispositionNotification, MimeEntity, MimeMessage, MimePart, MimePartWriteOptions,
     encodings::NewLineFormat,
     filters::{AnonymizeFilter, Dos2UnixFilter, MimeFilter, Unix2DosFilter},
     io::FilteredWriter,
@@ -71,10 +72,9 @@ const WHITESPACE: &[u8] = b" \t\r\n";
 /// ordering, and duplicates, but order and duplicates do not affect masking.
 /// Matching scans the list without allocating a normalized field name.
 ///
-/// These options affect configured header and specialized report writers,
-/// not the raw-value helpers or ordinary-part body masking. They do not trigger
-/// automatic MIME-tree traversal. Writers still normalize preserved records'
-/// newlines.
+/// These options affect header sections and specialized report fields, not
+/// raw-value helpers or ordinary-part body masking. Tree writers apply them
+/// throughout the tree. Writers still normalize preserved records' newlines.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HeaderOptions {
     /// Additional field names whose complete raw records are copied verbatim.
@@ -91,6 +91,194 @@ pub struct HeaderOptions {
     /// controls, invalid UTF-8, or embedded header-like lines. Review output
     /// before sharing it.
     pub preserve_headers: Vec<String>,
+}
+
+/// Options for masking complete messages and MIME entity trees.
+///
+/// No metadata is generated or changed. Preserved values and multipart boundary
+/// markers can expose sensitive data; review diagnostic output before sharing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WriteOptions {
+    /// Field preservation rules for every header section, including report bodies.
+    pub headers: HeaderOptions,
+    /// Serialization settings for headers, framing, and ordinary part content.
+    ///
+    /// Final-newline enforcement affects the root content, not multipart child
+    /// bodies. Specialized report fields never gain a forced final newline.
+    pub part: MimePartWriteOptions,
+    /// Per-report delivery-status parsing limits, including global subtypes.
+    ///
+    /// These are not a cumulative memory or byte budget across the tree.
+    pub delivery_status: DeliveryStatusParseOptions,
+    /// Per-report disposition-notification parsing limits, including global subtypes.
+    pub disposition_notification: DispositionNotificationParseOptions,
+}
+
+impl WriteOptions {
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        self.part.validate()?;
+        if self.delivery_status.max_decoded_bytes == 0
+            || self.delivery_status.max_header_length == 0
+            || self.disposition_notification.max_decoded_bytes == 0
+            || self.disposition_notification.max_header_length == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "report parsing limits must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Writes a complete masked MIME entity tree using default options.
+///
+/// See [`write_entity_with_options`] for traversal, report dispatch, and errors.
+///
+/// # Errors
+///
+/// Propagates metadata, report parsing, and source/destination I/O errors.
+pub fn write_entity<R: Read + Seek, W: Write + ?Sized>(
+    entity: &mut MimeEntity<R>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_entity_with_options(entity, output, &WriteOptions::default())
+}
+
+/// Masks an entity and all descendants without flattening their MIME structure.
+///
+/// Uses the ordinary writer's iterative traversal and delimiter ownership.
+/// Headers use field-aware masking; multipart boundary markers remain verbatim.
+/// Preambles and epilogues use [`write_bytes_with_options`]. Ordinary leaves
+/// use [`write_part_content_with_options`], masking after transfer encoding.
+/// Message wrappers retain complete embedded messages with interleaved headers.
+///
+/// A leaf's first Content-Type selects decoded-field masking for
+/// message/delivery-status, message/disposition-notification, and their global
+/// variants. Other leaves, including opaque message/rfc822 payloads, are not
+/// reparsed as MIME trees. Missing Content-Type means ordinary masking; malformed
+/// Content-Type is an error. Reports use stored encoding and can retain encoding
+/// headers inconsistent with their decoded output. Report failures never fall
+/// back to opaque masking. Use [`write_part`] to deliberately mask a report as
+/// ordinary serialized bytes instead.
+///
+/// Root headers and one separator newline are included. Missing header
+/// terminators are not repaired. Nonempty preambles are terminated even for
+/// empty multiparts; closing delimiters always end with the selected newline.
+/// Children receive independent delimiter-owned newlines, including the ordinary
+/// writer's CR-preserving prefix for LF output after a bare CR.
+///
+/// Options are checked before any I/O. Container, leaf, and report metadata is
+/// checked in traversal order **after** its masked header section is written.
+/// Containers use the ordinary writer's boundary, ancestor-overlap, and
+/// transparent-transfer-encoding checks, including multipart/digest defaults.
+/// No boundary collision scanning, signature handling, preparation, or metadata
+/// generation occurs.
+///
+/// Headers, bytes, hints, and tree structure are unchanged. Successful content
+/// copying rewinds sources to zero. Traversal uses space proportional to depth;
+/// ordinary bodies stream, while each report buffers decoded fields under its
+/// own limits. The destination is flushed, not closed or finalized if filtered.
+/// This is diagnostic output, not guaranteed valid MIME or safe anonymization.
+///
+/// # Errors
+///
+/// Invalid options return [`io::ErrorKind::InvalidInput`] before I/O, even for
+/// unused report limits. Metadata, overlap, and report parse failures return
+/// [`io::ErrorKind::InvalidData`]; source/destination I/O kinds are preserved.
+/// Errors may leave a header prefix, earlier siblings, or partial content.
+/// Failed content output is not finalized; no rollback occurs. Retry starts over.
+///
+/// ```
+/// use mimecraft::{MimeEntity, Multipart, TextPart, anonymize};
+///
+/// let mut mixed: Multipart = Multipart::new("mixed", "example")?;
+/// mixed.children_mut().push(TextPart::new("plain", "secret")?.into());
+/// let mut entity: MimeEntity = mixed.into();
+/// let mut output = Vec::new();
+/// anonymize::write_entity(&mut entity, &mut output)?;
+/// assert!(output.ends_with(b"\r\n\r\nxxxxxx\r\n--example--\r\n"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write_entity_with_options<R: Read + Seek, W: Write + ?Sized>(
+    entity: &mut MimeEntity<R>,
+    output: &mut W,
+    options: &WriteOptions,
+) -> io::Result<()> {
+    crate::mime_entity_write::write_masked_entity(entity, output, options, false)
+}
+
+/// Masks entity content with default options, omitting only its outer headers.
+///
+/// Descendants remain complete entities. See [`write_entity_content_with_options`].
+///
+/// # Errors
+///
+/// Propagates metadata, report parsing, and I/O errors.
+pub fn write_entity_content<R: Read + Seek, W: Write + ?Sized>(
+    entity: &mut MimeEntity<R>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_entity_content_with_options(entity, output, &WriteOptions::default())
+}
+
+/// Masks content without the root entity's headers or their separator.
+///
+/// All dispatch, framing, validation, and source rules from
+/// [`write_entity_with_options`] apply. Multiparts retain complete children;
+/// message wrappers retain the complete embedded message. Root metadata is
+/// still required, and its boundary participates in ancestor-overlap checks.
+///
+/// # Errors
+///
+/// Invalid options or root metadata fail before I/O. Descendant metadata and
+/// content/source/destination errors may leave partial output. Retry starts over.
+pub fn write_entity_content_with_options<R: Read + Seek, W: Write + ?Sized>(
+    entity: &mut MimeEntity<R>,
+    output: &mut W,
+    options: &WriteOptions,
+) -> io::Result<()> {
+    crate::mime_entity_write::write_masked_entity(entity, output, options, true)
+}
+
+/// Writes a complete masked message using default options.
+///
+/// See [`write_message_with_options`] for header interleaving and tree handling.
+///
+/// # Errors
+///
+/// Propagates metadata, report parsing, and source/destination I/O errors.
+pub fn write_message<R: Read + Seek, W: Write + ?Sized>(
+    message: &mut MimeMessage<R>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_message_with_options(message, output, &WriteOptions::default())
+}
+
+/// Writes interleaved masked message/body headers followed by the masked tree.
+///
+/// Uses [`write_message_headers_with_options`] once, then the body content-only
+/// path of [`write_entity_with_options`]. Embedded messages independently merge
+/// their headers using parsed byte offsets. Bodyless messages still include one
+/// separator newline. No MIME-Version is generated and Bcc is masked, not removed.
+///
+/// Header preservation applies throughout the tree, including decoded report
+/// fields. Final-newline enforcement follows the root content and propagates
+/// through wrappers, not into multipart children or specialized report fields.
+/// All source, buffering, destination, and disclosure rules of
+/// [`write_entity_with_options`] apply.
+///
+/// # Errors
+///
+/// Invalid options fail before I/O. Body metadata errors can leave the complete
+/// merged header section; descendant and I/O errors can leave partial content.
+/// No rollback or silent report fallback occurs. Retry starts over.
+pub fn write_message_with_options<R: Read + Seek, W: Write + ?Sized>(
+    message: &mut MimeMessage<R>,
+    output: &mut W,
+    options: &WriteOptions,
+) -> io::Result<()> {
+    crate::mime_entity_write::write_masked_message(message, output, options)
 }
 
 /// Masks a complete stored header using MimeKit's default field-specific rules.
@@ -123,7 +311,7 @@ pub struct HeaderOptions {
 /// and performs no newline conversion. Individual value rules can still mask
 /// escaped newlines in Received comments. This is a byte buffer, not a reparsed
 /// header. Use [`header_with_options`] to preserve additional fields.
-/// Full-message anonymization remains separate. See the
+/// Use [`write_message`] for complete-message masking. See the
 /// [module documentation](self) before sharing output.
 ///
 /// ```
@@ -839,10 +1027,20 @@ pub fn write_delivery_status_content_with_options<R: Read + Seek, W: Write + ?Si
     format: NewLineFormat,
     parse_options: &DeliveryStatusParseOptions,
 ) -> Result<(), DeliveryStatusError> {
+    write_delivery_status_part_content(status.part_mut(), output, options, format, parse_options)
+}
+
+fn write_delivery_status_part_content<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+    parse_options: &DeliveryStatusParseOptions,
+) -> Result<(), DeliveryStatusError> {
     let newline = header_new_line_bytes(format).map_err(DeliveryStatusError::Io)?;
     // Parse detached groups before output; do not rewrite the stored report
     // or hide parse failures behind the source anonymizer's byte-mask fallback.
-    let groups = status.status_groups_with_options(parse_options)?;
+    let groups = MessageDeliveryStatus::read_status_groups(part, parse_options)?;
     for (index, group) in groups.iter().enumerate() {
         if index > 0 {
             // MimeKit separates groups, but adds no trailing blank separator.
@@ -994,12 +1192,74 @@ pub fn write_disposition_notification_content_with_options<R: Read + Seek, W: Wr
     format: NewLineFormat,
     parse_options: &DispositionNotificationParseOptions,
 ) -> Result<(), DispositionNotificationError> {
+    write_disposition_notification_part_content(
+        notification.part_mut(),
+        output,
+        options,
+        format,
+        parse_options,
+    )
+}
+
+fn write_disposition_notification_part_content<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+    options: &HeaderOptions,
+    format: NewLineFormat,
+    parse_options: &DispositionNotificationParseOptions,
+) -> Result<(), DispositionNotificationError> {
     header_new_line_bytes(format).map_err(DispositionNotificationError::Io)?;
     // Use the detached field view, not WriteContent: the source's MDN path
     // masks decoded fields without emitting the first block's blank separator.
-    let fields = notification.fields_with_options(parse_options)?;
+    let fields = MessageDispositionNotification::read_fields(part, parse_options)?;
     write_headers_with_options(&fields, output, options, format)
         .map_err(DispositionNotificationError::Io)
+}
+
+pub(crate) fn write_leaf_content<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+    options: &WriteOptions,
+    part_options: &MimePartWriteOptions,
+) -> io::Result<()> {
+    let content_type = part
+        .content_type()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // The Rust tree stores reports as ordinary leaves rather than subclasses.
+    // Dispatch from authoritative metadata without cloning headers or content.
+    if let Some(content_type) = content_type {
+        if content_type.is_mime_type("message", "delivery-status")
+            || content_type.is_mime_type("message", "global-delivery-status")
+        {
+            return write_delivery_status_part_content(
+                part,
+                output,
+                &options.headers,
+                part_options.new_line_format,
+                &options.delivery_status,
+            )
+            .map_err(|error| match error {
+                DeliveryStatusError::Io(error) => error,
+                error => io::Error::new(io::ErrorKind::InvalidData, error),
+            });
+        }
+        if content_type.is_mime_type("message", "disposition-notification")
+            || content_type.is_mime_type("message", "global-disposition-notification")
+        {
+            return write_disposition_notification_part_content(
+                part,
+                output,
+                &options.headers,
+                part_options.new_line_format,
+                &options.disposition_notification,
+            )
+            .map_err(|error| match error {
+                DispositionNotificationError::Io(error) => error,
+                error => io::Error::new(io::ErrorKind::InvalidData, error),
+            });
+        }
+    }
+    write_part_content_with_options(part, output, part_options)
 }
 
 /// Masks an unstructured raw header value, retaining potential encoded-word syntax.

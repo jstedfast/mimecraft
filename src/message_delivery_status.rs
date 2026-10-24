@@ -204,6 +204,13 @@ impl<R: Read + Seek> MessageDeliveryStatus<R> {
         &mut self,
         options: &DeliveryStatusParseOptions,
     ) -> Result<Vec<HeaderList>, DeliveryStatusError> {
+        Self::read_status_groups(&mut self.part, options)
+    }
+
+    pub(crate) fn read_status_groups(
+        part: &mut MimePart<R>,
+        options: &DeliveryStatusParseOptions,
+    ) -> Result<Vec<HeaderList>, DeliveryStatusError> {
         let header_limit = NonZeroUsize::new(options.max_header_length)
             .filter(|_| options.max_decoded_bytes > 0)
             .ok_or_else(|| {
@@ -212,11 +219,10 @@ impl<R: Read + Seek> MessageDeliveryStatus<R> {
                     "delivery-status limits must be positive",
                 ))
             })?;
-        self.check_type()?;
+        Self::check_part_type(part)?;
         // Finish outer decoding and rewind before parsing, so a later malformed
         // group does not leave an otherwise successfully read source at EOF.
-        let bytes = self
-            .part
+        let bytes = part
             .content_mut()
             .decode_to_vec_with_limit(options.max_decoded_bytes)
             .map_err(DeliveryStatusError::Io)?;
@@ -246,8 +252,11 @@ impl<R: Read + Seek> MessageDeliveryStatus<R> {
     }
 
     fn check_type(&self) -> Result<(), DeliveryStatusError> {
-        let content_type = self
-            .part
+        Self::check_part_type(&self.part)
+    }
+
+    fn check_part_type(part: &MimePart<R>) -> Result<(), DeliveryStatusError> {
+        let content_type = part
             .content_type()
             .map_err(DeliveryStatusError::ContentType)?
             .ok_or(DeliveryStatusError::MissingContentType)?;

@@ -204,6 +204,13 @@ impl<R: Read + Seek> MessageDispositionNotification<R> {
         &mut self,
         options: &DispositionNotificationParseOptions,
     ) -> Result<HeaderList, DispositionNotificationError> {
+        Self::read_fields(&mut self.part, options)
+    }
+
+    pub(crate) fn read_fields(
+        part: &mut MimePart<R>,
+        options: &DispositionNotificationParseOptions,
+    ) -> Result<HeaderList, DispositionNotificationError> {
         let limit = NonZeroUsize::new(options.max_header_length)
             .filter(|_| options.max_decoded_bytes > 0)
             .ok_or_else(|| {
@@ -212,14 +219,17 @@ impl<R: Read + Seek> MessageDispositionNotification<R> {
                     "disposition-notification limits must be positive",
                 ))
             })?;
-        self.check_type()?;
-        report_fields::read(self.part.content_mut(), options.max_decoded_bytes, limit)
+        Self::check_part_type(part)?;
+        report_fields::read(part.content_mut(), options.max_decoded_bytes, limit)
             .map_err(DispositionNotificationError::Io)
     }
 
     fn check_type(&self) -> Result<(), DispositionNotificationError> {
-        let content_type = self
-            .part
+        Self::check_part_type(&self.part)
+    }
+
+    fn check_part_type(part: &MimePart<R>) -> Result<(), DispositionNotificationError> {
+        let content_type = part
             .content_type()
             .map_err(DispositionNotificationError::ContentType)?
             .ok_or(DispositionNotificationError::MissingContentType)?;

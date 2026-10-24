@@ -42,6 +42,9 @@
 //! [`anonymize::write_delivery_status`] and
 //! [`anonymize::write_disposition_notification`] include masked outer headers
 //! and a separator, while their content-only variants omit that section.
+//! [`anonymize::write_entity`] and [`anonymize::write_message`] mask complete
+//! trees using iterative traversal, preserving boundaries and interleaved
+//! headers, with decoded-field dispatch for report leaves.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

@@ -1,4 +1,4 @@
-// Adapted from MimeKit's MimeWriter.cs.
+// Adapted from MimeKit's MimeWriter.cs and MimeAnonymizer.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     MessagePart, MimeEntity, MimeMessage, MimePartWriteOptions, Multipart, MultipartError,
-    io::FilteredWriter, message_part::check_message_part, multipart::checked_boundary,
+    anonymize, io::FilteredWriter, message_part::check_message_part, multipart::checked_boundary,
 };
 
 impl<R: Read + Seek> MimeEntity<R> {
@@ -164,6 +164,7 @@ impl<R: Read + Seek> Multipart<R> {
             Task::Multipart(self, options.ensure_new_line, false),
             output,
             options,
+            None,
         )
     }
 
@@ -201,6 +202,7 @@ impl<R: Read + Seek> Multipart<R> {
             Task::Multipart(self, options.ensure_new_line, true),
             output,
             options,
+            None,
         )
     }
 }
@@ -261,6 +263,7 @@ impl<R: Read + Seek> MessagePart<R> {
             Task::MessagePart(self, options.ensure_new_line, false, false),
             output,
             options,
+            None,
         )
     }
 
@@ -302,6 +305,7 @@ impl<R: Read + Seek> MessagePart<R> {
             Task::MessagePart(self, options.ensure_new_line, false, true),
             output,
             options,
+            None,
         )
     }
 }
@@ -315,6 +319,36 @@ pub(crate) fn write_message<R: Read + Seek, W: Write + ?Sized>(
         Task::Message(message, options.ensure_new_line),
         output,
         options,
+        None,
+    )
+}
+
+pub(crate) fn write_masked_entity<R: Read + Seek, W: Write + ?Sized>(
+    entity: &mut MimeEntity<R>,
+    output: &mut W,
+    options: &anonymize::WriteOptions,
+    content_only: bool,
+) -> io::Result<()> {
+    options.validate()?;
+    write_tree(
+        Task::Entity(entity, options.part.ensure_new_line, false, content_only),
+        output,
+        &options.part,
+        Some(options),
+    )
+}
+
+pub(crate) fn write_masked_message<R: Read + Seek, W: Write + ?Sized>(
+    message: &mut MimeMessage<R>,
+    output: &mut W,
+    options: &anonymize::WriteOptions,
+) -> io::Result<()> {
+    options.validate()?;
+    write_tree(
+        Task::Message(message, options.part.ensure_new_line),
+        output,
+        &options.part,
+        Some(options),
     )
 }
 
@@ -322,6 +356,7 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
     root: Task<'_, R>,
     output: &mut W,
     options: &MimePartWriteOptions,
+    masking: Option<&anonymize::WriteOptions>,
 ) -> io::Result<()> {
     let newline = options.validate()?;
     let mut tracked = EndingWriter {
@@ -329,34 +364,55 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
         last: None,
     };
     let output = &mut tracked;
+    // Both MimeKit writers use an explicit stack so nested multiparts and
+    // messages cannot exhaust the call stack. Only multiparts retain a frame:
+    // a wrapper's embedded message and a message's body are their final tasks.
     let mut stack = vec![root];
 
     while let Some(task) = stack.pop() {
         match task {
-            Task::Entity(entity, ensure_new_line, digest_child, content_only) => match entity {
-                MimeEntity::Part(part) => {
-                    let options = MimePartWriteOptions {
-                        ensure_new_line,
-                        ..*options
-                    };
-                    if content_only {
-                        part.write_content_to_with_options(output, &options)?;
-                    } else {
-                        part.write_to_with_options(output, &options)?;
+            Task::Entity(entity, ensure_new_line, digest_child, content_only) => {
+                if let Some(masking) = masking
+                    && !content_only
+                {
+                    // The anonymizer writes headers before validating content,
+                    // unlike standalone ordinary entity serialization.
+                    anonymize::write_headers_with_options(
+                        entity.headers(),
+                        output,
+                        &masking.headers,
+                        options.new_line_format,
+                    )?;
+                    output.write_all(newline)?;
+                }
+                let content_only = content_only || masking.is_some();
+                match entity {
+                    MimeEntity::Part(part) => {
+                        let options = MimePartWriteOptions {
+                            ensure_new_line,
+                            ..*options
+                        };
+                        if let Some(masking) = masking {
+                            anonymize::write_leaf_content(part, output, masking, &options)?;
+                        } else if content_only {
+                            part.write_content_to_with_options(output, &options)?;
+                        } else {
+                            part.write_to_with_options(output, &options)?;
+                        }
+                    }
+                    MimeEntity::Multipart(multipart) => {
+                        stack.push(Task::Multipart(multipart, ensure_new_line, content_only));
+                    }
+                    MimeEntity::Message(part) => {
+                        stack.push(Task::MessagePart(
+                            part,
+                            ensure_new_line,
+                            digest_child,
+                            content_only,
+                        ));
                     }
                 }
-                MimeEntity::Multipart(multipart) => {
-                    stack.push(Task::Multipart(multipart, ensure_new_line, content_only));
-                }
-                MimeEntity::Message(part) => {
-                    stack.push(Task::MessagePart(
-                        part,
-                        ensure_new_line,
-                        digest_child,
-                        content_only,
-                    ));
-                }
-            },
+            }
             Task::MessagePart(part, ensure_new_line, digest_child, content_only) => {
                 check_message_part(part, digest_child)?;
                 // Content-only omits the wrapper, not the embedded message's
@@ -373,7 +429,16 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                 }
             }
             Task::Message(message, ensure_new_line) => {
-                message.write_headers_to_with_options(output, options)?;
+                if let Some(masking) = masking {
+                    anonymize::write_message_headers_with_options(
+                        message,
+                        output,
+                        &masking.headers,
+                        options.new_line_format,
+                    )?;
+                } else {
+                    message.write_headers_to_with_options(output, options)?;
+                }
                 if let Some(body) = message.body_mut() {
                     // The root body's headers were merged with the message's.
                     // Omit only that section; descendants still write in full.
@@ -408,7 +473,7 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                         .write_terminated(output, options.new_line_format)?;
                     output.write_all(newline)?;
                 }
-                write_text(output, multipart.preamble(), options, true)?;
+                write_text(output, multipart.preamble(), options, true, masking)?;
                 let (children, epilogue) = multipart.children_and_epilogue();
                 stack.push(Task::Children(Frame {
                     children: children.iter_mut(),
@@ -444,7 +509,13 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                 } else {
                     output.write_all(b"--")?;
                     output.write_all(newline)?;
-                    write_text(output, frame.epilogue, options, frame.ensure_new_line)?;
+                    write_text(
+                        output,
+                        frame.epilogue,
+                        options,
+                        frame.ensure_new_line,
+                        masking,
+                    )?;
                 }
             }
         }
@@ -493,7 +564,16 @@ fn write_text<W: Write + ?Sized>(
     bytes: &[u8],
     options: &MimePartWriteOptions,
     ensure_new_line: bool,
+    masking: Option<&anonymize::WriteOptions>,
 ) -> io::Result<()> {
+    if masking.is_some() {
+        return anonymize::write_bytes_with_options(
+            bytes,
+            output,
+            options.new_line_format,
+            ensure_new_line,
+        );
+    }
     if !bytes.is_empty() {
         let mut filtered = FilteredWriter::new(output, options.newline_filter(ensure_new_line));
         filtered.write_all(bytes)?;

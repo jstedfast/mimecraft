@@ -420,8 +420,8 @@ remain visible, and headers or other content outside the supplied bytes are
 untouched. It performs no transfer decoding, charset conversion, MIME parsing,
 or secure erasure. Decode content before masking when decoded layout is wanted,
 then re-encode explicitly if needed. `FilteredReader` and `FilteredWriter`
-provide the existing streaming adapters. The full `MimeAnonymizer` remains
-deferred; filtered data still needs review before sharing.
+provide the existing streaming adapters. Use the `anonymize` tree writers for
+structured message and entity masking; output still needs review before sharing.
 
 `encoder_filter(encoding)` and `decoder_filter(encoding)` return
 `Box<dyn MimeFilter>`. Base64, quoted-printable, and UU select their codecs;
@@ -635,7 +635,7 @@ terminators are not repaired, so the added separator newline need not form a
 blank line in truncated input. Empty messages still write one newline.
 `Mixed` fails before I/O; destination errors may leave partial output. The
 destination is flushed after headers and again after the separator, not closed
-or finalized if it is another filter. Full-message masking remains deferred.
+or finalized if it is another filter.
 
 `anonymize::write_part_content(&mut part, output)` masks an ordinary `MimePart`'s
 serialized body without writing headers or their separator.
@@ -715,7 +715,35 @@ exceeded parse limits, and source errors can leave the outer header prefix.
 Report fields are only emitted after successful parsing, without an opaque
 masking fallback. Retained transfer-encoding headers may disagree with the
 decoded output; neither metadata nor stored content is rewritten.
-Full-message/tree masking remains deferred.
+
+`anonymize::write_entity(&mut entity, output)` masks a complete MIME tree;
+`write_message(&mut message, output)` first writes the interleaved message/body
+headers and then masks the root content without duplicating its headers.
+`write_entity_content` omits only the root entity's headers and separator,
+retaining complete children and embedded messages. Each has a `_with_options`
+variant accepting `&anonymize::WriteOptions`.
+
+`WriteOptions` combines `headers` preservation, `part` serialization settings,
+and per-report `delivery_status` and `disposition_notification` parsing limits.
+Report limits are not a cumulative tree budget. Invalid serialization options
+or zero report limits fail before I/O, including limits for unused report types.
+
+Tree masking shares the ordinary writer's iterative traversal, boundary and
+ancestor-overlap checks, multipart/digest defaults, and delimiter-owned newlines.
+Boundary markers remain verbatim; preambles and epilogues are byte-masked with
+newline conversion. Nonempty preambles are terminated even for empty multiparts.
+Root final-newline enforcement propagates through attached-message wrappers,
+but not into multipart child bodies or specialized report fields.
+
+The first Content-Type on a leaf selects decoded-field masking for both report
+types and their global variants. Missing Content-Type selects ordinary masking;
+malformed Content-Type is an explicit error. Other leaves use serialized-byte
+masking, even opaque message/rfc822 payloads; no hidden MIME parsing occurs.
+Headers are masked before content metadata is checked, so errors can leave a
+header prefix, ancestor framing, or earlier siblings. Report parsing never
+falls back to opaque masking. Sources rewind after successful copying; headers,
+stored bytes, newline hints, and tree structure remain unchanged. Destination
+errors propagate without rollback or finalizing failed content output.
 
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header
@@ -726,7 +754,8 @@ configured preserved fields in their entirety.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Value reformatting and complete message/entity anonymization remain deferred.
+Value reformatting, preserved raw delimiters, and truncated-container recovery
+remain deferred.
 
 ### Incremental charset conversion
 
