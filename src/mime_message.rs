@@ -4,12 +4,12 @@
 use std::io::{self, BufRead, Cursor, Read, Seek, Write};
 
 use crate::{
-    AddressHeaderFormatError, AddressHeaderFormatOptions, AddressList, Attachments, BodyParts,
-    DateTimeOffset, DateTimeOffsetError, Header, HeaderList, LeafParts, MailboxAddress,
-    MailboxParseError, MailboxParseOptions, MessageId, MessageIdParseError, MessageImportance,
-    MessagePriority, MessagePriorityParseError, MimeEntity, MimeEntityParseOptions, MimePart,
-    MimePartWriteOptions, MimeVersion, MimeVersionParseError, References, TextBodyError,
-    TextFormat, XMessagePriority,
+    AddressHeaderFormatError, AddressHeaderFormatOptions, AddressList, AddressParseError,
+    AddressParseOptions, Attachments, BodyParts, DateTimeOffset, DateTimeOffsetError, Header,
+    HeaderList, LeafParts, MailboxAddress, MailboxParseError, MailboxParseOptions, MessageId,
+    MessageIdParseError, MessageImportance, MessagePriority, MessagePriorityParseError, MimeEntity,
+    MimeEntityParseOptions, MimePart, MimePartWriteOptions, MimeVersion, MimeVersionParseError,
+    References, TextBodyError, TextFormat, XMessagePriority,
 };
 
 /// An owned message with raw message headers and an optional MIME body tree.
@@ -33,6 +33,8 @@ use crate::{
 /// for an absent field and no cache hiding subsequent raw edits.
 /// Sender accessors return detached mailboxes; explicit setters format a
 /// complete replacement before editing headers.
+/// Address-list accessors aggregate all matching message headers in order,
+/// returning detached lists with MimeKit-style recovery and diagnostics.
 ///
 /// The body and every descendant share source type `R`. Ownership replaces
 /// disposal and parent tracking. Body removal returns the old tree without
@@ -60,6 +62,29 @@ use crate::{
 pub struct MimeMessage<R = Cursor<Vec<u8>>> {
     headers: HeaderList,
     body: Option<MimeEntity<R>>,
+}
+
+/// Addresses recovered from message headers, together with syntax diagnostics.
+///
+/// Groups, duplicates, order, and per-address decoding diagnostics are retained.
+/// Missing or comment-only headers contribute no addresses or issues.
+/// Raw headers are never modified by recovery.
+#[derive(Clone, Debug, Default)]
+#[must_use]
+pub struct MessageAddresses {
+    /// The recovered, detached address list.
+    pub addresses: AddressList,
+    /// Syntax failures encountered while recovering addresses, in parse order.
+    pub issues: Vec<MessageAddressIssue>,
+}
+
+/// A syntax diagnostic from one message address header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MessageAddressIssue {
+    /// Zero-based index in the entire message header collection at parse time.
+    pub header_index: usize,
+    /// The failure, with an offset relative to that header's raw value.
+    pub error: AddressParseError,
 }
 
 impl<R> MimeMessage<R> {
@@ -90,6 +115,484 @@ impl<R> MimeMessage<R> {
     /// Edits message headers without moving fields to or from the body.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Reads all From headers with default address parsing options.
+    ///
+    /// See [`Self::from_with_options`] for aggregation and ownership rules.
+    /// Multiple authors do not automatically create a Sender header.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn from(&self) -> MessageAddresses {
+        self.from_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads all From headers using explicit address parsing options.
+    ///
+    /// Aggregates every matching message header in source order, preserving
+    /// duplicate addresses, groups, source routes, and decoding diagnostics.
+    /// Missing, empty, and comment/whitespace-only fields contribute no addresses.
+    /// Uses MimeKit's internal message-header recovery: malformed entries are
+    /// skipped at commas outside quotes/comments, including within groups.
+    /// Unclosed groups survive; failed list separators discard that field's list
+    /// (or a group's members). Later matching headers are still read.
+    /// Rejected input and missing group terminators are reported in
+    /// [`MessageAddresses::issues`], rather than silently lost.
+    ///
+    /// Each call reparses current raw bytes without caching or body I/O. The
+    /// returned list is owned; edits take effect only when assigned back with
+    /// [`Self::set_from`]. No Sender inference or field-specific mailbox/group
+    /// restrictions are imposed beyond [`AddressParseOptions`].
+    ///
+    /// Diagnostics identify the original header index and raw-value byte offset.
+    /// Standalone [`AddressList::parse`] remains fail-fast; syntax tolerance is
+    /// controlled by the supplied options independently of message recovery.
+    pub fn from_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("From", options)
+    }
+
+    /// Assigns or removes From with default address-header formatting.
+    ///
+    /// See [`Self::set_from_with_options`] for validation and replacement rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_from(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_from_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns or removes From using explicit address-header formatting.
+    ///
+    /// An empty list removes all occurrences, ignoring unused formatting options.
+    /// Otherwise formats through [`AddressList::to_header_with_options`] before
+    /// replacing all occurrences at the first slot, or appending if absent.
+    /// Every nonempty assignment reformats, including equal lists, to preserve
+    /// route-only edits. The input list and unrelated headers remain unchanged.
+    ///
+    /// Defaults use ASCII output, UTF-8 encoded names, IDNA domains/routes,
+    /// CRLF, and enforced 78-byte physical lines. SMTPUTF8 is not supported.
+    /// This does not enforce field-specific address counts or group restrictions,
+    /// infer Sender, build resent blocks, or prepare an SMTP envelope.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options, encoding errors, and unbreakable oversized pieces leave
+    /// all existing headers unchanged, even if a later member fails.
+    ///
+    /// ```
+    /// use mimecraft::{AddressList, MimeMessage};
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// message.set_from(&"Author <author@example.com>".parse()?)?;
+    /// message.set_to(&"Friends: alice@example.com, bob@example.com;".parse()?)?;
+    /// let mut recipients = message.to().addresses;
+    /// recipients.as_mut_vec().push("carol@example.com".parse()?);
+    /// assert_eq!(message.to().addresses.mailboxes().count(), 2);
+    /// message.set_to(&recipients)?;
+    /// assert_eq!(message.to().addresses.mailboxes().count(), 3);
+    /// message.set_to(&AddressList::new())?;
+    /// assert!(!message.headers().contains("To"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_from_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("From", value, options)
+    }
+
+    /// Reads Resent-From using [`Self::from`]'s aggregation rules.
+    ///
+    /// Does not fall back to From or infer Resent-Sender.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_from(&self) -> MessageAddresses {
+        self.resent_from_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Resent-From using [`Self::from_with_options`]'s rules.
+    ///
+    /// Aggregates occurrences across resent blocks without selecting a block.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_from_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Resent-From", options)
+    }
+
+    /// Assigns or removes Resent-From using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_from(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_resent_from_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Resent-From using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// Replaces all occurrences, not just those in one resent block.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_from_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Resent-From", value, options)
+    }
+
+    /// Reads Reply-To using [`Self::from`]'s aggregation rules.
+    ///
+    /// An empty result does not automatically fall back to From.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn reply_to(&self) -> MessageAddresses {
+        self.reply_to_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Reply-To using [`Self::from_with_options`]'s rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn reply_to_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Reply-To", options)
+    }
+
+    /// Assigns or removes Reply-To using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_reply_to(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_reply_to_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Reply-To using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_reply_to_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Reply-To", value, options)
+    }
+
+    /// Reads Resent-Reply-To using [`Self::from`]'s aggregation rules.
+    ///
+    /// Does not fall back to Reply-To or Resent-From.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_reply_to(&self) -> MessageAddresses {
+        self.resent_reply_to_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Resent-Reply-To using [`Self::from_with_options`]'s rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_reply_to_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Resent-Reply-To", options)
+    }
+
+    /// Assigns or removes Resent-Reply-To using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_reply_to(
+        &mut self,
+        value: &AddressList,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_resent_reply_to_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Resent-Reply-To using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_reply_to_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Resent-Reply-To", value, options)
+    }
+
+    /// Reads primary recipients using [`Self::from`]'s aggregation rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn to(&self) -> MessageAddresses {
+        self.to_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads To using [`Self::from_with_options`]'s rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn to_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("To", options)
+    }
+
+    /// Assigns or removes To using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_to(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_to_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns To using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_to_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("To", value, options)
+    }
+
+    /// Reads Resent-To using [`Self::from`]'s aggregation rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_to(&self) -> MessageAddresses {
+        self.resent_to_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Resent-To using [`Self::from_with_options`]'s rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_to_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Resent-To", options)
+    }
+
+    /// Assigns or removes Resent-To using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_to(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_resent_to_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Resent-To using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_to_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Resent-To", value, options)
+    }
+
+    /// Reads secondary recipients using [`Self::from`]'s aggregation rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn cc(&self) -> MessageAddresses {
+        self.cc_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Cc using [`Self::from_with_options`]'s rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn cc_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Cc", options)
+    }
+
+    /// Assigns or removes Cc using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_cc(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_cc_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Cc using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_cc_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Cc", value, options)
+    }
+
+    /// Reads Resent-Cc using [`Self::from`]'s aggregation rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_cc(&self) -> MessageAddresses {
+        self.resent_cc_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Resent-Cc using [`Self::from_with_options`]'s rules.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_cc_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Resent-Cc", options)
+    }
+
+    /// Assigns or removes Resent-Cc using [`Self::set_from`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_cc(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_resent_cc_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Resent-Cc using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_cc_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Resent-Cc", value, options)
+    }
+
+    /// Reads blind-copy recipients using [`Self::from`]'s aggregation rules.
+    ///
+    /// Bcc is not automatically hidden during serialization. Callers must remove
+    /// it explicitly before delivery when recipient privacy requires it.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn bcc(&self) -> MessageAddresses {
+        self.bcc_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Bcc using [`Self::from_with_options`]'s rules.
+    ///
+    /// Does not hide or remove Bcc from the raw message headers.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn bcc_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Bcc", options)
+    }
+
+    /// Assigns or removes Bcc using [`Self::set_from`]'s rules.
+    ///
+    /// A nonempty Bcc header remains visible in serialized messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_bcc(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_bcc_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Bcc using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// Does not prepare an SMTP envelope or hide recipients during writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_bcc_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Bcc", value, options)
+    }
+
+    /// Reads Resent-Bcc using [`Self::from`]'s aggregation rules.
+    ///
+    /// Like Bcc, Resent-Bcc is not automatically hidden during serialization.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_bcc(&self) -> MessageAddresses {
+        self.resent_bcc_with_options(&AddressParseOptions::default())
+    }
+
+    /// Reads Resent-Bcc using [`Self::from_with_options`]'s rules.
+    ///
+    /// Does not hide or remove the raw header.
+    ///
+    /// Returns recovered addresses with header-indexed syntax diagnostics.
+    pub fn resent_bcc_with_options(&self, options: &AddressParseOptions) -> MessageAddresses {
+        self.address_headers("Resent-Bcc", options)
+    }
+
+    /// Assigns or removes Resent-Bcc using [`Self::set_from`]'s rules.
+    ///
+    /// A nonempty Resent-Bcc header remains visible in serialized messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_bcc(&mut self, value: &AddressList) -> Result<(), AddressHeaderFormatError> {
+        self.set_resent_bcc_with_options(value, &AddressHeaderFormatOptions::default())
+    }
+
+    /// Assigns Resent-Bcc using [`Self::set_from_with_options`]'s rules.
+    ///
+    /// Does not prepare an SMTP envelope or hide recipients during writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns formatting errors without changing any headers.
+    pub fn set_resent_bcc_with_options(
+        &mut self,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        self.set_address_headers("Resent-Bcc", value, options)
+    }
+
+    fn address_headers(&self, field: &str, options: &AddressParseOptions) -> MessageAddresses {
+        let mut result = MessageAddresses::default();
+        for (header_index, header) in self.headers.iter().enumerate() {
+            if !header.matches_field(field) {
+                continue;
+            }
+            // Parse the addresses in each header and add them to our address
+            // list, as in MimeKit's AddAddresses. Keep recovery diagnostics with
+            // the original header index rather than silently discarding them.
+            let (parsed, issues) = crate::address::parse_header_list(header.raw_value(), options);
+            result.addresses.as_mut_vec().extend(parsed);
+            result
+                .issues
+                .extend(issues.into_iter().map(|error| MessageAddressIssue {
+                    header_index,
+                    error,
+                }));
+        }
+        result
+    }
+
+    fn set_address_headers(
+        &mut self,
+        field: &str,
+        value: &AddressList,
+        options: &AddressHeaderFormatOptions,
+    ) -> Result<(), AddressHeaderFormatError> {
+        if value.is_empty() {
+            self.headers.remove_all(field);
+        } else {
+            // Equality ignores mailbox routes, including those inside groups.
+            // Format the whole list before replacing any of the original fields.
+            let header = value.to_header_with_options(field, options)?;
+            self.replace_formatted(header);
+        }
+        Ok(())
     }
 
     /// Reads the first Sender header with default mailbox parsing options.

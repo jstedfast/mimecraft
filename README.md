@@ -95,6 +95,8 @@ MimeKit. The crate is not configured for publication.
   parse errors, and canonical setters backed by current raw headers.
 - Sender and Resent-Sender mailbox accessors with configurable prefix parsing,
   checked address formatting, and atomic replacement.
+- From, Reply-To, To, Cc, Bcc, and Resent-* address-list accessors with
+  MimeKit-style message-header recovery, diagnostics, and atomic setters.
 - Typed importance and priority headers with independent raw-header access,
   checked numeric-prefix parsing, and canonical setters that preserve no-ops.
 - Structured attached-message ownership and iterative writing, with nested
@@ -1021,6 +1023,58 @@ transport preparation: **Bcc and Resent-Bcc are written as supplied**.
 Other message-specific typed convenience setters, safe complete unstructured-header
 authoring, offset-based header merging, and automatic
 transport preparation remain deferred.
+
+### Message address lists
+
+`MimeMessage::from()`, `reply_to()`, `to()`, `cc()`, and `bcc()` (and their
+`resent_*` counterparts) aggregate every matching message header in order.
+They return `MessageAddresses`: an owned `addresses` list and `issues` containing
+syntax diagnostics with the original header index and raw-value byte offset.
+Groups, duplicates, source routes, and address/name decoding diagnostics survive.
+Missing, empty, and valid comment-only fields contribute no addresses.
+
+Parsing follows MimeKit's internal message-header recovery rather than the
+standalone `AddressList::parse` fail-fast contract. Invalid entries are skipped
+to commas outside quoted strings and comments; group terminators stay with the
+group parser. Recovery works inside groups, and unterminated groups survive.
+As in MimeKit, a failed separator or whitespace/comment production discards the
+current list (one header's addresses, or one group's members), not other header
+occurrences. Diagnostics expose rejected input without preventing inspection of
+the message. `_with_options` getters accept `AddressParseOptions`; syntax
+strictness and group-depth limits remain independent of recovery.
+
+```rust
+use mimecraft::{AddressList, Header, MimeMessage};
+
+let mut message: MimeMessage = MimeMessage::new();
+message.headers_mut().add(
+    Header::parse(b"To: alice@example.com, @, bob@example.com")?,
+);
+let mut parsed = message.to();
+assert_eq!(parsed.addresses.len(), 2);
+assert_eq!(parsed.issues.len(), 1);
+parsed.addresses.as_mut_vec().push("carol@example.com".parse()?);
+message.set_to(&parsed.addresses)?;
+assert!(message.to().issues.is_empty());
+message.set_to(&AddressList::new())?;
+assert!(!message.headers().contains("To"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Getters never change raw headers or access body sources. Edits to returned lists
+take effect only after explicit assignment. Setters accept `&AddressList`; empty
+lists remove all occurrences and ignore unused formatting options. Nonempty
+lists use checked address-header formatting before replacing all occurrences
+at the first slot. Invalid options, encoding failures, or oversized unbreakable
+pieces leave headers unchanged. Equal lists are still reformatted so route-only
+edits are not lost. `_with_options` setters accept `AddressHeaderFormatOptions`.
+
+Defaults use ASCII output, UTF-8 encoded names, IDNA domains/routes, CRLF, and
+78-byte physical lines. SMTPUTF8, field-specific address-count/group validation,
+Sender inference, reply-address fallback, and resent-block selection are not
+provided. Resent accessors aggregate and replace across all matching blocks.
+**Bcc and Resent-Bcc are not automatically hidden when writing messages**;
+remove them explicitly before delivery when recipient privacy requires it.
 
 ### Message sender mailboxes
 

@@ -63,6 +63,9 @@
 //! with explicit absence, parse errors, and independent canonical setters.
 //! Sender accessors return owned mailbox prefixes and provide atomic, checked
 //! replacement with configurable parsing and address-header formatting.
+//! Standard and resent address-list accessors aggregate matching headers with
+//! MimeKit-style recovery and [`MessageAddresses`] diagnostics. Their explicit
+//! setters validate complete replacements atomically; Bcc is not hidden on write.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for
@@ -317,7 +320,7 @@ pub use message_priority::{
 pub use mime_content::MimeContent;
 pub use mime_entity::{Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_load::MimeEntityParseOptions;
-pub use mime_message::MimeMessage;
+pub use mime_message::{MessageAddressIssue, MessageAddresses, MimeMessage};
 pub use mime_part::MimePart;
 pub use mime_part_write::MimePartWriteOptions;
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};

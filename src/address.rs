@@ -181,6 +181,102 @@ pub(crate) fn parse_list(
     Ok(addresses.into())
 }
 
+pub(crate) fn parse_header_list(
+    input: &[u8],
+    options: &AddressParseOptions,
+) -> (AddressList, Vec<AddressParseError>) {
+    let mut parser = Parser {
+        input,
+        options: &options.mailbox,
+        index: 0,
+    };
+    let mut addresses = AddressList::new();
+    let mut issues = Vec::new();
+    // Each frame retains the enclosing list while parsing a group's members.
+    // This replaces MimeKit's recursive InternalTryParse calls without changing
+    // the distinction between an invalid member and a failed list production.
+    let mut groups: Vec<(GroupAddress, AddressList)> = Vec::new();
+    let mut separator = false;
+    loop {
+        let is_group = !groups.is_empty();
+        let result = if separator {
+            parser.list_separator(is_group)
+        } else {
+            parser.cfws().map_err(AddressParseError::from)
+        };
+        let failed = if let Err(error) = result {
+            issues.push(error);
+            // A failed separator/comment rejects the whole current list in
+            // MimeKit. A containing group survives, but with an empty member list.
+            addresses = AddressList::new();
+            true
+        } else {
+            false
+        };
+        if failed || parser.index == input.len() || (is_group && input[parser.index] == b';') {
+            let Some((mut group, mut parent)) = groups.pop() else {
+                return (addresses, issues);
+            };
+            if input.get(parser.index) == Some(&b';') {
+                parser.index += 1;
+            } else {
+                issues.push(parser.address_error(AddressParseErrorKind::MissingGroupTerminator));
+                // InternalTryParse keeps unterminated groups, even in strict
+                // mode. Match its recovery scan, leaving a recovered ';' for
+                // the enclosing list production.
+                while parser.index < input.len() && input[parser.index] != b';' {
+                    parser.index += 1;
+                }
+            }
+            *group.members_mut() = addresses;
+            parent.as_mut_vec().push(group.into());
+            addresses = parent;
+            separator = true;
+            continue;
+        }
+
+        // Save state in case parsing the address fails and we need to recover.
+        let start = parser.index;
+        let parsed = parser
+            .scan_phrase()
+            .map_err(AddressParseError::from)
+            .and_then(|phrase| {
+                if input.get(parser.index) == Some(&b':') {
+                    if groups.len() >= usize::from(options.max_group_depth) {
+                        return Err(parser.address_error(AddressParseErrorKind::GroupDepthExceeded));
+                    }
+                    let group = GroupAddress::from_parsed(parser.name(&phrase), AddressList::new());
+                    parser.index += 1;
+                    while input
+                        .get(parser.index)
+                        .is_some_and(|byte| matches!(byte, b':' | b' ' | b'\t'))
+                    {
+                        parser.index += 1;
+                    }
+                    Ok(Address::Group(group))
+                } else {
+                    parser
+                        .mailbox_from_phrase(phrase)
+                        .map(Address::Mailbox)
+                        .map_err(AddressParseError::from)
+                }
+            });
+        match parsed {
+            Ok(Address::Group(group)) => {
+                groups.push((group, std::mem::take(&mut addresses)));
+                separator = false;
+                continue;
+            }
+            Ok(address) => addresses.as_mut_vec().push(address),
+            Err(error) => {
+                issues.push(error);
+                parser.skip_invalid_address(start, is_group);
+            }
+        }
+        separator = true;
+    }
+}
+
 pub(crate) fn require_complete(input: &[u8], consumed: usize) -> Result<(), AddressParseError> {
     if consumed != input.len() {
         return Err(AddressParseError::new(
@@ -192,6 +288,30 @@ pub(crate) fn require_complete(input: &[u8], consumed: usize) -> Result<(), Addr
 }
 
 impl Parser<'_> {
+    fn skip_invalid_address(&mut self, start: usize, is_group: bool) {
+        // Resynchronize without interpreting quoted strings or comments as
+        // address separators. Leave commas and the group terminator for the
+        // list and group productions.
+        self.index = start;
+        while let Some(&byte) = self.input.get(self.index) {
+            let skipped = match byte {
+                b'"' => crate::parse_utils::skip_quoted(self.input, &mut self.index),
+                b'(' => crate::parse_utils::skip_comment(self.input, &mut self.index),
+                b',' => break,
+                b';' if is_group => break,
+                _ => {
+                    self.index += 1;
+                    continue;
+                }
+            };
+            // An unclosed quoted string/comment consumes the rest of this
+            // rejected entry; its contents must not become new recipients.
+            if skipped.is_err() {
+                break;
+            }
+        }
+    }
+
     fn address_error(&self, kind: AddressParseErrorKind) -> AddressParseError {
         AddressParseError::new(kind, self.index)
     }
