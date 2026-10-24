@@ -198,8 +198,21 @@ fn absent_and_present_empty_messages_round_trip_at_eof_and_report_boundaries() {
             let MimeEntity::Message(part) = &parsed else {
                 panic!()
             };
-            assert_eq!(part.message().is_some(), present);
-            assert_eq!(write(&mut parsed, format), wire);
+            assert!(part.message().is_some());
+            let expected = if present {
+                wire.clone()
+            } else {
+                [
+                    wire.as_slice(),
+                    if format == NewLineFormat::Dos {
+                        b"\r\n"
+                    } else {
+                        b"\n"
+                    },
+                ]
+                .concat()
+            };
+            assert_eq!(write(&mut parsed, format), expected);
 
             let mut report: Multipart = Multipart::new("report", "b").unwrap();
             report.children_mut().push(entity);
@@ -223,13 +236,13 @@ fn absent_and_present_empty_messages_round_trip_at_eof_and_report_boundaries() {
 }
 
 #[test]
-fn strict_inner_separator_requirement_can_be_bypassed_with_opaque_option() {
+fn recovered_inner_headers_can_instead_be_preserved_as_opaque_content() {
     for media_type in ["text/rfc822-headers", "message/global-headers"] {
         let wire = format!("Content-Type: {media_type}\r\n\r\nSubject: no separator");
-        assert_eq!(
-            MimeEntity::load(&mut wire.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        let MimeEntity::Message(part) = MimeEntity::load(&mut wire.as_bytes()).unwrap() else {
+            panic!("message wrapper expected")
+        };
+        assert!(part.message().unwrap().headers().contains("Subject"));
         let MimeEntity::Part(part) = MimeEntity::load_with_options(
             &mut wire.as_bytes(),
             &MimeEntityParseOptions {

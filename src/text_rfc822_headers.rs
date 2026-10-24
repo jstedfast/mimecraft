@@ -17,8 +17,9 @@ use crate::{ContentHeaderParseError, ContentType, Header, MessagePart, MimeMessa
 /// Loading and conversion use [`crate::MimeEntity::Message`]. Transparent
 /// encodings are parsed structurally by default; encoded wrappers or disabled
 /// [`crate::MimeEntityParseOptions::parse_message_parts`] remain opaque leaves.
-/// The existing strict message parser requires an inner header/body separator
-/// for a present message, even when no body bytes follow.
+/// By default, present messages require an inner header/body separator even
+/// without body bytes. [`crate::MimeEntityParseOptions::allow_header_only`]
+/// optionally accepts present final headers at EOF without that separator.
 ///
 /// Metadata, contained-message edits, traversal, and writing are available
 /// through [`Self::message_part`] and [`Self::message_part_mut`]. No source I/O,

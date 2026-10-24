@@ -543,21 +543,21 @@ fn load_limits_include_message_headers_and_preserve_entity_error_kinds() {
             .downcast_ref::<HeaderTooLong>()
             .is_some()
     );
+    assert_eq!(
+        MimeMessage::load(&mut b"".as_slice()).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
     for input in [
-        &b""[..],
-        b"Subject: incomplete",
+        &b"Subject: incomplete"[..],
         b"Content-Type: multipart/mixed; boundary=b\r\n\r\nbody",
     ] {
-        assert_eq!(
-            MimeMessage::load(&mut &input[..]).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        assert!(MimeMessage::load(&mut &input[..]).unwrap().body().is_some());
     }
+    let message =
+        MimeMessage::load(&mut &b"Content-Transfer-Encoding: unknown\r\n\r\nbody"[..]).unwrap();
     assert_eq!(
-        MimeMessage::load(&mut &b"Content-Transfer-Encoding: unknown\r\n\r\nbody"[..])
-            .unwrap_err()
-            .kind(),
-        io::ErrorKind::InvalidData
+        message.leaf_parts().next().unwrap().content().encoding(),
+        ContentEncoding::Unspecified
     );
 }
 

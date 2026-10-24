@@ -286,17 +286,7 @@ impl<R> Multipart<R> {
     /// Returns errors for malformed/non-multipart Content-Type or invalid
     /// boundary syntax. Values are not trimmed or silently repaired.
     pub fn boundary(&self) -> Result<Option<String>, MultipartError> {
-        let Some(content_type) = self.content_type().map_err(MultipartError::ContentType)? else {
-            return Ok(None);
-        };
-        check_multipart_type(&content_type)?;
-        content_type
-            .boundary()
-            .map(|boundary| {
-                validate_boundary(boundary)?;
-                Ok(boundary.to_owned())
-            })
-            .transpose()
+        header_boundary(self.headers())
     }
 
     /// Replaces the boundary parameter using default header formatting.
@@ -335,20 +325,42 @@ impl<R> Multipart<R> {
 }
 
 pub(crate) fn checked_boundary<R>(multipart: &Multipart<R>) -> io::Result<String> {
-    let boundary = multipart
+    checked_header_boundary(multipart.headers())
+}
+
+fn header_boundary(headers: &HeaderList) -> Result<Option<String>, MultipartError> {
+    let Some(content_type) = headers
+        .get("Content-Type")
+        .map(crate::Header::parse_content_type)
+        .transpose()
+        .map_err(MultipartError::ContentType)?
+    else {
+        return Ok(None);
+    };
+    check_multipart_type(&content_type)?;
+    content_type
         .boundary()
+        .map(|boundary| {
+            validate_boundary(boundary)?;
+            Ok(boundary.to_owned())
+        })
+        .transpose()
+}
+
+pub(crate) fn checked_header_boundary(headers: &HeaderList) -> io::Result<String> {
+    let boundary = header_boundary(headers)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                if multipart.headers().contains("Content-Type") {
+                if headers.contains("Content-Type") {
                     MultipartError::MissingBoundary
                 } else {
                     MultipartError::MissingContentType
                 },
             )
         })?;
-    let encoding = crate::mime_part::transfer_encoding(multipart.headers())
+    let encoding = crate::mime_part::transfer_encoding(headers)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if !matches!(
         encoding,
@@ -373,7 +385,7 @@ pub(crate) fn check_multipart_type(value: &ContentType) -> Result<(), MultipartE
     }
 }
 
-fn validate_boundary(boundary: &str) -> Result<(), MultipartError> {
+pub(crate) fn validate_boundary(boundary: &str) -> Result<(), MultipartError> {
     if boundary.is_empty() {
         return Err(MultipartError::InvalidBoundary { offset: 0 });
     }

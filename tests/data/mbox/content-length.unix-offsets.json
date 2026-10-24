@@ -1,0 +1,1330 @@
+[
+  {
+    "mboxMarkerOffset": 0,
+    "lineNumber": 2,
+    "beginOffset": 8,
+    "headersEndOffset": 657,
+    "endOffset": 1888,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 2,
+      "beginOffset": 8,
+      "headersEndOffset": 657,
+      "endOffset": 1888,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 20,
+          "beginOffset": 706,
+          "headersEndOffset": 732,
+          "endOffset": 806,
+          "octets": 74,
+          "lines": 5
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 28,
+          "beginOffset": 856,
+          "headersEndOffset": 918,
+          "endOffset": 1837,
+          "message": {
+            "lineNumber": 31,
+            "beginOffset": 918,
+            "headersEndOffset": 1700,
+            "endOffset": 1837,
+            "body": {
+              "mimeType": "text/plain",
+              "lineNumber": 31,
+              "beginOffset": 918,
+              "headersEndOffset": 1700,
+              "endOffset": 1837,
+              "octets": 137,
+              "lines": 4
+            },
+            "octets": 137
+          },
+          "octets": 919,
+          "lines": 21
+        }
+      ],
+      "octets": 1231,
+      "lines": 34
+    },
+    "octets": 1231
+  },
+  {
+    "mboxMarkerOffset": 1889,
+    "lineNumber": 54,
+    "beginOffset": 1897,
+    "headersEndOffset": 2365,
+    "endOffset": 8122,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 54,
+      "beginOffset": 1897,
+      "headersEndOffset": 2365,
+      "endOffset": 8122,
+      "children": [
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 69,
+          "beginOffset": 2438,
+          "headersEndOffset": 2582,
+          "endOffset": 3048,
+          "message": {
+            "lineNumber": 74,
+            "beginOffset": 2582,
+            "headersEndOffset": 3011,
+            "endOffset": 3048,
+            "body": {
+              "mimeType": "text/plain",
+              "lineNumber": 74,
+              "beginOffset": 2582,
+              "headersEndOffset": 3011,
+              "endOffset": 3048,
+              "octets": 37,
+              "lines": 2
+            },
+            "octets": 37
+          },
+          "octets": 466,
+          "lines": 13
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 89,
+          "beginOffset": 3076,
+          "headersEndOffset": 3199,
+          "endOffset": 3657,
+          "octets": 458,
+          "lines": 7
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 101,
+          "beginOffset": 3685,
+          "headersEndOffset": 3808,
+          "endOffset": 4294,
+          "octets": 486,
+          "lines": 7
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 113,
+          "beginOffset": 4322,
+          "headersEndOffset": 4449,
+          "endOffset": 4976,
+          "octets": 527,
+          "lines": 8
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 126,
+          "beginOffset": 5004,
+          "headersEndOffset": 5129,
+          "endOffset": 5627,
+          "octets": 498,
+          "lines": 7
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 138,
+          "beginOffset": 5655,
+          "headersEndOffset": 5799,
+          "endOffset": 6265,
+          "message": {
+            "lineNumber": 143,
+            "beginOffset": 5799,
+            "headersEndOffset": 6228,
+            "endOffset": 6265,
+            "body": {
+              "mimeType": "text/plain",
+              "lineNumber": 143,
+              "beginOffset": 5799,
+              "headersEndOffset": 6228,
+              "endOffset": 6265,
+              "octets": 37,
+              "lines": 1
+            },
+            "octets": 37
+          },
+          "octets": 466,
+          "lines": 12
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 157,
+          "beginOffset": 6293,
+          "headersEndOffset": 6464,
+          "endOffset": 7960,
+          "message": {
+            "lineNumber": 162,
+            "beginOffset": 6464,
+            "headersEndOffset": 7034,
+            "endOffset": 7960,
+            "body": {
+              "mimeType": "message/rfc822",
+              "lineNumber": 162,
+              "beginOffset": 6464,
+              "headersEndOffset": 7034,
+              "endOffset": 7960,
+              "message": {
+                "lineNumber": 177,
+                "beginOffset": 7034,
+                "headersEndOffset": 7545,
+                "endOffset": 7960,
+                "body": {
+                  "mimeType": "message/rfc822",
+                  "lineNumber": 177,
+                  "beginOffset": 7034,
+                  "headersEndOffset": 7545,
+                  "endOffset": 7960,
+                  "message": {
+                    "lineNumber": 191,
+                    "beginOffset": 7545,
+                    "headersEndOffset": 7955,
+                    "endOffset": 7960,
+                    "body": {
+                      "mimeType": "text/plain",
+                      "lineNumber": 191,
+                      "beginOffset": 7545,
+                      "headersEndOffset": 7955,
+                      "endOffset": 7960,
+                      "octets": 5,
+                      "lines": 1
+                    },
+                    "octets": 5
+                  },
+                  "octets": 415,
+                  "lines": 12
+                },
+                "octets": 415
+              },
+              "octets": 926,
+              "lines": 26
+            },
+            "octets": 926
+          },
+          "octets": 1496,
+          "lines": 41
+        },
+        {
+          "mimeType": "text/html",
+          "lineNumber": 205,
+          "beginOffset": 7988,
+          "headersEndOffset": 8041,
+          "endOffset": 8093,
+          "octets": 52,
+          "lines": 1
+        }
+      ],
+      "octets": 5757,
+      "lines": 145
+    },
+    "octets": 5757
+  },
+  {
+    "mboxMarkerOffset": 8123,
+    "lineNumber": 212,
+    "beginOffset": 8131,
+    "headersEndOffset": 8602,
+    "endOffset": 14394,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 212,
+      "beginOffset": 8131,
+      "headersEndOffset": 8602,
+      "endOffset": 14394,
+      "children": [
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 227,
+          "beginOffset": 8675,
+          "headersEndOffset": 8823,
+          "endOffset": 9288,
+          "message": {
+            "lineNumber": 232,
+            "beginOffset": 8823,
+            "headersEndOffset": 9251,
+            "endOffset": 9288,
+            "body": {
+              "mimeType": "text/plain",
+              "lineNumber": 232,
+              "beginOffset": 8823,
+              "headersEndOffset": 9251,
+              "endOffset": 9288,
+              "octets": 37,
+              "lines": 2
+            },
+            "octets": 37
+          },
+          "octets": 465,
+          "lines": 13
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 247,
+          "beginOffset": 9316,
+          "headersEndOffset": 9443,
+          "endOffset": 9901,
+          "octets": 458,
+          "lines": 7
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 259,
+          "beginOffset": 9929,
+          "headersEndOffset": 10056,
+          "endOffset": 10542,
+          "octets": 486,
+          "lines": 7
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 271,
+          "beginOffset": 10570,
+          "headersEndOffset": 10701,
+          "endOffset": 11228,
+          "octets": 527,
+          "lines": 8
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 284,
+          "beginOffset": 11256,
+          "headersEndOffset": 11385,
+          "endOffset": 11883,
+          "octets": 498,
+          "lines": 7
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 296,
+          "beginOffset": 11911,
+          "headersEndOffset": 12059,
+          "endOffset": 12524,
+          "message": {
+            "lineNumber": 301,
+            "beginOffset": 12059,
+            "headersEndOffset": 12487,
+            "endOffset": 12524,
+            "body": {
+              "mimeType": "text/plain",
+              "lineNumber": 301,
+              "beginOffset": 12059,
+              "headersEndOffset": 12487,
+              "endOffset": 12524,
+              "octets": 37,
+              "lines": 1
+            },
+            "octets": 37
+          },
+          "octets": 465,
+          "lines": 12
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 315,
+          "beginOffset": 12552,
+          "headersEndOffset": 12727,
+          "endOffset": 14228,
+          "message": {
+            "lineNumber": 320,
+            "beginOffset": 12727,
+            "headersEndOffset": 13300,
+            "endOffset": 14228,
+            "body": {
+              "mimeType": "message/rfc822",
+              "lineNumber": 320,
+              "beginOffset": 12727,
+              "headersEndOffset": 13300,
+              "endOffset": 14228,
+              "message": {
+                "lineNumber": 335,
+                "beginOffset": 13300,
+                "headersEndOffset": 13814,
+                "endOffset": 14228,
+                "body": {
+                  "mimeType": "message/rfc822",
+                  "lineNumber": 335,
+                  "beginOffset": 13300,
+                  "headersEndOffset": 13814,
+                  "endOffset": 14228,
+                  "message": {
+                    "lineNumber": 349,
+                    "beginOffset": 13814,
+                    "headersEndOffset": 14223,
+                    "endOffset": 14228,
+                    "body": {
+                      "mimeType": "text/plain",
+                      "lineNumber": 349,
+                      "beginOffset": 13814,
+                      "headersEndOffset": 14223,
+                      "endOffset": 14228,
+                      "octets": 5,
+                      "lines": 1
+                    },
+                    "octets": 5
+                  },
+                  "octets": 414,
+                  "lines": 12
+                },
+                "octets": 414
+              },
+              "octets": 928,
+              "lines": 26
+            },
+            "octets": 928
+          },
+          "octets": 1501,
+          "lines": 41
+        },
+        {
+          "mimeType": "text/html",
+          "lineNumber": 363,
+          "beginOffset": 14256,
+          "headersEndOffset": 14313,
+          "endOffset": 14365,
+          "octets": 52,
+          "lines": 1
+        }
+      ],
+      "octets": 5792,
+      "lines": 145
+    },
+    "octets": 5792
+  },
+  {
+    "mboxMarkerOffset": 14395,
+    "lineNumber": 370,
+    "beginOffset": 14427,
+    "headersEndOffset": 15930,
+    "endOffset": 22485,
+    "body": {
+      "mimeType": "multipart/related",
+      "lineNumber": 370,
+      "beginOffset": 14427,
+      "headersEndOffset": 15930,
+      "endOffset": 22485,
+      "children": [
+        {
+          "mimeType": "text/html",
+          "lineNumber": 398,
+          "beginOffset": 15975,
+          "headersEndOffset": 16066,
+          "endOffset": 21265,
+          "octets": 5199,
+          "lines": 111
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 514,
+          "beginOffset": 21310,
+          "headersEndOffset": 21509,
+          "endOffset": 22438,
+          "octets": 929,
+          "lines": 13
+        }
+      ],
+      "octets": 6555,
+      "lines": 139
+    },
+    "octets": 6555
+  },
+  {
+    "mboxMarkerOffset": 22486,
+    "lineNumber": 537,
+    "beginOffset": 22518,
+    "headersEndOffset": 23752,
+    "endOffset": 771037,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 537,
+      "beginOffset": 22518,
+      "headersEndOffset": 23752,
+      "endOffset": 771037,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 562,
+          "beginOffset": 23836,
+          "headersEndOffset": 23912,
+          "endOffset": 23939,
+          "octets": 27,
+          "lines": 3
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 570,
+          "beginOffset": 23978,
+          "headersEndOffset": 24068,
+          "endOffset": 770996,
+          "message": {
+            "lineNumber": 574,
+            "beginOffset": 24068,
+            "headersEndOffset": 24889,
+            "endOffset": 770996,
+            "body": {
+              "mimeType": "multipart/alternative",
+              "lineNumber": 574,
+              "beginOffset": 24068,
+              "headersEndOffset": 24889,
+              "endOffset": 770996,
+              "children": [
+                {
+                  "mimeType": "text/plain",
+                  "lineNumber": 592,
+                  "beginOffset": 24929,
+                  "headersEndOffset": 25005,
+                  "endOffset": 25632,
+                  "octets": 627,
+                  "lines": 16
+                },
+                {
+                  "mimeType": "multipart/related",
+                  "lineNumber": 613,
+                  "beginOffset": 25672,
+                  "headersEndOffset": 25754,
+                  "endOffset": 770952,
+                  "children": [
+                    {
+                      "mimeType": "text/html",
+                      "lineNumber": 617,
+                      "beginOffset": 25794,
+                      "headersEndOffset": 25869,
+                      "endOffset": 26719,
+                      "octets": 850,
+                      "lines": 18
+                    },
+                    {
+                      "mimeType": "image/tiff",
+                      "lineNumber": 640,
+                      "beginOffset": 26759,
+                      "headersEndOffset": 26943,
+                      "endOffset": 770910,
+                      "octets": 743967,
+                      "lines": 10192
+                    }
+                  ],
+                  "octets": 745198,
+                  "lines": 10223
+                }
+              ],
+              "octets": 746107,
+              "lines": 10252
+            },
+            "octets": 746107
+          },
+          "octets": 746928,
+          "lines": 10268
+        }
+      ],
+      "octets": 747285,
+      "lines": 10285
+    },
+    "octets": 747285
+  },
+  {
+    "mboxMarkerOffset": 771038,
+    "lineNumber": 10846,
+    "beginOffset": 771070,
+    "headersEndOffset": 772334,
+    "endOffset": 818962,
+    "body": {
+      "mimeType": "multipart/related",
+      "lineNumber": 10846,
+      "beginOffset": 771070,
+      "headersEndOffset": 772334,
+      "endOffset": 818962,
+      "children": [
+        {
+          "mimeType": "text/html",
+          "lineNumber": 10870,
+          "beginOffset": 772379,
+          "headersEndOffset": 772470,
+          "endOffset": 774852,
+          "octets": 2382,
+          "lines": 50
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 10925,
+          "beginOffset": 774897,
+          "headersEndOffset": 775056,
+          "endOffset": 781079,
+          "octets": 6023,
+          "lines": 79
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 11011,
+          "beginOffset": 781124,
+          "headersEndOffset": 781282,
+          "endOffset": 793355,
+          "octets": 12073,
+          "lines": 157
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 11175,
+          "beginOffset": 793400,
+          "headersEndOffset": 793560,
+          "endOffset": 815274,
+          "octets": 21714,
+          "lines": 282
+        },
+        {
+          "mimeType": "image/gif",
+          "lineNumber": 11464,
+          "beginOffset": 815319,
+          "headersEndOffset": 815522,
+          "endOffset": 818915,
+          "octets": 3393,
+          "lines": 45
+        }
+      ],
+      "octets": 46628,
+      "lines": 649
+    },
+    "octets": 46628
+  },
+  {
+    "mboxMarkerOffset": 818963,
+    "lineNumber": 11519,
+    "beginOffset": 818971,
+    "headersEndOffset": 819882,
+    "endOffset": 822461,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 11519,
+      "beginOffset": 818971,
+      "headersEndOffset": 819882,
+      "endOffset": 822461,
+      "children": [
+        {
+          "mimeType": "text/richtext",
+          "lineNumber": 11542,
+          "beginOffset": 819891,
+          "headersEndOffset": 819920,
+          "endOffset": 822450,
+          "octets": 2530,
+          "lines": 96
+        }
+      ],
+      "octets": 2579,
+      "lines": 102
+    },
+    "octets": 2579
+  },
+  {
+    "mboxMarkerOffset": 822462,
+    "lineNumber": 11644,
+    "beginOffset": 822494,
+    "headersEndOffset": 823647,
+    "endOffset": 825431,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 11644,
+      "beginOffset": 822494,
+      "headersEndOffset": 823647,
+      "endOffset": 825431,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 11663,
+          "beginOffset": 823664,
+          "headersEndOffset": 823665,
+          "endOffset": 824566,
+          "octets": 901,
+          "lines": 20
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 11686,
+          "beginOffset": 824584,
+          "headersEndOffset": 824663,
+          "endOffset": 825411,
+          "octets": 748,
+          "lines": 12
+        }
+      ],
+      "octets": 1784,
+      "lines": 41
+    },
+    "octets": 1784
+  },
+  {
+    "mboxMarkerOffset": 825432,
+    "lineNumber": 11705,
+    "beginOffset": 825464,
+    "headersEndOffset": 826606,
+    "endOffset": 830015,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 11705,
+      "beginOffset": 825464,
+      "headersEndOffset": 826606,
+      "endOffset": 830015,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 11728,
+          "beginOffset": 826786,
+          "headersEndOffset": 826864,
+          "endOffset": 827605,
+          "octets": 741,
+          "lines": 14
+        },
+        {
+          "mimeType": "application/x-pkcs7-mime",
+          "lineNumber": 11746,
+          "beginOffset": 827613,
+          "headersEndOffset": 827791,
+          "endOffset": 830006,
+          "octets": 2215,
+          "lines": 31
+        }
+      ],
+      "octets": 3409,
+      "lines": 60
+    },
+    "octets": 3409
+  },
+  {
+    "mboxMarkerOffset": 830016,
+    "lineNumber": 11785,
+    "beginOffset": 830048,
+    "headersEndOffset": 831185,
+    "endOffset": 837039,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 11785,
+      "beginOffset": 830048,
+      "headersEndOffset": 831185,
+      "endOffset": 837039,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 11812,
+          "beginOffset": 831379,
+          "headersEndOffset": 831457,
+          "endOffset": 834269,
+          "octets": 2812,
+          "lines": 47
+        },
+        {
+          "mimeType": "application/x-pkcs7-mime",
+          "lineNumber": 11863,
+          "beginOffset": 834291,
+          "headersEndOffset": 834469,
+          "endOffset": 837016,
+          "octets": 2547,
+          "lines": 35
+        }
+      ],
+      "octets": 5854,
+      "lines": 97
+    },
+    "octets": 5854
+  },
+  {
+    "mboxMarkerOffset": 837040,
+    "lineNumber": 11906,
+    "beginOffset": 837072,
+    "headersEndOffset": 837972,
+    "endOffset": 853721,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 11906,
+      "beginOffset": 837072,
+      "headersEndOffset": 837972,
+      "endOffset": 853721,
+      "children": [
+        {
+          "mimeType": "image/jpeg",
+          "lineNumber": 11927,
+          "beginOffset": 838045,
+          "headersEndOffset": 838179,
+          "endOffset": 848901,
+          "octets": 10722,
+          "lines": 147
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 12079,
+          "beginOffset": 848929,
+          "headersEndOffset": 849080,
+          "endOffset": 853691,
+          "octets": 4611,
+          "lines": 64
+        }
+      ],
+      "octets": 15749,
+      "lines": 224
+    },
+    "octets": 15749
+  },
+  {
+    "mboxMarkerOffset": 853722,
+    "lineNumber": 12150,
+    "beginOffset": 853754,
+    "headersEndOffset": 855145,
+    "endOffset": 856576,
+    "body": {
+      "mimeType": "application/x-pkcs7-mime",
+      "lineNumber": 12150,
+      "beginOffset": 853754,
+      "headersEndOffset": 855145,
+      "endOffset": 856576,
+      "octets": 1431,
+      "lines": 20
+    },
+    "octets": 1431
+  },
+  {
+    "mboxMarkerOffset": 856577,
+    "lineNumber": 12195,
+    "beginOffset": 856609,
+    "headersEndOffset": 857962,
+    "endOffset": 862354,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 12195,
+      "beginOffset": 856609,
+      "headersEndOffset": 857962,
+      "endOffset": 862354,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 12221,
+          "beginOffset": 858007,
+          "headersEndOffset": 858071,
+          "endOffset": 858178,
+          "octets": 107,
+          "lines": 4
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 12229,
+          "beginOffset": 858223,
+          "headersEndOffset": 858374,
+          "endOffset": 862307,
+          "octets": 3933,
+          "lines": 54
+        }
+      ],
+      "octets": 4392,
+      "lines": 69
+    },
+    "octets": 4392
+  },
+  {
+    "mboxMarkerOffset": 862355,
+    "lineNumber": 12290,
+    "beginOffset": 862387,
+    "headersEndOffset": 863597,
+    "endOffset": 867092,
+    "body": {
+      "mimeType": "application/x-pkcs7-mime",
+      "lineNumber": 12290,
+      "beginOffset": 862387,
+      "headersEndOffset": 863597,
+      "endOffset": 867092,
+      "octets": 3495,
+      "lines": 55
+    },
+    "octets": 3495
+  },
+  {
+    "mboxMarkerOffset": 867093,
+    "lineNumber": 12368,
+    "beginOffset": 867125,
+    "headersEndOffset": 868202,
+    "endOffset": 868863,
+    "body": {
+      "mimeType": "application/x-pkcs7-mime",
+      "lineNumber": 12368,
+      "beginOffset": 867125,
+      "headersEndOffset": 868202,
+      "endOffset": 868863,
+      "octets": 661,
+      "lines": 10
+    },
+    "octets": 661
+  },
+  {
+    "mboxMarkerOffset": 868864,
+    "lineNumber": 12400,
+    "beginOffset": 868896,
+    "headersEndOffset": 869679,
+    "endOffset": 872491,
+    "body": {
+      "mimeType": "message/rfc822",
+      "lineNumber": 12400,
+      "beginOffset": 868896,
+      "headersEndOffset": 869679,
+      "endOffset": 872491,
+      "message": {
+        "lineNumber": 12419,
+        "beginOffset": 869679,
+        "headersEndOffset": 871059,
+        "endOffset": 872491,
+        "body": {
+          "mimeType": "application/x-pkcs7-mime",
+          "lineNumber": 12419,
+          "beginOffset": 869679,
+          "headersEndOffset": 871059,
+          "endOffset": 872491,
+          "octets": 1432,
+          "lines": 20
+        },
+        "octets": 1432
+      },
+      "octets": 2812,
+      "lines": 43
+    },
+    "octets": 2812
+  },
+  {
+    "mboxMarkerOffset": 872492,
+    "lineNumber": 12464,
+    "beginOffset": 872524,
+    "headersEndOffset": 873234,
+    "endOffset": 876422,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 12464,
+      "beginOffset": 872524,
+      "headersEndOffset": 873234,
+      "endOffset": 876422,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 12484,
+          "beginOffset": 873307,
+          "headersEndOffset": 873383,
+          "endOffset": 873398,
+          "octets": 15,
+          "lines": 1
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 12490,
+          "beginOffset": 873426,
+          "headersEndOffset": 873580,
+          "endOffset": 876392,
+          "message": {
+            "lineNumber": 12494,
+            "beginOffset": 873580,
+            "headersEndOffset": 874960,
+            "endOffset": 876392,
+            "body": {
+              "mimeType": "application/x-pkcs7-mime",
+              "lineNumber": 12494,
+              "beginOffset": 873580,
+              "headersEndOffset": 874960,
+              "endOffset": 876392,
+              "octets": 1432,
+              "lines": 20
+            },
+            "octets": 1432
+          },
+          "octets": 2812,
+          "lines": 43
+        }
+      ],
+      "octets": 3188,
+      "lines": 58
+    },
+    "octets": 3188
+  },
+  {
+    "mboxMarkerOffset": 876423,
+    "lineNumber": 12541,
+    "beginOffset": 876455,
+    "headersEndOffset": 877120,
+    "endOffset": 883131,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 12541,
+      "beginOffset": 876455,
+      "headersEndOffset": 877120,
+      "endOffset": 883131,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 12560,
+          "beginOffset": 877221,
+          "headersEndOffset": 877297,
+          "endOffset": 877338,
+          "octets": 41,
+          "lines": 2
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 12566,
+          "beginOffset": 877380,
+          "headersEndOffset": 877531,
+          "endOffset": 883087,
+          "octets": 5556,
+          "lines": 77
+        }
+      ],
+      "octets": 6011,
+      "lines": 91
+    },
+    "octets": 6011
+  },
+  {
+    "mboxMarkerOffset": 883132,
+    "lineNumber": 12650,
+    "beginOffset": 883164,
+    "headersEndOffset": 884226,
+    "endOffset": 894462,
+    "body": {
+      "mimeType": "application/x-pkcs7-mime",
+      "lineNumber": 12650,
+      "beginOffset": 883164,
+      "headersEndOffset": 884226,
+      "endOffset": 894462,
+      "octets": 10236,
+      "lines": 141
+    },
+    "octets": 10236
+  },
+  {
+    "mboxMarkerOffset": 894463,
+    "lineNumber": 12813,
+    "beginOffset": 894495,
+    "headersEndOffset": 895871,
+    "endOffset": 898684,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 12813,
+      "beginOffset": 894495,
+      "headersEndOffset": 895871,
+      "endOffset": 898684,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 12840,
+          "beginOffset": 895972,
+          "headersEndOffset": 896048,
+          "endOffset": 896659,
+          "octets": 611,
+          "lines": 17
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 12861,
+          "beginOffset": 896701,
+          "headersEndOffset": 896852,
+          "endOffset": 898640,
+          "octets": 1788,
+          "lines": 25
+        }
+      ],
+      "octets": 2813,
+      "lines": 54
+    },
+    "octets": 2813
+  },
+  {
+    "mboxMarkerOffset": 898685,
+    "lineNumber": 12893,
+    "beginOffset": 898717,
+    "headersEndOffset": 899265,
+    "endOffset": 899788,
+    "body": {
+      "mimeType": "application/x-pkcs7-mime",
+      "lineNumber": 12893,
+      "beginOffset": 898717,
+      "headersEndOffset": 899265,
+      "endOffset": 899788,
+      "octets": 523,
+      "lines": 8
+    },
+    "octets": 523
+  },
+  {
+    "mboxMarkerOffset": 899789,
+    "lineNumber": 12917,
+    "beginOffset": 899821,
+    "headersEndOffset": 901036,
+    "endOffset": 903918,
+    "body": {
+      "mimeType": "application/x-pkcs7-mime",
+      "lineNumber": 12917,
+      "beginOffset": 899821,
+      "headersEndOffset": 901036,
+      "endOffset": 903918,
+      "octets": 2882,
+      "lines": 38
+    },
+    "octets": 2882
+  },
+  {
+    "mboxMarkerOffset": 903919,
+    "lineNumber": 12977,
+    "beginOffset": 903951,
+    "headersEndOffset": 905109,
+    "endOffset": 907231,
+    "body": {
+      "mimeType": "Application/x-pkcs7-mime",
+      "lineNumber": 12977,
+      "beginOffset": 903951,
+      "headersEndOffset": 905109,
+      "endOffset": 907231,
+      "octets": 2122,
+      "lines": 30
+    },
+    "octets": 2122
+  },
+  {
+    "mboxMarkerOffset": 907232,
+    "lineNumber": 13030,
+    "beginOffset": 907264,
+    "headersEndOffset": 908342,
+    "endOffset": 911299,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 13030,
+      "beginOffset": 907264,
+      "headersEndOffset": 908342,
+      "endOffset": 911299,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 13053,
+          "beginOffset": 908375,
+          "headersEndOffset": 908439,
+          "endOffset": 908439,
+          "octets": 0,
+          "lines": 0
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 13058,
+          "beginOffset": 908472,
+          "headersEndOffset": 908551,
+          "endOffset": 911264,
+          "octets": 2713,
+          "lines": 42
+        }
+      ],
+      "octets": 2957,
+      "lines": 53
+    },
+    "octets": 2957
+  },
+  {
+    "mboxMarkerOffset": 911300,
+    "lineNumber": 13106,
+    "beginOffset": 911332,
+    "headersEndOffset": 912369,
+    "endOffset": 915249,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 13106,
+      "beginOffset": 911332,
+      "headersEndOffset": 912369,
+      "endOffset": 915249,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 13127,
+          "beginOffset": 912410,
+          "headersEndOffset": 912488,
+          "endOffset": 912941,
+          "octets": 453,
+          "lines": 14
+        },
+        {
+          "mimeType": "text/html",
+          "lineNumber": 13145,
+          "beginOffset": 912982,
+          "headersEndOffset": 913057,
+          "endOffset": 913868,
+          "octets": 811,
+          "lines": 27
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 13176,
+          "beginOffset": 913909,
+          "headersEndOffset": 914006,
+          "endOffset": 915206,
+          "octets": 1200,
+          "lines": 16
+        }
+      ],
+      "octets": 2880,
+      "lines": 72
+    },
+    "octets": 2880
+  },
+  {
+    "mboxMarkerOffset": 915250,
+    "lineNumber": 13199,
+    "beginOffset": 915282,
+    "headersEndOffset": 916357,
+    "endOffset": 920885,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 13199,
+      "beginOffset": 915282,
+      "headersEndOffset": 916357,
+      "endOffset": 920885,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 13222,
+          "beginOffset": 916400,
+          "headersEndOffset": 916470,
+          "endOffset": 916622,
+          "octets": 152,
+          "lines": 7
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 13234,
+          "beginOffset": 916665,
+          "headersEndOffset": 916744,
+          "endOffset": 920840,
+          "octets": 4096,
+          "lines": 57
+        }
+      ],
+      "octets": 4528,
+      "lines": 75
+    },
+    "octets": 4528
+  },
+  {
+    "mboxMarkerOffset": 920886,
+    "lineNumber": 13297,
+    "beginOffset": 920918,
+    "headersEndOffset": 922020,
+    "endOffset": 926071,
+    "body": {
+      "mimeType": "multipart/signed",
+      "lineNumber": 13297,
+      "beginOffset": 920918,
+      "headersEndOffset": 922020,
+      "endOffset": 926071,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 13320,
+          "beginOffset": 922054,
+          "headersEndOffset": 922132,
+          "endOffset": 922206,
+          "octets": 74,
+          "lines": 5
+        },
+        {
+          "mimeType": "application/x-pkcs7-signature",
+          "lineNumber": 13329,
+          "beginOffset": 922240,
+          "headersEndOffset": 922319,
+          "endOffset": 926036,
+          "octets": 3717,
+          "lines": 58
+        }
+      ],
+      "octets": 4051,
+      "lines": 73
+    },
+    "octets": 4051
+  },
+  {
+    "mboxMarkerOffset": 926072,
+    "lineNumber": 13392,
+    "beginOffset": 926104,
+    "headersEndOffset": 927232,
+    "endOffset": 928495,
+    "body": {
+      "mimeType": "multipart/report",
+      "lineNumber": 13392,
+      "beginOffset": 926104,
+      "headersEndOffset": 927232,
+      "endOffset": 928495,
+      "children": [
+        {
+          "mimeType": "message/delivery-status",
+          "lineNumber": 13414,
+          "beginOffset": 927369,
+          "headersEndOffset": 927408,
+          "endOffset": 927596,
+          "octets": 188,
+          "lines": 6
+        },
+        {
+          "mimeType": "message/rfc822",
+          "lineNumber": 13424,
+          "beginOffset": 927621,
+          "headersEndOffset": 927651,
+          "endOffset": 928468,
+          "message": {
+            "lineNumber": 13426,
+            "beginOffset": 927651,
+            "headersEndOffset": 928457,
+            "endOffset": 928468,
+            "body": {
+              "mimeType": "text/plain",
+              "lineNumber": 13426,
+              "beginOffset": 927651,
+              "headersEndOffset": 928457,
+              "endOffset": 928468,
+              "octets": 11,
+              "lines": 1
+            },
+            "octets": 11
+          },
+          "octets": 817,
+          "lines": 16
+        }
+      ],
+      "octets": 1263,
+      "lines": 34
+    },
+    "octets": 1263
+  },
+  {
+    "mboxMarkerOffset": 928496,
+    "lineNumber": 13445,
+    "beginOffset": 928528,
+    "headersEndOffset": 930393,
+    "endOffset": 935272,
+    "body": {
+      "mimeType": "multipart/mixed",
+      "lineNumber": 13445,
+      "beginOffset": 928528,
+      "headersEndOffset": 930393,
+      "endOffset": 935272,
+      "children": [
+        {
+          "mimeType": "text/plain",
+          "lineNumber": 13477,
+          "beginOffset": 930437,
+          "headersEndOffset": 930515,
+          "endOffset": 931378,
+          "octets": 863,
+          "lines": 18
+        },
+        {
+          "mimeType": "application/vcard",
+          "lineNumber": 13500,
+          "beginOffset": 931423,
+          "headersEndOffset": 931584,
+          "endOffset": 935225,
+          "octets": 3641,
+          "lines": 61
+        }
+      ],
+      "octets": 4879,
+      "lines": 92
+    },
+    "octets": 4879
+  }
+]

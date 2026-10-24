@@ -102,6 +102,9 @@ impl HeaderList {
     ///
     /// The separator is consumed but not stored in this collection. To retain
     /// it, use [`HeaderParser::read_from`] and convert its output into a list.
+    /// [`crate::MimeParser::parse_headers`] also imposes a total input limit;
+    /// [`crate::MimeReader::read_headers`] additionally reports the separator
+    /// and original byte/line positions.
     /// Unlike MimeKit's higher-level parser, this accepts an invalid first field.
     ///
     /// # Errors

@@ -205,9 +205,12 @@ fn encoded_and_unrecognized_message_types_stay_opaque() {
 #[test]
 fn opaque_option_preserves_invalid_inner_input_without_applying_inner_limits() {
     let raw = b"Content-Type: message/rfc822\r\n\r\nSubject: no separator";
-    assert_eq!(
-        MimeEntity::load(&mut &raw[..]).unwrap_err().kind(),
-        io::ErrorKind::UnexpectedEof
+    assert!(
+        attached(&load(raw))
+            .message()
+            .unwrap()
+            .headers()
+            .contains("Subject")
     );
     let options = MimeEntityParseOptions {
         parse_message_parts: false,
@@ -232,8 +235,23 @@ fn missing_message_and_present_empty_message_round_trip_at_eof_and_boundaries() 
             let mut root: MimeEntity = part.into();
             let raw = write(&mut root, format);
             let mut parsed = load(&raw);
-            assert_eq!(attached(&parsed).message().is_some(), present);
-            assert_eq!(write(&mut parsed, format), raw);
+            // Without an enclosing boundary, EOF constructs an empty embedded
+            // message even if the original wrapper had no payload.
+            assert!(attached(&parsed).message().is_some());
+            let expected = if present {
+                raw.clone()
+            } else {
+                [
+                    raw.as_slice(),
+                    if format == NewLineFormat::Dos {
+                        b"\r\n"
+                    } else {
+                        b"\n"
+                    },
+                ]
+                .concat()
+            };
+            assert_eq!(write(&mut parsed, format), expected);
             let mut multipart: Multipart = Multipart::new("mixed", "outer").unwrap();
             multipart.children_mut().extend([root, binary(b"sibling")]);
             let mut root: MimeEntity = multipart.into();
@@ -252,7 +270,7 @@ fn missing_message_and_present_empty_message_round_trip_at_eof_and_boundaries() 
     let raw = b"Content-Type: message/rfc822\r\n\r\nContent-Type: message/news\r\n\r\n";
     let entity = load(raw);
     let nested = attached(&entity).message().unwrap().body().unwrap();
-    assert!(attached(nested).message().is_none());
+    assert!(attached(nested).message().is_some());
 }
 
 #[test]
@@ -273,7 +291,20 @@ fn empty_message_chains_keep_separator_ownership_at_each_nesting_level() {
                     entity = wrap(entity);
                 }
                 let raw = write(&mut entity, format);
-                assert_eq!(write(&mut load(&raw), format), raw);
+                let expected = if kind == 0 {
+                    [
+                        raw.as_slice(),
+                        if format == NewLineFormat::Dos {
+                            b"\r\n"
+                        } else {
+                            b"\n"
+                        },
+                    ]
+                    .concat()
+                } else {
+                    raw.clone()
+                };
+                assert_eq!(write(&mut load(&raw), format), expected);
                 let mut parent: Multipart = Multipart::new("mixed", "outer").unwrap();
                 parent.children_mut().extend([entity, binary(b"sibling")]);
                 let raw = write(&mut parent.into(), format);
@@ -385,7 +416,7 @@ fn depth_counts_wrappers_and_bodies_without_resetting_inside_messages() {
                 ..Default::default()
             }
         )
-        .is_ok()
+        .is_err()
     );
     let raw = b"Content-Type: message/rfc822\r\n\r\n\r\n";
     assert!(
@@ -484,7 +515,7 @@ fn folded_inner_header_limits_keep_typed_errors() {
 }
 
 #[test]
-fn incomplete_inner_headers_and_unclosed_multiparts_fail_without_partial_messages() {
+fn incomplete_inner_headers_and_unclosed_multiparts_recover() {
     for inner in [
         "Subject: no separator",
         "Subject: no separator\r\n",
@@ -492,18 +523,16 @@ fn incomplete_inner_headers_and_unclosed_multiparts_fail_without_partial_message
         "Content-Type: multipart/mixed; boundary=i\r\n\r\n--i\r\n\r\nbody",
     ] {
         let raw = format!("Content-Type: message/rfc822\r\n\r\n{inner}");
-        assert_eq!(
-            MimeEntity::load(&mut raw.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        assert!(attached(&load(raw.as_bytes())).message().is_some());
         let newline = if raw.ends_with('\n') { "" } else { "\r\n" };
         let raw = format!(
             "Content-Type: multipart/mixed; boundary=o\r\n\r\n--o\r\n{raw}{newline}--o--\r\n"
         );
-        assert_eq!(
-            MimeEntity::load(&mut raw.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
+        let MimeEntity::Multipart(parent) = load(raw.as_bytes()) else {
+            panic!("multipart expected")
+        };
+        assert_eq!(parent.children().len(), 1);
+        assert!(attached(&parent.children()[0]).message().is_some());
     }
 }
 
@@ -517,9 +546,14 @@ fn ancestor_boundaries_are_checked_across_message_frames_but_siblings_can_reuse_
         let raw = format!(
             "Content-Type: multipart/mixed; boundary={outer}\r\n\r\n--{outer}\r\nContent-Type: message/rfc822\r\n\r\nContent-Type: multipart/mixed; boundary={inner}\r\n\r\n"
         );
-        let error = MimeEntity::load(&mut raw.as_bytes()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("ancestor"));
+        let MimeEntity::Multipart(parent) = load(raw.as_bytes()) else {
+            panic!("multipart expected")
+        };
+        assert_eq!(parent.children().len(), 1);
+        assert!(matches!(
+            attached(&parent.children()[0]).message().unwrap().body(),
+            Some(MimeEntity::Multipart(_))
+        ));
     }
     let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
     for _ in 0..2 {

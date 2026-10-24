@@ -1673,7 +1673,9 @@ impl MimeMessage {
     ///
     /// The body is always `Some`, even for empty content. Sources start at zero
     /// and retain encoded bytes and their stored encodings. Input must contain
-    /// a header/body separator and complete multipart structure. This is not
+    /// a header/body separator unless [`MimeEntityParseOptions::allow_header_only`]
+    /// accepts present final headers at EOF. Multipart structure must still be
+    /// complete. This is not
     /// message-field validation: required From/Date fields are not enforced,
     /// and non-content metadata is not parsed or repaired.
     ///
@@ -1702,9 +1704,7 @@ impl MimeMessage {
         reader: &mut R,
         options: &MimeEntityParseOptions,
     ) -> io::Result<Self> {
-        Ok(Self::from_loaded_entity(MimeEntity::load_with_options(
-            reader, options,
-        )?))
+        crate::MimeParser::with_options(reader, *options)?.parse_message()
     }
 
     pub(crate) fn from_loaded_entity(mut body: MimeEntity) -> Self {

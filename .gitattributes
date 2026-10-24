@@ -4,3 +4,4 @@
 *.eml  -text
 *.mbox -text
 *.mime -text
+tests/data/** -text

@@ -101,6 +101,35 @@ Final-Recipient: rfc822; user@example.com\nAction: failed\n\n\nStatus: 5.1.1",
 }
 
 #[test]
+fn status_group_offsets_include_blank_lines_and_all_prior_groups() {
+    let bytes = b"\r\n\nReporting-MTA: dns; mx\r\n\r\n\nAction: failed\nStatus: 5.1.1\n\n\r";
+    let groups = status(bytes).status_groups().unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].as_slice()[0].offset(), Some(3));
+    for header in groups.iter().flat_map(|group| group.iter()) {
+        let expected = bytes
+            .windows(header.raw().len())
+            .position(|raw| raw == header.raw())
+            .unwrap();
+        assert_eq!(header.offset(), Some(expected as u64));
+    }
+}
+
+#[test]
+fn separately_decoded_remainder_has_its_own_cumulative_offset_origin() {
+    let bytes = b"\nContent-Transfer-Encoding: quoted-printable\r\n\r\n\
+                  =0D=0AAction: failed\r\n\r\nStatus: 5.1.1";
+    let groups = status(bytes).status_groups().unwrap();
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[0].as_slice()[0].offset(), Some(1));
+    assert_eq!(groups[1].as_slice()[0].offset(), Some(2));
+    assert_eq!(
+        groups[2].as_slice()[0].offset(),
+        Some(b"\r\nAction: failed\r\n\r\n".len() as u64)
+    );
+}
+
+#[test]
 fn raw_groups_preserve_duplicates_folds_malformed_and_non_utf8_records() {
     let bytes =
         b"rEPorting-MTA: dns;\r\n example.com\r\nX-Test: \xff\r\nX-Test: two\r\nbad line\r\n\r\n";

@@ -3,9 +3,9 @@
 use std::io::{self, BufReader, Cursor};
 
 use mimecraft::{
-    ContentEncoding, ContentHeaderParseError, ContentType, Header, HeaderList, HeaderParser,
-    MessagePart, MessagePartError, MimeContent, MimeEntity, MimeEntityParseOptions, MimeMessage,
-    MimePart, MimePartWriteOptions, Multipart, UnknownContentEncoding, encodings::NewLineFormat,
+    ContentEncoding, ContentType, Header, HeaderList, HeaderParser, MessagePart, MessagePartError,
+    MimeContent, MimeEntity, MimeEntityParseOptions, MimeMessage, MimePart, MimePartWriteOptions,
+    Multipart, encodings::NewLineFormat,
 };
 
 fn headers(raw: &[u8]) -> HeaderList {
@@ -156,10 +156,11 @@ fn encoded_wrappers_and_the_opaque_option_keep_untyped_digest_payloads_unchanged
         assert_eq!(write(&mut entity, NewLineFormat::Dos), raw.as_bytes());
     }
     let raw = b"Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\n\r\nnot message headers\r\n--d--\r\n";
-    assert_eq!(
-        MimeEntity::load(&mut &raw[..]).unwrap_err().kind(),
-        io::ErrorKind::InvalidData
-    );
+    let recovered = load(raw);
+    let inner = attached(&multipart(&recovered).children()[0])
+        .message()
+        .unwrap();
+    assert!(inner.headers().as_slice()[0].is_invalid());
     let mut entity = MimeEntity::load_with_options(
         &mut &raw[..],
         &MimeEntityParseOptions {
@@ -303,7 +304,7 @@ fn writer_context_tracks_current_parent_headers_and_does_not_leak_through_messag
 }
 
 #[test]
-fn explicit_bad_types_and_encodings_do_not_fall_back_to_digest_defaults() {
+fn invalid_explicit_types_remain_leaves_and_unknown_encodings_recover() {
     for raw_header in [
         "Content-Type: invalid\r\n",
         "Content-Type:\r\nContent-Type: message/rfc822\r\n",
@@ -311,22 +312,17 @@ fn explicit_bad_types_and_encodings_do_not_fall_back_to_digest_defaults() {
         let raw = format!(
             "Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\n{raw_header}\r\n\r\n\r\n--d--\r\n"
         );
-        let error = MimeEntity::load(&mut raw.as_bytes()).unwrap_err();
-        assert!(
-            error
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<ContentHeaderParseError>()
-                .is_some()
-        );
+        let entity = load(raw.as_bytes());
+        let MimeEntity::Part(part) = &multipart(&entity).children()[0] else {
+            panic!("invalid explicit type must not use digest default")
+        };
+        assert!(part.content_type().is_err());
     }
     let raw = b"Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\nContent-Transfer-Encoding: unknown\r\n\r\n\r\n\r\n--d--\r\n";
-    let error = MimeEntity::load(&mut &raw[..]).unwrap_err();
+    let entity = load(raw);
     assert!(
-        error
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<UnknownContentEncoding>()
+        attached(&multipart(&entity).children()[0])
+            .message()
             .is_some()
     );
 
@@ -409,7 +405,7 @@ fn implicit_wrappers_count_toward_shared_limits_and_fragmented_reads_work() {
 }
 
 #[test]
-fn implicit_messages_keep_ancestor_boundary_checks_and_require_complete_structure() {
+fn implicit_messages_recover_structure_while_writers_reject_ancestor_overlap() {
     for body in [
         "Subject: missing separator\r\n",
         "Content-Type: multipart/mixed; boundary=inner\r\n\r\n",
@@ -417,9 +413,11 @@ fn implicit_messages_keep_ancestor_boundary_checks_and_require_complete_structur
     ] {
         let raw =
             format!("Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\n\r\n{body}--d--\r\n");
-        assert_eq!(
-            MimeEntity::load(&mut raw.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
+        let entity = load(raw.as_bytes());
+        assert!(
+            attached(&multipart(&entity).children()[0])
+                .message()
+                .is_some()
         );
     }
     let inner: Multipart = Multipart::new("mixed", "d-long").unwrap();

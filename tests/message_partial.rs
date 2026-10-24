@@ -704,7 +704,7 @@ impl Seek for FailingSource {
 }
 
 #[test]
-fn source_failures_and_incomplete_structures_are_not_hidden() {
+fn source_failures_remain_fatal_when_reassembled_structure_recovers() {
     for fail_seek in [true, false] {
         let source = FailingSource {
             bytes: Cursor::new(b"\r\nbody".to_vec()),
@@ -747,10 +747,10 @@ fn source_failures_and_incomplete_structures_are_not_hidden() {
         b"Subject: no separator".as_slice(),
         b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\nno close".as_slice(),
     ] {
-        assert_io(
-            MessagePartial::join(&HeaderList::new(), &mut [fragment(1, 1, wire)]).unwrap_err(),
-            io::ErrorKind::UnexpectedEof,
-        );
+        let message = MessagePartial::join(&HeaderList::new(), &mut [fragment(1, 1, wire)])
+            .unwrap()
+            .unwrap();
+        assert!(message.body().is_some());
     }
 }
 

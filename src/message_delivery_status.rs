@@ -9,8 +9,9 @@ use std::{
 };
 
 use crate::{
-    ContentEncoding, ContentHeaderParseError, Header, HeaderList, MimeContent, MimePart,
-    encodings::NewLineFormat, filters::encoder_filter_with_options,
+    ContentEncoding, ContentHeaderParseError, Header, HeaderList, MimeContent,
+    MimeEntityParseOptions, MimeParser, MimePart, encodings::NewLineFormat,
+    filters::encoder_filter_with_options,
 };
 
 /// Resource limits for reading detached delivery-status header groups.
@@ -180,6 +181,9 @@ impl<R: Read + Seek> MessageDeliveryStatus<R> {
     /// unterminated record. Empty content and a lone trailing CR contribute no
     /// group, following the header parser. Malformed records are retained as in
     /// [`HeaderList::load`], not silently dropped or interpreted as body text.
+    /// Header offsets count from the start of the outer decoded body, including
+    /// prior groups and blank lines. A separately decoded remainder starts a
+    /// new offset origin at zero; offsets are not into the encoded wire bytes.
     ///
     /// Office365 sometimes puts a transfer-encoding field in a group and encodes
     /// the remainder separately. The first active Base64/QP/UU field switches
@@ -193,6 +197,8 @@ impl<R: Read + Seek> MessageDeliveryStatus<R> {
     /// rewinds its source to zero, even if subsequent header parsing fails.
     /// Raw headers, encoded bytes, and encoding labels are unchanged; each call
     /// parses afresh. Decoded groups and any remainder are held in memory.
+    /// Use [`MimeParser::parse_status_group`] on an already decoded buffered
+    /// source to process groups incrementally instead.
     ///
     /// # Errors
     ///
@@ -290,13 +296,15 @@ fn read_groups(
     groups: &mut Vec<HeaderList>,
     detect_encoding: bool,
 ) -> io::Result<Option<ContentEncoding>> {
-    while !input.is_empty() {
-        let group = HeaderList::load_with_max_header_length(input, limit)?;
-        if group.is_empty() {
-            // Loading consumed a blank separator (or EOF), not a status group.
-            // Extra blank lines must not create empty per-recipient entries.
-            continue;
-        }
+    let options = MimeEntityParseOptions {
+        max_input_bytes: input.len().max(1),
+        max_header_length: limit.get(),
+        ..Default::default()
+    };
+    let mut parser = MimeParser::with_options(input, options)?;
+    // Keep one parser for the decoded stream so offsets include earlier groups
+    // and skipped blank lines, rather than restarting at each recipient.
+    while let Some(group) = parser.parse_status_group()? {
         let encoding = if detect_encoding {
             encoded_remainder(&group)?
         } else {

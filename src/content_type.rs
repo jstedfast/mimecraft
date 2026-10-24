@@ -162,6 +162,37 @@ impl ContentType {
         input: &[u8],
         options: &ParameterParseOptions,
     ) -> Result<Self, ContentHeaderParseError> {
+        let (mut content_type, index) = Self::parse_mime_type(input)?;
+        content_type.parameters = parse_parameters(input, index, options)?;
+        Ok(content_type)
+    }
+
+    // MimeReader keeps a recognizable MIME type even when its parameters
+    // cannot be parsed. An unintelligible type becomes application/octet-stream,
+    // with a separate attempt to recover its parameter list. The original raw
+    // header remains intact; the boolean requests an InvalidContentType report.
+    pub(crate) fn parse_for_reader(input: &[u8]) -> (Self, bool) {
+        let (mut content_type, index, invalid) = match Self::parse_mime_type(input) {
+            Ok((content_type, index)) => (content_type, index, false),
+            Err(error) => {
+                let index = input[error.offset()..]
+                    .iter()
+                    .position(|&byte| byte == b';')
+                    .map_or(input.len(), |index| error.offset() + index);
+                (
+                    Self::new("application", "octet-stream").expect("constant MIME type"),
+                    index,
+                    true,
+                )
+            }
+        };
+        if let Ok(parameters) = parse_parameters(input, index, &ParameterParseOptions::default()) {
+            content_type.parameters = parameters;
+        }
+        (content_type, invalid)
+    }
+
+    fn parse_mime_type(input: &[u8]) -> Result<(Self, usize), ContentHeaderParseError> {
         let mut index = 0;
         skip_cfws(input, &mut index)?;
         let start = index;
@@ -199,12 +230,15 @@ impl ContentType {
         let media_subtype = std::str::from_utf8(&input[start..index])
             .expect("media subtype is ASCII")
             .to_owned();
-        let parameters = parse_parameters(input, index, options)?;
-        Ok(Self {
-            media_type,
-            media_subtype,
-            parameters,
-        })
+        skip_cfws(input, &mut index)?;
+        Ok((
+            Self {
+                media_type,
+                media_subtype,
+                parameters: ParameterList::default(),
+            },
+            index,
+        ))
     }
 
     /// Returns the original spelling of the media type.

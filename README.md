@@ -106,6 +106,9 @@ MimeKit. The crate is not configured for publication.
   with iterative traversal and conditional message MIME-Version insertion.
 - Buffered loading of complete MIME entity trees into owned body streams,
   with raw headers, stored transfer encodings, and input/header/depth limits.
+- Synchronous `MimeReader` events with borrowed content and original byte/line
+  positions, bounded standalone header reading, and an owned `MimeParser`
+  shared by the existing load APIs.
 - Message ownership, buffered loading, and synchronous writing, with separate
   message/body headers, optional bodies, and no generated metadata.
 - Headers-only message serialization, including root-body headers and the
@@ -754,8 +757,7 @@ configured preserved fields in their entirety.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Value reformatting, preserved raw delimiters, and truncated-container recovery
-remain deferred.
+Value reformatting and preserved raw delimiters remain deferred.
 
 ### Incremental charset conversion
 
@@ -1181,7 +1183,7 @@ transport-safety validator. Text parts expose leaf preparation through
 
 Complete entity loading is available through `MimeEntity::load`, and message
 loading through `MimeMessage::load`, including transparent attached messages.
-Encoded message-wrapper interpretation and truncated-entity recovery remain deferred.
+Encoded message-wrapper interpretation remains deferred.
 
 ### Single-part serialization
 
@@ -1466,10 +1468,12 @@ let mut output = Vec::new();
 text.part_mut().write_to(&mut output).unwrap();
 ```
 
-The loader uses iterative traversal and incremental buffered reads. It buffers
-up to two physical lines and retains the resulting headers, preambles,
-epilogues, and encoded leaf bodies; this is not constant-memory or
-persistent-source parsing.
+The loader uses `MimeParser` over `MimeReader`'s iterative event traversal and
+incremental buffered reads. The parser retains the resulting headers,
+preambles, epilogues, and encoded leaf bodies; owned-tree loading is not
+constant-memory or persistent-source parsing. The reader streams ordinary
+content even across long physical lines, while retaining header state and
+delimiter lookahead rather than accumulating complete bodies.
 The wire-byte limit does not describe total allocation overhead or buffered
 reader read-ahead. Sources need `BufRead`, not seeking; use `BufReader` around a
 plain `Read` source. The borrowed source is never closed.
@@ -1478,7 +1482,10 @@ Headers retain raw bytes, order, folds, duplicates, and malformed records.
 The first Content-Type selects multipart, attached message, or leaf; a missing
 type remains absent and normally selects an opaque leaf. Immediate
 multipart/digest children instead default to message/rfc822. Invalid present
-Content-Type and unknown transfer encodings are explicit errors. Stored encoding is initialized from
+Content-Type falls back to application/octet-stream, while a recognizable type
+survives invalid parameters. Unknown transfer encodings use `Unspecified`.
+Raw headers remain authoritative, so explicit typed getters can still report
+syntax errors. Stored encoding is initialized from
 the first Content-Transfer-Encoding header, or `Unspecified` when absent. Bodies
 are neither decoded nor normalized and start at position zero. Newline hints
 describe their stored LF/CRLF sequences, excluding boundary framing.
@@ -1490,20 +1497,298 @@ at EOF their trailing bytes are retained. Preambles retain their final newline.
 Epilogues begin after the closing delimiter's newline, matching the owned model.
 Empty containers and empty child bodies are supported.
 
-Every entity requires a header/body separator. Empty input, header-only parts,
-missing closing markers, and prematurely encountered ancestor delimiters fail
-instead of producing a truncated tree. Multipart encoding, boundary syntax,
-and ancestor-overlap checks match serialization. Raw delimiter spelling,
+Default recovery accepts headers interrupted by EOF or an enclosing delimiter,
+unwinds truncated containers, and permits missing or invalid multipart boundaries.
+Missing boundary parameters leave content in the preamble; literal marker
+matching checks the nearest container first, including overlapping boundaries.
+Raw records and offsets survive without inventing separator bytes or guessing
+where body text starts. Standalone empty message wrappers acquire an empty
+embedded message at EOF; wrappers immediately followed by an enclosing marker
+remain without an attached message. `allow_header_only` defaults to true; its
+existing false value rejects missing separators, not all malformed input.
+Use a fallible compliance logger for selective rejection instead.
+Empty top-level input, invalid first headers, exceeded limits, source errors,
+and logger/callback errors remain fatal. Writer metadata and boundary checks
+remain unchanged. Raw delimiter spelling,
 absent-versus-empty body distinctions, and separator spelling are not retained:
 load/write may normalize framing, so it is not a lossless raw-wire API.
 Recognized transparent message wrappers become structured attached messages;
 encoded wrappers and other non-multipart types remain opaque leaves.
-Header-only message interpretation, recovery diagnostics, mbox handling,
-zero-copy source ranges, and async loading remain deferred.
+Zero-copy source ranges and async loading remain deferred.
 
-Zero limits return `InvalidInput` before I/O. Exceeded limits, malformed
-metadata, and misplaced boundaries return `InvalidData`; incomplete structure
-returns `UnexpectedEof`. Header-length errors retain `HeaderTooLong`.
+### MIME reader and parser
+
+The streaming implementation lives under `src/mime_reader`: `engine.rs` owns
+the state machine and framing, `options.rs` defines the shared parse options,
+and `scan.rs` plus `scan/` contain scalar/SIMD scanning and scanner tests.
+`src/mime_reader.rs` provides the public reader API and source lifecycle;
+`src/mime_parser.rs` builds owned MIME trees from its events.
+`src/mime_entity_load.rs` contains only the entity-loading convenience methods.
+`MimeEntityParseOptions` remains available at the crate root.
+
+`MimeReader<R: BufRead>` provides the first synchronous reader layer,
+independent of model construction. `read_entity` and `read_message` invoke a
+fallible callback with `MimeEvent` values: message and entity begin/end events,
+and borrowed body, preamble, and epilogue chunks. Entity-begin events own their
+raw `HeaderList` and include structural kind, stored transfer encoding, and
+header/body positions. Message-root entity headers include both message and
+Content-* fields; ordinary nested entities keep all of their headers.
+
+```rust
+use mimecraft::{MimeContentKind, MimeEvent, MimeReader};
+
+let mut reader = MimeReader::new(b"Subject: example\r\n\r\nbody".as_slice());
+let mut body_bytes = 0;
+reader.read_message(|event| {
+    if let MimeEvent::Content { kind: MimeContentKind::Body, bytes, .. } = event {
+        body_bytes += bytes.len();
+    }
+    Ok(())
+}).unwrap();
+assert_eq!(body_bytes, 4);
+assert_eq!(reader.position().offset, 24);
+```
+
+Content is not transfer-decoded or newline-normalized, and callback chunks
+contain at most 4096 bytes. The newline immediately before a multipart
+delimiter belongs to the delimiter and is withheld from body/epilogue events;
+preamble newlines are retained. A trailing CR is checked against the next byte
+so chunk boundaries cannot break CRLF ownership. Leaf-end events report the
+newline format of emitted content, not discarded framing.
+
+`MimePosition` counts original bytes from zero and physical lines from one.
+LF advances the line; bare CR does not. Positions are relative to the supplied
+input, not an underlying seek position. End positions are exclusive.
+The reader's consumed position can be ahead of a callback because of lookahead.
+Header offsets use the same byte origin. Empty message wrappers emit no inner
+message events; successful begin/end events otherwise nest in wire order.
+
+Ordinary content borrows buffered input directly across physical lines, without
+copying each line or invoking a callback for every line. The default `simd`
+feature fuses `\n--` / mbox `\nFr` candidate detection, line counting, and CRLF/LF
+classification with runtime-detected SSE2/AVX2 or NEON. Scalar matching remains
+the fallback, and bulk byte searches skip newline-free runs. Partial prefixes
+and full delimiter validation stay with the line scanner. Only ambiguous
+trailing newline bytes are copied on this fast path, and delimiter-owned
+newlines do not contribute to body format hints. Header storage, nesting
+state, and delimiter lookahead still allocate. A potential delimiter followed
+by arbitrarily long transport padding must remain buffered until its full line
+can be classified; this buffering is bounded by `max_input_bytes`, not the
+callback chunk size. Newly appended padding is checked once rather than
+repeatedly rescanning the growing line. Scanner scratch buffers are reused
+between messages. This is not an unconditional constant-memory guarantee.
+
+`MimeParser` consumes the same reader events to build existing owned models.
+`parse_entity` and `parse_message` return their respective models, retaining
+stored encoded bodies in `Cursor<Vec<u8>>` at position zero. Message parsing
+partitions root Content-* fields onto the body without losing header offsets.
+`MimeEntity::load` and `MimeMessage::load` now delegate to this parser.
+
+Compliance reporting is opt-in. Reader methods `read_entity_with_logger`,
+`read_message_with_logger`, `read_mbox_message_with_logger`,
+`read_headers_with_logger`, and `read_status_group_with_logger` borrow a
+`MimeComplianceLogger` for one operation. The parser has matching
+`parse_*_with_logger` methods. A closure taking `MimeComplianceIssue` and
+returning `io::Result<()>` implements the logger trait.
+
+```rust
+use mimecraft::{MimeComplianceIssue, MimeComplianceViolation, MimeParser};
+use std::io;
+
+let mut parser = MimeParser::new(b"Subject: example\r\n\r\nbody".as_slice());
+let message = parser.parse_message_with_logger(&mut |issue: MimeComplianceIssue| {
+    if issue.violation == MimeComplianceViolation::RepeatedContentType {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, issue.to_string()));
+    }
+    Ok(())
+}).unwrap();
+```
+
+Logger errors propagate unchanged, stop further events, and return no partial
+owned model. No strict-mode switch is introduced. Use `set_compliance_options`
+with `MimeComplianceOptions` to select transport/storage severity and a
+per-violation report cap (zero means unlimited). `enabled_validators` selects
+`MimeComplianceValidators::BASE64`, `QUOTED_PRINTABLE`, and `UU_ENCODE`;
+combine flags with `|`, use `ALL` (the default), or `NONE` to keep only
+structural and raw-byte checks. Disabling a validator changes reporting, not
+parsing or recovery. Budgets reset per operation,
+including each mbox message; the first suppressed issue emits one
+`TooManyComplianceIssues` marker. `CappedMimeComplianceLogger` exposes the
+same quota mechanism for independent use. Loggers retaining issues should
+also limit their own storage.
+
+The complete violation identifiers, severity/category mappings, descriptions,
+and remarks are ported. Issues carry original offsets, one-based lines and
+byte columns, and an exact/line-start/element-start position kind. Reporting
+currently covers raw-header syntax and line format, repeated/missing message
+fields, MIME metadata, framing/depth failures, and body line format/null/high
+bytes. Header blocks are checked before their entity-begin event; body checks
+are incremental. Streaming validators check Base64 alphabet/padding/quantums,
+quoted-printable escapes/soft breaks, and UU markers/file modes/encoded lines.
+They preserve the original encoded bytes and finish before the part's end
+event. The newline before a MIME or mbox boundary is validated even though it
+is excluded from content callbacks; the marker itself is not encoded content.
+Diagnostics retain MimeKit's per-line suppression of repeated malformed-byte
+findings, in addition to the configurable per-violation quotas.
+
+Quoted-printable literal runs use bulk byte searches; UU scanning skips whole
+runs where classification is no longer needed. Base64 validation currently uses
+MimeKit's table-driven scalar logic, not its separate SIMD validator kernels.
+Deep address validation is not yet ported. An empty report is not a guarantee
+of full MIME compliance.
+
+Accepting a diagnostic preserves the same default recovery as an unlogged read.
+Source, callback, logger, and resource-limit failures remain fatal. Ordinary methods
+without a logger perform no compliance scans or allocate reporting state and
+retain the SIMD fast path; logged reads do additional inspection.
+
+```rust
+use mimecraft::MimeParser;
+
+let mut parser = MimeParser::new(b"Subject: example\r\n\r\nbody".as_slice());
+let message = parser.parse_message().unwrap();
+assert!(message.headers().contains("Subject"));
+assert!(!message.body().unwrap().headers().contains("Subject"));
+```
+
+`MimeReader::read_headers` reads a standalone raw header block and emits one
+`MimeEvent::Headers`, without entity/message events or MIME metadata validation.
+The event owns the complete `HeaderList` and reports original start/end positions
+and a borrowed `body_separator`: CRLF, LF, lone CR at EOF, or `None` when EOF ends
+the headers without a separator. Empty input produces an empty block;
+unterminated and malformed records retain their exact bytes. Like the existing
+raw `HeaderParser`, this accepts even an invalid first record, unlike MimeKit's
+higher-level parser. This does not add recovery to entity/message loading.
+
+`MimeParser::parse_headers` returns that ordered list, including Content-* fields,
+without partitioning or constructing a body. It consumes the separator but does
+not store it in `HeaderList`; use the reader event when separator metadata matters.
+Both operations stop without consuming body bytes, even when the buffered source
+has already prefetched them. The input limit includes headers and their separator
+but not the body; the per-record limit includes folds. Depth and message-part
+interpretation do not apply. EOF at the exact input limit succeeds, but exhausting
+the limit while more header input remains is an error, not an artificial EOF.
+
+```rust
+use mimecraft::MimeParser;
+
+let mut parser = MimeParser::new(b"Subject: example\r\n\r\nbody".as_slice());
+let headers = parser.parse_headers().unwrap();
+assert!(headers.contains("Subject"));
+assert_eq!(parser.position().offset, 20);
+assert_eq!(parser.into_inner(), b"body");
+```
+
+Both types provide `with_options(source, MimeEntityParseOptions)`, `options`,
+`position`, `get_ref`, and `into_inner`. Constructors perform no I/O; zero
+limits fail immediately. Each installed source supports one standalone operation,
+or the status-group or mbox iteration modes described below. Standalone header reading
+stops at the separator or EOF, while entity/message reading runs through EOF.
+Repeating a standalone operation returns `InvalidInput`, including after failure.
+Source and callback errors propagate without rollback or a partial model;
+callback failure stops further events, and interrupted source reads retry.
+After failure, begin events may remain unmatched. Borrow an existing source
+with `&mut` to retain external ownership, and keep the same buffered source
+when recovering it with `into_inner` so read-ahead is not discarded.
+
+`replace_source(source)` starts a new operation on an existing reader or parser,
+including after failure. It preserves options, resets positions to offset zero
+and line one, and clears completion/failure state. It returns the previous
+buffered source at its current position, retaining unread read-ahead bytes;
+neither source is read, sought, flushed, or closed. This is the idiomatic
+owned-source adaptation of MimeKit's `SetStream`, not resumption of a partial
+parse. Previously returned models retain their independent owned content.
+The replacement must have the same Rust source type; construct a new reader
+or parser to change that type.
+
+`is_end_of_stream()` reports whether a successful operation finished at an
+observed EOF, without doing I/O. It starts false and becomes true after successful
+entity/message parsing. Header reading reports true only when EOF terminated
+the block; a separator stops reading without probing the following byte, even
+when that separator happens to be the source's final bytes. Thus false does not
+prove more input exists. Parse/source/callback failures do not mark successful
+completion, and source replacement resets the status. In mbox mode, only the
+last message or an empty archive marks EOF, not a next-message delimiter.
+Completion does not permit repeating a standalone operation.
+
+`MimeParser::parse_status_group()` selects incremental delivery-status group
+parsing and returns `Some(HeaderList)` for each nonempty group, then `None` at
+EOF. `MimeReader::read_status_group(callback)` provides the same operation as
+one `MimeEvent::Headers` and a true return value, or false without an event at
+EOF. Leading, repeated, and trailing CRLF/LF blank lines are skipped; a lone
+trailing CR creates no group. Raw fields and unterminated final records use the
+same header scanner as standalone parsing.
+
+Group offsets and line positions include all earlier groups and skipped lines.
+The input limit is cumulative across calls, including separators; the header
+limit applies to individual folded records. Each call stops after its group's
+separator or EOF without reading the next group's bytes. Only the current group
+is buffered by the parser. Fields are not interpreted or transfer-decoded;
+callers can recover a separately encoded remainder through `into_inner`.
+Repeated group reads after EOF return `None`/false without I/O. Source, parse,
+or callback failures prevent further reads until source replacement.
+Other operation modes cannot be mixed with group iteration on the same source.
+
+```rust
+use mimecraft::MimeParser;
+
+let input = b"Reporting-MTA: dns; example.com\r\n\r\n\
+              Final-Recipient: rfc822; user@example.com\r\n\r\n";
+let mut parser = MimeParser::new(input.as_slice());
+assert!(parser.parse_status_group().unwrap().unwrap().contains("Reporting-MTA"));
+assert!(parser.parse_status_group().unwrap().unwrap().contains("Final-Recipient"));
+assert!(parser.parse_status_group().unwrap().is_none());
+```
+
+`MimeParser::parse_mbox_message()` explicitly selects Unix mbox iteration and
+returns `Some(MimeMessage)` per message, then `None` at EOF.
+`MimeReader::read_mbox_message(callback)` returns true/false and emits a raw
+`MimeEvent::MboxMarker` before that message's normal events. Marker bytes include
+their LF/CRLF ending and have original start/end positions; they are not message
+headers and are not stored in owned models.
+
+```rust
+use mimecraft::MimeParser;
+
+let archive = b"From sender@example.com\nSubject: first\n\nbody\n\
+                From other@example.com\nSubject: second\n\nlast\n";
+let mut parser = MimeParser::new(archive.as_slice());
+assert!(parser.parse_mbox_message().unwrap().is_some());
+assert!(parser.parse_mbox_message().unwrap().is_some());
+assert!(parser.parse_mbox_message().unwrap().is_none());
+```
+
+Like MimeKit, a line beginning with exactly `From ` is a marker, without
+validating its sender/date. Initial non-marker lines are skipped under the
+input budget; nonempty input without a marker and unterminated marker lines
+are errors. `>From ` remains unchanged ordinary content. The newline preceding
+a next marker belongs to framing; EOF retains trailing content newlines.
+Content-Length-based mbox variants and automatic unescaping are not implemented.
+
+Positions remain archive-relative. The input budget resets per message,
+including its envelope and framing (and initially skipped data), but excludes
+next-marker lookahead. `max_header_length` also bounds complete marker lines.
+Other resource limits remain in force. Truncated headers and multiparts recover
+at actual EOF or the next-message marker.
+Failures stop iteration without resynchronizing; modes cannot be mixed until
+source replacement. Previously returned messages remain independent.
+
+The reader consumes just five bytes of the next marker as lookahead, not its
+remaining line or headers. `pending_input()` exposes these bytes (`b"From "`).
+`into_parts()` returns `(source, pending)`; replay `pending` before `source`
+when resuming elsewhere. `get_ref`/`into_inner` expose only the physical buffered
+source, and `replace_source` discards reader-owned lookahead, so save
+`pending_input()` first if extracting a partial archive.
+
+This is **not yet complete MimeKit reader/parser parity**. Entity/message parsing
+uses default malformed-message recovery and optional compliance diagnostics;
+Content-Length handling, persistent-source parsing, and async APIs remain
+deferred. `HeaderList::load` continues to support independent raw header blocks.
+
+Zero limits return `InvalidInput` before I/O. Exceeded limits return `InvalidData`.
+Entity/message parsing also rejects invalid initial headers with `InvalidData`,
+and empty input with `UnexpectedEof`.
+Header-length errors retain `HeaderTooLong`.
 Interrupted reads retry; other I/O failures propagate without returning a
 partial tree or restoring the source position. Retain the buffered reader
 after a failure; retries require restarting at the entity's beginning.
@@ -3403,6 +3688,12 @@ groups contain per-recipient fields. Extra blank CRLF/LF lines are skipped,
 and an unterminated final record is accepted. Ordered raw fields, folds,
 duplicates, malformed records, and non-UTF-8 bytes follow `HeaderList` behavior.
 Required fields, status codes, and recipient addresses are not validated.
+Group parsing now uses the shared incremental `MimeParser` path. Header offsets
+count from the start of the outer decoded body, including preceding groups and
+blank lines, not from each group's start or from encoded wire bytes. A separately
+decoded remainder has its own zero-based origin. To process already decoded
+input one group at a time, use `MimeParser::parse_status_group` directly;
+`status_groups()` still buffers the decoded body and returns all groups.
 
 For Office365 compatibility, an active group's Base64/QP/UU transfer-encoding
 field decodes all remaining content once. This may occur after the first group;
@@ -3676,9 +3967,8 @@ ownership and metadata operations.
 
 As in MimeKit's MessagePart-based implementation, an existing message body is
 retained and serialized, not silently stripped. Supply a message with no body
-when authoring returned headers. Present messages use the existing strict
-parser and require an inner header/body separator even without body bytes;
-header-only payloads lacking that separator are not recovered automatically.
+when authoring returned headers. Present messages recover interrupted inner
+headers without a separator by default.
 Loading partitions inner Content-* headers onto the inner body as usual.
 An absent message remains distinct from a present empty message.
 
@@ -3753,13 +4043,14 @@ Each becomes a `MessagePart`
 whose inner message owns its non-Content headers and whose body owns its
 Content-* headers. Input, header, and depth limits apply throughout the tree;
 each message-part wrapper and embedded body root counts toward entity depth.
-No payload means `message: None`; a present message requires its own complete
-header/body separator. Delimiter-only blank lines do not create messages.
+An enclosing marker with no payload means `message: None`; standalone EOF
+constructs an empty embedded message. Interrupted headers recover without a
+separator. Delimiter-only blank lines do not create messages.
 
 Set `MimeEntityParseOptions { parse_message_parts: false, ..Default::default() }`
 to preserve the previous opaque behavior. Encoded wrappers, unrecognized
 message subtypes remain opaque regardless of this flag. Returned-header parts
-share the strict inner separator requirement described above. To interpret an
+share the same recovery described above. To interpret an
 opaque encoded attachment explicitly, open
 its decoded `MimeContent` and pass the reader to `MimeMessage::load`; that
 separate load has its own limits rather than sharing the outer parse budget.
@@ -5681,10 +5972,42 @@ typed Content-Type/Content-Disposition parsing, construction, editing, and
 folded ASCII serialization with RFC 2231 parameters. Single/text/multipart
 ownership and writing, complete entity-tree loading, a message wrapper
 with raw header partitioning and load/write APIs, and explicit attached-message
-ownership and writing are also implemented.
+ownership and writing are also implemented. A synchronous event reader and
+owned-model parser share default malformed-message recovery and explicit limits.
+Persistent-source behavior remains deferred. Explicit mbox iteration and
+header-only EOF loading are implemented.
 MimeKit.Cryptography, including DKIM, ARC, and DMARC, is excluded.
 `LegacyMimeParser` and its associated event-argument types will not be ported;
 parser behavior is being adapted from the current `MimeReader` implementation.
+
+Recovery coverage includes frozen topology/raw-content snapshots generated from
+the current MimeKit reader/parser sources, exercised with and without logging
+across small and large refills. The ported scanning tests cover randomized and
+exhaustive kernel inputs, generated MIME/mbox messages, and all 202 original
+files in `tests/data/messages` and `tests/data/mbox`. Original compliance fixtures
+in `tests/data/compliance` exercise LF/CRLF issue kinds, ordering, and positions.
+Body null/8-bit diagnostics deliberately identify the offending byte rather
+than MimeKit's buffer-dependent line-fragment start.
+Additional ports cover reader content-callback ranges, physical line positions,
+empty multipart/message containers, consecutive mbox markers, and truncated
+header diagnostics. Parser cases cover truncated/raw invalid headers, bare-CR
+endings, status-group EOF behavior, and embedded-message boundary lookahead
+across short reads, including bounded probing of long mbox markers.
+The `issue1189_mbox` and `jwz_mbox` reader tests compare full nested offset trees
+against MimeKit's original Unix and DOS JSON goldens across one-byte, short,
+and full-buffer refills. They check MIME types, message/part nesting, marker and
+header offsets, octet counts, and content-line counts. The recorder adapts
+MimeKit's end-callback clamping of empty-body header separators to Rust's
+physical header-end positions reported at entity begin, including ancestors
+ending at the same delimiter. Closing-marker newlines shared with an immediate
+parent or mbox delimiter are excluded from entity-end positions; EOF retains them.
+Tests retain MimeKit's names in
+snake_case and applicable inline comments; synchronous cases also cover the
+input-fragmentation scenarios from its asynchronous variants.
+This is not yet the full upstream MimeReader/MimeParser test port; remaining
+cases include parser round-trip fixtures and additional reader lifecycle tests.
+Content-Length-aware mbox parsing and its golden comparisons remain unsupported.
+No LegacyMimeParser tests are included.
 
 Async adapters remain deferred while message parsing and serialization APIs
 stabilize. Parsing and
@@ -5837,13 +6160,22 @@ Nonempty preambles are terminated even for empty containers; invalid container
 encodings and overlapping ancestor boundaries produce explicit errors instead
 of ambiguous output. Existing leaf serializers and newline filters are reused;
 body collision scanning and signed/truncated-container special cases are deferred.
-Entity loading adapts `MimeReader.cs`'s iterative construction, whole-line
-boundary recognition, and withheld delimiter-newline semantics, plus
-`MimeParser.cs`'s raw headers and stored-encoding content construction.
+Entity loading uses a shared event reader and owned-model parser, adapting
+`MimeReader.cs`'s iterative traversal, line-anchored boundary recognition,
+content callbacks, and withheld delimiter-newline semantics, plus
+`MimeParser.cs`'s construction stack, raw headers, and stored-encoding content.
+Rust callbacks receive owned headers and borrowed content chunks with original
+byte/line positions. Mbox iteration adapts the source's five-byte marker
+recognition, initial-line skipping, envelope events, and outer-boundary newline
+ownership. Explicit method selection replaces a format property, and limits
+reset per message. Truncated multipart frames unwind; Content-Length handling is
+deferred. Borrowed buffered content and small withheld-newline storage adapt
+`ScanContent` without copying every ordinary line; ambiguous padded
+delimiter candidates still require buffering under the input-size limit.
 In-memory cursors replace the source's memory-block/persistent-stream choice.
 Preamble endings are retained; nested epilogues exclude parent framing and
-start after their own closing marker's newline. Explicit limits and errors
-replace recovery for truncated or invalid containers in this first loader.
+start after their own closing marker's newline. Recovery preserves malformed
+metadata and truncated containers while resource/source failures remain fatal.
 Empty content always has a stream; absent-content and raw-delimiter metadata
 are not modeled. LF serialization adds an independent CRLF delimiter prefix
 after a bare body/epilogue CR to avoid losing that byte on reload.
@@ -5876,9 +6208,9 @@ unencoded message under an encoded-transfer header. Leaf traversal includes
 attached bodies. Automatic loading adapts `MimeReader.cs`'s recognized message
 subtypes, transparent-wrapper classification, and absent-message handling.
 A shared iterative stack retains multipart ancestors through message frames;
-header partitioning reuses the root-message loader's helper. Bounded line
+header partitioning reuses the root-message loader's helper. Delimiter
 lookahead keeps delimiter framing out of embedded header separators. Explicit
-errors replace depth-limit fallback and incomplete-message recovery.
+errors replace depth-limit fallback; incomplete messages recover by default.
 Returned-header containers adapt `TextRfc822Headers.cs`,
 `UnitTests/TextRfc822HeadersTests.cs`, and the text/rfc822-headers and
 message/global-headers classification in `ParserOptions.cs` and `MimeReader.cs`.
@@ -5886,8 +6218,8 @@ Composition replaces inheritance and visitor dispatch while reusing
 `MimeWriter.cs`'s ordinary message-body traversal: existing bodies are not
 discarded. The text media-type exception is explained inline and shares
 validation between metadata edits and writing. Transparent parsing uses the
-same bounded message frames; encoded wrappers remain opaque. Unlike the
-source's recovery paths, present messages still require an inner separator.
+same bounded message frames; encoded wrappers remain opaque. Present messages
+recover missing inner separators at EOF and enclosing boundaries by default.
 Partial-message metadata and joining adapt `MessagePartial.cs`,
 `UnitTests/MessagePartialTests.cs`, and the RFC 2046 fixtures in
 `UnitTests/TestData/partial`. Number-validation, stream-chaining, and RFC header
@@ -6096,6 +6428,11 @@ atomic replacement replace mutable cached collections and event-driven writes.
 Resource limits and explicit errors replace swallowed parse failures, while
 retained inner encoding declarations cause re-encoding on replacement rather
 than stale metadata over plain recipient groups.
+The reader/parser share a bounded header scanner for standalone blocks and
+incremental status groups. Empty blocks implement the source's blank-line
+skipping and trailing-CR behavior without a second lexical parser. Cumulative
+positions and budgets survive between groups; switching to a separately
+decoded remainder starts a new source origin.
 Disposition-notification fields adapt `MessageDispositionNotification.cs`,
 `HeaderList.cs`, and `UnitTests/MessageDispositionNotificiationTests.cs`
 (source spelling), with global-subtype classification from `ParserOptions.cs`.
@@ -6307,7 +6644,11 @@ from the current decoded values.
 
 The default `simd` feature selects AVX2 or SSSE3 on x86/x86-64 and NEON on
 AArch64 after CPU feature detection, for both Base64 and UU codecs.
-Other CPUs use the scalar implementation.
+MIME content scanning uses SSE2 or AVX2 with POPCNT on x86/x86-64 and NEON on
+AArch64 to find boundary candidates and count/classify newlines in one pass.
+CPU selection is retained across messages and source replacement. These
+non-validating scans do not implement MimeKit's body compliance diagnostics.
+Other CPUs use scalar fallbacks.
 32-bit ARM is not accelerated; AVX-512 is intentionally omitted.
 
 The Base64 NEON encoder uses 48-byte deinterleaved loads for bulk encoding and a
@@ -6333,8 +6674,9 @@ Their safe entry points require a privately constructed, CPU-feature-checked
 capability token. Loads are
 bounds-checked, stores target fixed-size local arrays, and appending decoded or
 encoded bytes uses safe `Vec` operations. Disabling default features removes the
-SIMD module and forbids unsafe code in mimecraft itself. This setting does not
-disable acceleration or unsafe code inside dependencies such as `encoding_rs`:
+SIMD modules and forbids unsafe code in mimecraft itself. This setting does not
+disable acceleration or unsafe code inside dependencies such as `encoding_rs`
+and `memchr`:
 
 ```toml
 [dependencies]
@@ -6400,9 +6742,10 @@ generation is not part of normal library builds.
 ```text
 cargo bench --bench base64 --no-default-features
 cargo bench --bench base64
+cargo bench --bench mime_reader
 ```
 
-The benchmark, which needs no extra benchmarking framework, compares scalar-only and runtime-dispatched
+The base64 benchmark, which needs no extra benchmarking framework, compares scalar-only and runtime-dispatched
 builds. It also retains the original match-based decoder as a baseline for the
 rank table. Workloads use a deterministic 1 MiB payload, reused output buffers,
 and 1-byte, line-sized, and 4 KiB chunks; decoding includes unwrapped, MIME-wrapped,
@@ -6410,6 +6753,16 @@ and noisy input. MIME-wrapped input uses CRLF; unwrapped input removes both CR
 and LF. Rates count input bytes and report the median of five timed
 samples after warm-up. These are in-memory microbenchmarks, not message-parser or
 end-to-end I/O throughput, and results depend on the CPU and compiler.
+
+The reader benchmark measures wrapped attachment data, long lines, multipart
+messages, and mbox batches of small messages and attachments. It compares
+reader callbacks with owned-model parsing, including model construction/drop,
+and tests slice sources plus 8 KiB/64 KiB buffered sources for leaf workloads.
+Fixtures are constructed outside timing, with warm-up and five samples of at
+least 100 ms. Results count input bytes; mbox reader cases also report messages
+per second. These are cached in-memory workloads without decoding, storage,
+network I/O, or application processing. They are not a throughput guarantee or
+a comparison against MimeKit; measure representative server workloads too.
 
 The UU backend comparison is an ignored unit test so it can force scalar,
 SSSE3, AVX2, or NEON independently on supported hardware:

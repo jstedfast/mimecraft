@@ -5,7 +5,7 @@
 //! This crate is under development. Currently it provides incremental MIME
 //! Base64, quoted-printable, UU, yEnc, and pass-through codecs, plus parameter
 //! percent and RFC 2047 B/Q payload codecs, and owned message/MIME tree I/O.
-//! Encoded message-wrapper interpretation and truncated-structure recovery are deferred.
+//! Encoded message-wrapper interpretation is deferred.
 //! Cryptography is outside the scope of this crate.
 //! Wrapping body encoders default to CRLF line endings, with LF available through
 //! [`encodings::NewLineFormat`]. Decoders accept both CRLF and LF.
@@ -96,7 +96,26 @@
 //! retaining transfer encoding, multipart framing, and complete enclosed messages.
 //! [`MimeEntity::load`] reads complete entity trees from buffered sources into
 //! owned body streams, preserving encoded bytes and raw headers with explicit
-//! [`MimeEntityParseOptions`] limits. Recovery of truncated entities is deferred.
+//! [`MimeEntityParseOptions`] limits and default truncated-header/container recovery.
+//! [`MimeComplianceLogger`] optionally receives [`MimeComplianceIssue`] values
+//! through the reader/parser `*_with_logger` methods; logger errors abort unchanged.
+//! [`MimeComplianceOptions`] selects severity context and per-violation quotas.
+//! [`MimeComplianceValidators`] selects streaming Base64, quoted-printable, and
+//! UU content checks. Deep address validation remains unported.
+//! [`MimeReader`] emits synchronous structural and borrowed content events with
+//! original byte offsets and line numbers. [`MimeParser`] builds the owned
+//! models from those events; both entity and message load APIs use this path.
+//! [`MimeReader::read_headers`] and [`MimeParser::parse_headers`] read standalone
+//! raw header blocks with limits and offsets, leaving buffered body bytes unread.
+//! Reader/parser source replacement preserves limits and returns the old buffered
+//! source; completion queries report observed EOF without performing I/O.
+//! [`MimeParser::parse_status_group`] incrementally reads delivery-status groups
+//! with cumulative input limits and offsets, skipping empty separator lines.
+//! [`MimeParser::parse_mbox_message`] reads mbox archives one message at a time
+//! with per-message budgets and archive-relative offsets. The reader emits raw
+//! envelope markers and borrows ordinary content directly from buffered input.
+//! [`MimeReader::into_parts`] preserves next-marker lookahead when extracting
+//! a partially read source.
 //! [`MimeMessage`] owns message headers and an optional body tree. Loading
 //! partitions root Content-* headers onto the body, preserving raw records;
 //! writing interleaves their loaded order without generating fields.
@@ -261,9 +280,11 @@
 //! RFC 2231 parameters, folding, and selectable CRLF/LF endings.
 //!
 //! The default `simd` feature accelerates Base64 and UU with runtime-detected
-//! SSSE3/AVX2 on x86/x86-64 and NEON on AArch64. Other CPUs use scalar codecs. Disable
-//! default features to disable mimecraft's SIMD and forbid unsafe code in this
-//! crate. Dependencies such as `encoding_rs` have their own acceleration policies.
+//! SSSE3/AVX2, and MIME content scanning with SSE2/AVX2, on x86/x86-64.
+//! AArch64 uses NEON; other CPUs use scalar fallbacks. Disable default features
+//! to disable mimecraft's SIMD and forbid unsafe code in this crate.
+//! Dependencies such as `encoding_rs` and `memchr` have their own acceleration
+//! policies.
 //!
 //! ```
 //! use mimecraft::encodings::{Base64Decoder, Base64Encoder};
@@ -319,6 +340,7 @@ mod message_id;
 mod message_part;
 mod message_partial;
 mod message_priority;
+mod mime_compliance;
 mod mime_content;
 mod mime_entity;
 mod mime_entity_load;
@@ -326,8 +348,10 @@ mod mime_entity_prepare;
 mod mime_entity_write;
 mod mime_iterator;
 mod mime_message;
+mod mime_parser;
 mod mime_part;
 mod mime_part_write;
+mod mime_reader;
 mod mime_types;
 mod mime_types_data;
 mod mime_version;
@@ -386,16 +410,24 @@ pub use message_partial::{MessagePartial, MessagePartialError};
 pub use message_priority::{
     MessageImportance, MessagePriority, MessagePriorityParseError, XMessagePriority,
 };
+pub use mime_compliance::{
+    CappedMimeComplianceLogger, MimeComplianceCategories, MimeComplianceContext,
+    MimeComplianceIssue, MimeComplianceLogger, MimeComplianceOptions, MimeCompliancePositionKind,
+    MimeComplianceSeverity, MimeComplianceValidators, MimeComplianceViolation,
+};
 pub use mime_content::MimeContent;
 pub use mime_entity::{AttachmentEditError, Attachments, BodyParts, LeafParts, MimeEntity};
-pub use mime_entity_load::MimeEntityParseOptions;
 pub use mime_entity_prepare::MimePrepareError;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};
 pub use mime_message::{MessageAddressIssue, MessageAddresses, MessageRecipients, MimeMessage};
+pub use mime_parser::MimeParser;
 pub use mime_part::{
     BestEncodingError, FileNameEditError, InvalidContentDuration, MimePart, PartPrepareError,
 };
 pub use mime_part_write::MimePartWriteOptions;
+pub use mime_reader::{
+    MimeContentKind, MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimePosition, MimeReader,
+};
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};
 pub use mime_version::{MimeVersion, MimeVersionParseError, MimeVersionParseErrorKind};
 pub use multipart::{Multipart, MultipartError};

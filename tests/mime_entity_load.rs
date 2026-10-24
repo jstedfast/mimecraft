@@ -3,9 +3,8 @@
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 
 use mimecraft::{
-    ContentEncoding, ContentHeaderParseError, Header, HeaderTooLong, MimeContent, MimeEntity,
-    MimeEntityParseOptions, MimePart, MimePartWriteOptions, Multipart, MultipartError, TextPart,
-    UnknownContentEncoding, encodings::NewLineFormat,
+    ContentEncoding, Header, HeaderTooLong, MimeContent, MimeEntity, MimeEntityParseOptions,
+    MimePart, MimePartWriteOptions, Multipart, TextPart, encodings::NewLineFormat,
 };
 
 fn load(bytes: &[u8]) -> MimeEntity {
@@ -248,9 +247,12 @@ fn every_input_split_and_one_byte_reads_produce_the_same_tree() {
 }
 
 #[test]
-fn truncated_or_misplaced_structure_is_explicitly_rejected() {
+fn truncated_structure_recovers_but_empty_input_is_not_an_entity() {
+    assert_eq!(
+        MimeEntity::load(&mut b"".as_slice()).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
     for input in [
-        "",
         "X: value",
         "X: value\r\n",
         "\r",
@@ -259,29 +261,21 @@ fn truncated_or_misplaced_structure_is_explicitly_rejected() {
         "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\nbody",
         "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\nbody\r\n--B--\r\n",
     ] {
-        assert_eq!(
-            MimeEntity::load(&mut input.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof,
-            "{input:?}"
-        );
+        assert!(MimeEntity::load(&mut input.as_bytes()).is_ok(), "{input:?}");
     }
     for input in [
         "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n--b--\r\n",
         "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: multipart/mixed; boundary=c\r\n\r\n--b--\r\n",
         "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: multipart/mixed; boundary=c\r\n\r\n--c\r\n\r\nbody\r\n--b--\r\n",
     ] {
-        assert_eq!(
-            MimeEntity::load(&mut input.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::InvalidData,
-            "{input:?}"
-        );
+        assert!(MimeEntity::load(&mut input.as_bytes()).is_ok(), "{input:?}");
     }
     let inner_closed_outer_missing = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: multipart/mixed; boundary=c\r\n\r\n--c--\r\n";
     assert_eq!(
-        MimeEntity::load(&mut &inner_closed_outer_missing[..])
-            .unwrap_err()
-            .kind(),
-        io::ErrorKind::UnexpectedEof
+        multipart(&load(inner_closed_outer_missing))
+            .children()
+            .len(),
+        1
     );
 }
 
@@ -304,28 +298,42 @@ fn first_metadata_errors_are_not_masked_by_valid_duplicates() {
         ),
     ];
     for &(input, kind) in cases {
-        let error = MimeEntity::load(&mut &input[..]).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        let cause = error.get_ref().unwrap();
+        let entity = load(input);
         match kind {
-            "type" => assert!(cause.downcast_ref::<ContentHeaderParseError>().is_some()),
-            "encoding" => assert!(cause.downcast_ref::<UnknownContentEncoding>().is_some()),
-            "boundary" => assert!(cause.downcast_ref::<MultipartError>().is_some()),
+            "type" => {
+                assert!(
+                    entity
+                        .headers()
+                        .get("Content-Type")
+                        .unwrap()
+                        .parse_content_type()
+                        .is_err()
+                );
+                assert_eq!(bytes(&entity), b"body");
+            }
+            "encoding" => {
+                assert_eq!(
+                    part(&entity).content().encoding(),
+                    ContentEncoding::Unspecified
+                );
+                assert_eq!(bytes(&entity), b"body");
+            }
+            "boundary" => {
+                assert!(multipart(&entity).children().is_empty());
+                assert_eq!(multipart(&entity).preamble(), b"body");
+            }
             _ => unreachable!(),
         }
     }
 }
 
 #[test]
-fn multipart_encoding_and_ancestor_boundary_checks_match_writer_rules() {
+fn multipart_loading_recovers_encodings_and_overlapping_boundaries() {
     for encoding in ["base64", "quoted-printable", "x-uuencode", "unknown"] {
         let raw = format!(
             "Content-Type: multipart/mixed; boundary=b\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n--b--\r\n"
         );
-        assert_eq!(
-            MimeEntity::load(&mut raw.as_bytes()).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
+        assert!(multipart(&load(raw.as_bytes())).children().is_empty());
     }
     for encoding in ["7bit", "8bit", "binary", "=?us-ascii?q?7bit?="] {
         let raw = format!(
@@ -337,9 +345,7 @@ fn multipart_encoding_and_ancestor_boundary_checks_match_writer_rules() {
         let raw = format!(
             "Content-Type: multipart/mixed; boundary={outer}\r\n\r\n--{outer}\r\nContent-Type: multipart/mixed; boundary={inner}\r\n\r\n"
         );
-        let error = MimeEntity::load(&mut raw.as_bytes()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("ancestor"));
+        assert_eq!(multipart(&load(raw.as_bytes())).children().len(), 1);
     }
     let raw = b"Content-Type: multipart/mixed; boundary=o\r\n\r\n--o\r\nContent-Type: multipart/mixed; boundary=s\r\n\r\n--s--\r\n\r\n--o\r\nContent-Type: multipart/mixed; boundary=s\r\n\r\n--s--\r\n\r\n--o--\r\n";
     assert_eq!(multipart(&load(raw)).children().len(), 2);
