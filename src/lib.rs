@@ -29,6 +29,8 @@
 //! verbatim through [`anonymize::HeaderOptions`].
 //! [`anonymize::write_headers_with_options`] streams masked header records with
 //! selected preservation and CRLF/LF conversion, without serializing bodies.
+//! [`anonymize::write_part_content_with_options`] masks ordinary leaf content
+//! after transfer encoding and newline handling, without writing its headers.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]

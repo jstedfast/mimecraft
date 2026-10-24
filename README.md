@@ -43,6 +43,8 @@ MimeKit. The crate is not configured for publication.
 - Field-aware masking of complete raw header records, including byte masking of
   malformed records, default metadata preservation, and configurable preserved
   fields, plus masked header-list output with CRLF/LF conversion.
+- Streaming masking of ordinary part content after serialization, including
+  transfer-encoded payloads and UU wrappers.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -434,7 +436,7 @@ filters; otherwise buffered bytes or an ensured final newline can be lost.
 Reset before an independent stream. For read-side I/O, nested `FilteredReader`
 adapters handle the finalization order automatically.
 
-### Raw header masking
+### Header and part-content masking
 
 `anonymize::address_header_value(&[u8])` and
 `anonymize::unstructured_header_value(&[u8])` port MimeKit's raw-value masking
@@ -586,6 +588,28 @@ Writers finalize the newline filter and flush, but do not close the destination.
 possibly after partial output; retrying with a fresh iterator starts over.
 Writing into another filter writer does not finalize that destination's filter.
 No headers, options, or bodies are mutated or automatically authored.
+
+`anonymize::write_part_content(&mut part, output)` masks an ordinary `MimePart`'s
+serialized body without writing headers or their separator.
+`write_part_content_with_options(&mut part, output, &MimePartWriteOptions)` uses
+the ordinary content writer's encoding, width, newline, and final-newline settings.
+Masking happens **after** serialization, not on decoded bytes before encoding.
+For example, Base64 output `Q2F0\r\n` becomes `xxxx\r\n`, not Base64-encoded `xxx`.
+
+Only SPACE, TAB, CR, and LF survive; every other serialized byte becomes `x`,
+including UU wrapper keywords and filenames. Output preserves the length and
+whitespace positions of ordinary serialized content, not necessarily of stored
+or decoded bytes, and need not be a valid encoded payload. Binary serialization
+does not normalize newlines or ensure a final newline, but is still masked.
+
+Body writing uses bounded buffers and leaves headers, stored bytes, encoding
+labels, and newline hints unchanged. It starts at source offset zero and rewinds
+on success. Options and required metadata fail before I/O; read, seek, write,
+and flush errors propagate without rollback. The destination is flushed, not
+closed or finalized if it is another filter writer. Retrying starts over.
+These helpers treat even report/message payloads as opaque ordinary-part content:
+they do not apply `HeaderOptions` inside bodies, interpret status groups, or
+traverse MIME trees. Specialized report and full-message masking remain deferred.
 
 These helpers are not guaranteed removal of sensitive information. Lengths,
 syntax, escaped bytes, potential charset/encoding labels, leading content-header

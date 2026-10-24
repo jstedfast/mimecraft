@@ -1,7 +1,7 @@
 // Adapted from MimeKit's MimeAnonymizer.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-//! Byte-level masking of MIME headers for inspecting syntax and layout.
+//! Byte-level masking of MIME headers and part content for inspecting layout.
 //!
 //! [`header`] masks a complete stored record using MimeKit's default field rules.
 //! [`header_with_options`] can preserve additional fields using [`HeaderOptions`].
@@ -10,6 +10,8 @@
 //! validating, repairing, folding, or mutating headers. Each call starts fresh
 //! state; do not split one value across calls. [`write_headers`] and
 //! [`write_headers_with_options`] mask records and normalize output newlines.
+//! [`write_part_content`] and [`write_part_content_with_options`] mask ordinary
+//! leaf content after serialization, preserving only MIME whitespace.
 //!
 //! This is not guaranteed removal of sensitive information. Lengths, selected
 //! syntax, and potential encoded-word charset/encoding labels remain visible;
@@ -31,10 +33,10 @@
 //! Review output before sharing it. Use [`crate::filters::AnonymizeFilter`] for
 //! simpler byte masking that preserves only SPACE, TAB, CR, and LF.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 
 use crate::{
-    DateTimeOffset, Header, HeaderId,
+    DateTimeOffset, Header, HeaderId, MimePart, MimePartWriteOptions,
     encodings::NewLineFormat,
     filters::{AnonymizeFilter, Dos2UnixFilter, MimeFilter, Unix2DosFilter},
     io::FilteredWriter,
@@ -322,6 +324,80 @@ fn write_filtered_headers<'a, W: Write + ?Sized, F: MimeFilter>(
     }
     // MimeKit's filtered Flush finalizes filters; Rust's Write::flush does not.
     // Finish explicitly so a trailing CR held by Dos2Unix is not lost.
+    filtered.finish()
+}
+
+/// Writes masked ordinary-part content using default serialization options.
+///
+/// Omits headers and their separator. Uses [`MimePartWriteOptions::default`],
+/// not the part's stored bytes verbatim. See [`write_part_content_with_options`]
+/// for transfer encoding, newline handling, and errors.
+///
+/// # Errors
+///
+/// Propagates required metadata and source/destination I/O errors.
+pub fn write_part_content<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+) -> io::Result<()> {
+    write_part_content_with_options(part, output, &MimePartWriteOptions::default())
+}
+
+/// Writes ordinary-part content, masking its serialized bytes.
+///
+/// Adapts MimeKit's ordinary `MimePart` anonymization path: delegates to
+/// [`MimePart::write_content_to_with_options`], then replaces every output byte
+/// except SPACE, TAB, CR, and LF with `x`. This is **not** masking decoded bytes
+/// before transfer encoding. The requested encoding, encoder width, newline
+/// conversion, final-newline option, and any generated UU wrappers all take
+/// effect before masking. Matching stored/requested encodings avoid transcoding.
+///
+/// Output has the same length and MIME-whitespace positions as ordinary content
+/// serialization, not necessarily the stored or decoded body. Even UU wrapper
+/// keywords, permissions, and filenames are masked. The result need not be a
+/// valid encoded payload. Binary output skips newline conversion and ignores
+/// `ensure_new_line`, but its non-whitespace bytes are still masked.
+///
+/// No headers or separator are written. This does not traverse MIME entities,
+/// attached messages, or parse structured report bodies; such content is opaque
+/// here. [`HeaderOptions`] does not affect body masking. It does not provide
+/// MimeKit's specialized delivery-status or disposition-notification masking.
+///
+/// Uses bounded streaming buffers, without collecting the whole body. Headers,
+/// content bytes, encoding labels, and newline hints remain unchanged. Copying
+/// starts at source offset zero and rewinds on success, not to the old position.
+/// The destination is flushed, never closed; a caller-owned filter destination
+/// still requires its own finalization.
+///
+/// # Errors
+///
+/// Invalid options or required encoding/UU metadata fail before source or
+/// destination I/O, using the ordinary content writer's errors. Read, seek,
+/// write, and flush failures propagate, possibly after partial or complete
+/// masked output. Failures do not restore source position or roll back output.
+/// Retrying starts over. Buffered output is not finalized after an error.
+///
+/// ```
+/// use std::io::Cursor;
+/// use mimecraft::{ContentEncoding, MimeContent, MimePart, anonymize};
+///
+/// let mut part = MimePart::new(MimeContent::new(Cursor::new(b"Cat")));
+/// part.set_content_transfer_encoding(ContentEncoding::Base64);
+/// let mut output = Vec::new();
+/// anonymize::write_part_content(&mut part, &mut output)?;
+/// assert_eq!(output, b"xxxx\r\n"); // Masks Q2F0, not Cat.
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn write_part_content_with_options<R: Read + Seek, W: Write + ?Sized>(
+    part: &mut MimePart<R>,
+    output: &mut W,
+    options: &MimePartWriteOptions,
+) -> io::Result<()> {
+    // Place masking after WriteContent, as in MimeKit, so transfer-encoded
+    // payloads and generated wrappers retain only their whitespace layout.
+    let mut filtered = FilteredWriter::new(output, AnonymizeFilter::new());
+    part.write_content_to_with_options(&mut filtered, options)?;
+    // The part writer flushes its destination, but does not finalize our filter.
     filtered.finish()
 }
 
