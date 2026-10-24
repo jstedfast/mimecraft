@@ -4,9 +4,10 @@
 use std::io::{self, BufRead, Cursor, Read, Seek, Write};
 
 use crate::{
-    Attachments, BodyParts, Header, HeaderList, LeafParts, MessageImportance, MessagePriority,
-    MessagePriorityParseError, MimeEntity, MimeEntityParseOptions, MimePart, MimePartWriteOptions,
-    TextBodyError, TextFormat, XMessagePriority,
+    Attachments, BodyParts, Header, HeaderList, LeafParts, MessageId, MessageIdParseError,
+    MessageImportance, MessagePriority, MessagePriorityParseError, MimeEntity,
+    MimeEntityParseOptions, MimePart, MimePartWriteOptions, References, TextBodyError, TextFormat,
+    XMessagePriority,
 };
 
 /// An owned message with raw message headers and an optional MIME body tree.
@@ -24,6 +25,8 @@ use crate::{
 /// [`Self::headers`] and [`Self::headers_mut`].
 /// Importance and priority conveniences read those raw headers on every call;
 /// missing fields mean Normal, while invalid present values return errors.
+/// Identifier and reply-threading conveniences likewise read current headers,
+/// with explicit parse errors and assignment validation before edits.
 ///
 /// The body and every descendant share source type `R`. Ownership replaces
 /// disposal and parent tracking. Body removal returns the old tree without
@@ -81,6 +84,198 @@ impl<R> MimeMessage<R> {
     /// Edits message headers without moving fields to or from the body.
     pub fn headers_mut(&mut self) -> &mut HeaderList {
         &mut self.headers
+    }
+
+    /// Reads the first Message-Id header without decoding encoded words.
+    ///
+    /// Returns `None` only when absent. Uses [`MessageId::parse_prefix`], like
+    /// MimeKit's message-ID getter: suffix bytes after a bracketed ID are ignored.
+    /// Raw edits are visible immediately; later duplicates and body headers are
+    /// not inspected. This does not validate the identifier for authoring.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first header's parse error, rather than MimeKit's null fallback.
+    /// Offsets are relative to that header's raw value.
+    pub fn message_id(&self) -> Result<Option<MessageId>, MessageIdParseError> {
+        self.identifier("Message-Id")
+    }
+
+    /// Assigns Message-Id using [`MessageId::from_value`]'s compatibility rules.
+    ///
+    /// Validates before editing, even when the value compares equal. An equal
+    /// normalized identifier leaves the first header and any duplicates intact.
+    /// Otherwise replaces all occurrences at the first slot, or appends if absent.
+    /// Malformed existing values are replaced. No source I/O occurs.
+    ///
+    /// Newly written headers use angle brackets, UTF-8, and CRLF, without
+    /// folding or a length limit, matching MimeKit's single-ID formatting.
+    /// No identifier is generated. Remove raw occurrences to restore absence.
+    /// This is not strict RFC validation or sanitization of existing headers.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignment values leave all headers unchanged. Error offsets
+    /// refer to the supplied string.
+    pub fn set_message_id(&mut self, value: &str) -> Result<(), MessageIdParseError> {
+        self.set_identifier("Message-Id", value)
+    }
+
+    /// Reads the first Resent-Message-Id using [`Self::message_id`]'s rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first header's parse error without checking later duplicates.
+    pub fn resent_message_id(&self) -> Result<Option<MessageId>, MessageIdParseError> {
+        self.identifier("Resent-Message-Id")
+    }
+
+    /// Assigns Resent-Message-Id independently using [`Self::set_message_id`]'s rules.
+    ///
+    /// Does not create a resent-header block or change any other field.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignment values leave all headers unchanged.
+    pub fn set_resent_message_id(&mut self, value: &str) -> Result<(), MessageIdParseError> {
+        self.set_identifier("Resent-Message-Id", value)
+    }
+
+    /// Reads the first bracketed identifier from the first In-Reply-To header.
+    ///
+    /// Uses [`References`], not the Message-Id prefix grammar: prose, comments,
+    /// and quoted prose are skipped; bare identifiers are not returned.
+    /// Missing headers or values with no candidates return `None`. Only the
+    /// first iterator result is inspected, not later candidates or duplicates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error encountered before the first valid identifier rather
+    /// than silently skipping it. Offsets refer to the first header's raw value.
+    /// Use [`References::new`] directly to continue scanning after an error.
+    pub fn in_reply_to(&self) -> Result<Option<MessageId>, MessageIdParseError> {
+        self.header_references("In-Reply-To").next().transpose()
+    }
+
+    /// Assigns or removes In-Reply-To without updating References.
+    ///
+    /// `Some` follows [`Self::set_message_id`]'s validation, formatting, and
+    /// equality rules, comparing with [`Self::in_reply_to`]. An equal first ID
+    /// therefore preserves other IDs in that same raw header. `None` removes
+    /// every occurrence, including malformed values and duplicates.
+    ///
+    /// # Errors
+    ///
+    /// Invalid assignment values leave all headers unchanged.
+    pub fn set_in_reply_to(&mut self, value: Option<&str>) -> Result<(), MessageIdParseError> {
+        match value {
+            Some(value) => self.set_identifier("In-Reply-To", value),
+            None => {
+                self.headers.remove_all("In-Reply-To");
+                Ok(())
+            }
+        }
+    }
+
+    /// Lazily enumerates identifiers from the first References header.
+    ///
+    /// Missing headers yield an empty iterator. Order, duplicates, explicit
+    /// parse errors, recovery, and raw-value-relative offsets follow [`References`].
+    /// Later header occurrences are ignored. This borrows raw bytes without
+    /// allocating a list, caching parsed state, or inspecting body sources.
+    pub fn references(&self) -> References<'_> {
+        self.header_references("References")
+    }
+
+    /// Replaces References with an ordered sequence of assignment-style IDs.
+    ///
+    /// Each value uses [`MessageId::from_value`]; order and duplicate IDs are
+    /// retained. An empty sequence removes every References header. Otherwise
+    /// replaces all occurrences at the first slot, or appends if absent.
+    /// Unlike the single-ID setters, this always reformats a nonempty sequence.
+    ///
+    /// Output is UTF-8 with angle brackets and CRLF. Following MimeKit's
+    /// reference-header formatting, folds occur only between IDs at a soft
+    /// 78-byte target. The first ID stays on the field line, and oversized IDs
+    /// are never split or truncated. This is not a transport line-length check.
+    /// Neither In-Reply-To nor any other header or body is changed.
+    ///
+    /// # Errors
+    ///
+    /// Stops at the first invalid assignment. No headers are changed, even
+    /// when earlier values were valid. Error offsets refer to that input value.
+    ///
+    /// ```
+    /// use mimecraft::{MessageId, MimeMessage};
+    ///
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// message.set_message_id("reply@example.com")?;
+    /// message.set_in_reply_to(Some("<parent@example.com>"))?;
+    /// message.set_references(["root@example.com", "parent@example.com"])?;
+    /// let references = message.references().collect::<Result<Vec<MessageId>, _>>()?;
+    /// assert_eq!(references.len(), 2);
+    /// assert_eq!(message.message_id()?.unwrap().as_str(), "reply@example.com");
+    /// # Ok::<(), mimecraft::MessageIdParseError>(())
+    /// ```
+    pub fn set_references<I, S>(&mut self, values: I) -> Result<(), MessageIdParseError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut raw = String::from("References:");
+        let mut column = raw.len();
+        let mut empty = true;
+        for value in values {
+            let id = MessageId::from_value(value.as_ref())?;
+            let length = id.as_str().len() + 2;
+            // Fold between identifiers, never inside them. A single oversized
+            // identifier is retained, as in MimeKit's EncodeReferencesHeader.
+            if !empty && column + 1 + length > 78 {
+                raw.push_str("\r\n\t");
+                column = 1;
+            } else {
+                raw.push(' ');
+                column += 1;
+            }
+            raw.push('<');
+            raw.push_str(id.as_str());
+            raw.push('>');
+            column += length;
+            empty = false;
+        }
+        // Stage the entire replacement before touching the raw header list,
+        // so an invalid later ID cannot commit an incomplete reference chain.
+        if empty {
+            self.headers.remove_all("References");
+        } else {
+            raw.push_str("\r\n");
+            self.replace_formatted(Header::from_formatted(raw));
+        }
+        Ok(())
+    }
+
+    fn identifier(&self, field: &str) -> Result<Option<MessageId>, MessageIdParseError> {
+        self.headers
+            .get(field)
+            .map(|header| MessageId::parse_prefix(header.raw_value()).map(|(id, _)| id))
+            .transpose()
+    }
+
+    fn header_references(&self, field: &str) -> References<'_> {
+        References::new(self.headers.get(field).map_or(b"", Header::raw_value))
+    }
+
+    fn set_identifier(&mut self, field: &str, value: &str) -> Result<(), MessageIdParseError> {
+        let id = MessageId::from_value(value)?;
+        let current = if field == "In-Reply-To" {
+            self.in_reply_to()
+        } else {
+            self.identifier(field)
+        };
+        if !matches!(current, Ok(Some(current)) if current == id) {
+            self.replace_formatted(Header::from_formatted(format!("{field}: <{id}>\r\n")));
+        }
+        Ok(())
     }
 
     /// Reads the first Importance header, or Normal if absent.

@@ -124,6 +124,8 @@ MimeKit. The crate is not configured for publication.
 - Message-Id and Content-Id value parsing, with complete-value and prefix APIs,
   UTF-8 validation, domain literals, and MimeKit's compatibility workarounds.
 - Lazy References/In-Reply-To enumeration with explicit errors and recovery.
+- Message-ID and reply-threading accessors with assignment-validated, atomic
+  header replacement and reference-chain folding.
 - Separate message-ID assignment validation, with folding normalization,
   NUL/line-break checks, and original-input error offsets.
 - Ordered domain routes with complete/prefix parsing, comments, UTF-8 atoms,
@@ -1015,6 +1017,60 @@ transport preparation: **Bcc and Resent-Bcc are written as supplied**.
 Other message-specific typed convenience setters, safe complete unstructured-header
 authoring, offset-based header merging, and automatic
 transport preparation remain deferred.
+
+### Message identifiers and reply threading
+
+`MimeMessage::message_id()` and `resent_message_id()` read the first matching
+raw header using `MessageId::parse_prefix`: absence returns `None`, malformed
+values return errors, and bytes after a bracketed identifier are ignored.
+`in_reply_to()` instead scans for the first bracketed candidate using
+`References`, skipping prose, comments, and quoted prose. It returns `None`
+when absent or when no candidate exists, but reports an error encountered
+before the first valid ID rather than silently recovering. Later candidates
+and duplicate headers are not inspected.
+
+`references()` borrows the first References header as a lazy `References`
+iterator, or yields nothing when absent. It preserves identifier order,
+duplicates, explicit errors, and recovery when iteration continues. All getters
+read current raw bytes, without encoded-word decoding, caching, or body I/O.
+Diagnostic offsets are relative to the first header's raw value.
+
+```rust
+use mimecraft::{MessageId, MimeMessage};
+
+let mut message: MimeMessage = MimeMessage::new();
+message.set_message_id("reply@example.com").unwrap();
+message.set_resent_message_id("forwarded@example.com").unwrap();
+message.set_in_reply_to(Some("<parent@example.com>")).unwrap();
+message.set_references(["root@example.com", "parent@example.com"]).unwrap();
+
+let references = message.references().collect::<Result<Vec<MessageId>, _>>().unwrap();
+assert_eq!(references[1].as_str(), "parent@example.com");
+assert_eq!(message.message_id().unwrap().unwrap().as_str(), "reply@example.com");
+```
+
+Setters apply `MessageId::from_value` before changing any headers. Single-ID
+setters preserve original bytes and duplicate fields when the normalized ID
+equals the current getter result. Otherwise they replace all occurrences at
+the first slot, or append if absent, using angle brackets, UTF-8, and CRLF.
+Malformed old values are replaced. Single IDs are never folded or truncated,
+and no identifier is generated. `set_in_reply_to(None)` removes all occurrences;
+other identifiers can be removed through the raw header list.
+
+`set_references` accepts an iterator of strings, validates the entire replacement
+before editing, and always reformats nonempty input. Order and duplicate IDs
+remain, but duplicate References headers collapse at the first slot. An empty
+sequence removes all occurrences. Folds occur only between IDs at a soft
+78-byte target, counting UTF-8 bytes, brackets, and indentation. The first ID
+stays on the field line, and an oversized ID remains intact even when it exceeds
+the target. This is not the strict line-limit enforcement of address/content
+header formatters. Errors leave all headers unchanged, including when a later
+ID is invalid; their offsets refer to that input string.
+
+These APIs do not synchronize In-Reply-To with References, construct reply or
+resent messages, generate IDs, sanitize existing raw headers, or prepare mail
+for transport. Assignment validation retains MimeKit's compatibility grammar,
+not strict RFC constraints; callers remain responsible for transport suitability.
 
 ### Message importance and priority
 
@@ -3467,8 +3523,11 @@ string before trimming, unfolding, or inserting brackets; errors on synthetic
 brackets map to the trimmed value's boundary. No per-byte offset map is retained.
 Successful values contain no NUL, CR, or LF. This is still not strict RFC
 validation: unusual compatibility IDs and other local-part controls remain
-possible, and no length limit or header formatter is supplied. `FromStr` remains
-the tolerant reading API; it does not implicitly opt into assignment validation.
+possible. `MessageId` itself imposes no length limit and supplies no header
+formatter. `FromStr` remains the tolerant reading API; it does not implicitly
+opt into assignment validation.
+`MimeMessage`'s identifier and reference setters use this assignment validation
+before formatting complete headers; standalone `MessageId` remains a value type.
 
 ### References and In-Reply-To
 

@@ -57,6 +57,8 @@
 //! Original header interleaving and automatic transport preparation are deferred.
 //! [`MessageImportance`], [`MessagePriority`], and [`XMessagePriority`] add
 //! independent typed header access with checked parsing and canonical setters.
+//! Message identifiers and reply references also have raw-header-backed accessors,
+//! assignment-validated setters, and explicit parsing and recovery errors.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for
