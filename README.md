@@ -38,6 +38,8 @@ MimeKit. The crate is not configured for publication.
   removal, including markers and whitespace runs split across input chunks.
 - Byte masking that preserves MIME whitespace and byte counts, for explicit
   use in filtering pipelines rather than automatic message anonymization.
+- Raw address and unstructured-header masking with preserved quoting, escapes,
+  potential encoded-word labels, and byte layout for syntax inspection.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
   or unrestricted transport constraints.
 - A synchronous `FilteredReader` with `Read`/`BufRead` support, EOF finalization,
@@ -428,6 +430,46 @@ filter's final output through all downstream filters before finishing those
 filters; otherwise buffered bytes or an ensured final newline can be lost.
 Reset before an independent stream. For read-side I/O, nested `FilteredReader`
 adapters handle the finalization order automatically.
+
+### Raw header-value masking
+
+`anonymize::address_header_value(&[u8])` and
+`anonymize::unstructured_header_value(&[u8])` port MimeKit's raw-value masking
+helpers. Each returns a new byte buffer exactly as long as the supplied value,
+without modifying input, decoding words/charsets, repairing syntax, or
+normalizing line endings. Pass `Header::raw_value()`, not a complete record.
+These are whole-value operations; splitting a value across calls resets state.
+
+Both preserve SPACE, TAB, CR, LF, and selected `=`/`?` delimiters. Potential
+encoded-word charset and encoding labels pass through verbatim, without
+validation. Payload bytes are masked with `x`, except whitespace and `?`;
+`=` within a payload is masked unless it closes `?=`. Malformed or incomplete
+sequences follow the source's state machine, not RFC 2047 parsing rules.
+
+Address masking additionally retains `()<>[]:;@,.`, quotes, and backslashes.
+An odd backslash run causes the following byte to pass through verbatim.
+Inside unescaped quotes, CR/LF survive but spaces, tabs, and other unescaped
+text are masked. Quotes and escapes pause the encoded-word state rather than
+resetting it. Unstructured masking does not interpret quoting or escaping.
+
+```rust
+use mimecraft::{Header, anonymize};
+
+let header = Header::parse(b"To: Alice <alice@example.com>\r\n")?;
+assert_eq!(
+    anonymize::address_header_value(header.raw_value()),
+    b" xxxxx <xxxxx@xxxxxxx.xxx>\r\n",
+);
+# Ok::<(), mimecraft::HeaderParseError>(())
+```
+
+These helpers are not guaranteed removal of sensitive information. Lengths,
+syntax, escaped bytes, and even malformed potential charset/encoding labels
+remain visible. Output can retain controls, non-ASCII bytes, or invalid UTF-8;
+it is not necessarily valid MIME or safe display text. Review it before sharing.
+Use `AnonymizeFilter` when only MIME whitespace should survive masking.
+Header-type dispatch, preservation settings, Received/content-header masking,
+and complete message/entity anonymization remain deferred.
 
 ### Incremental charset conversion
 

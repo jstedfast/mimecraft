@@ -20,6 +20,8 @@
 //! removal; these operate on buffers, not I/O streams.
 //! [`filters::AnonymizeFilter`] masks non-whitespace bytes while preserving byte
 //! counts and layout; it does not provide full-message anonymization.
+//! [`anonymize`] masks raw address and unstructured header values while retaining
+//! syntax for inspection, including potential encoded-word labels and escapes.
 //! [`filters::BestEncodingFilter`] analyzes content to select a transfer encoding
 //! under an [`EncodingConstraint`] without changing the bytes.
 //! [`io::FilteredReader`] integrates filters with synchronous [`std::io::Read`]
@@ -266,6 +268,7 @@ mod address;
 mod address_encode;
 mod address_header_format;
 mod address_list;
+pub mod anonymize;
 pub mod charsets;
 mod content_disposition;
 mod content_encoding;
