@@ -2368,11 +2368,35 @@ limit without first normalizing the entire input; long whitespace runs may
 still need to be scanned.
 
 The previewer performs no HTML rendering or escaping, flowed-text unwrapping,
-charset decoding, MIME body selection, or stream I/O. Use
+legacy charset decoding, or MIME body selection. Use
 `MimeMessage::text_body(TextFormat::Plain)` for explicit decoded body selection
 and flowed conversion before previewing, or pass an already-decoded string.
-MimeKit's stream overloads and automatic TextPart preview generation remain
-deferred.
+
+`preview_reader(&mut reader)` accepts a `BufRead` UTF-8 source at its current
+position and uses the same normalization and truncation rules as `preview`.
+Unlike MimeKit's separate reader algorithm, it also normalizes U+200B through
+U+200D and trims before replacing the final character. A UTF-8 BOM is preserved
+as U+FEFF rather than stripped.
+
+```rust
+use mimecraft::text::PlainTextPreviewer;
+
+let previewer = PlainTextPreviewer::with_maximum_preview_length(5).unwrap();
+let mut input = b"Hello world".as_slice();
+assert_eq!(previewer.preview_reader(&mut input).unwrap(), "Hell\u{2026}");
+assert_eq!(input, b" world");
+```
+
+The reader path consumes complete Unicode scalars until the output reaches its
+limit or EOF, then peeks without consuming an unread suffix. Preview storage is
+bounded; long whitespace runs may still require scanning the whole source.
+Use `BufReader` for an unbuffered source and continue through the same reader
+after previewing to retain any underlying read-ahead. No seeking, draining, or
+closing occurs. Invalid or incomplete UTF-8 in the scanned prefix returns
+`InvalidData`; unread suffixes are not validated. I/O failures, including
+lookahead failures, propagate without a partial preview; interruptions retry.
+Charset/BOM detection, charset-selecting overloads, and automatic TextPart
+preview generation remain deferred.
 
 ### HTML text and attribute encoding
 

@@ -150,7 +150,8 @@
 //! [`text::TextToText`] copies decoded text verbatim with optional text headers
 //! and footers, without inserting separators or normalizing line endings.
 //! [`text::PlainTextPreviewer`] produces length-limited, whitespace-normalized
-//! previews of decoded plain text without selecting or reading MIME bodies.
+//! previews of decoded strings or buffered UTF-8 input without selecting
+//! MIME bodies.
 //! [`text::html_encode`] and [`text::html_attribute_encode`] escape character
 //! data and quoted attribute values without parsing or rendering HTML.
 //! [`text::HtmlWriter`] builds HTML in memory with checked tag/attribute

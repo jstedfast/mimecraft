@@ -4,8 +4,8 @@
 //! Text-format conversion and HTML helpers, separate from charset/transfer decoding.
 //!
 //! Provides verbatim plain-text copying with optional headers and footers,
-//! flowed-text wrapping and unwrapping, plain-text previews, and HTML
-//! text/attribute encoding, whole-string and incremental character-reference
+//! flowed-text wrapping and unwrapping, string and streaming UTF-8 plain-text
+//! previews, and HTML text/attribute encoding, whole-string and incremental character-reference
 //! decoding with opt-in reference diagnostics, and plain/flowed HTML rendering,
 //! plus an in-memory HTML writer, known tag/attribute identifiers, checked
 //! attribute collections, and owned HTML token serialization.
