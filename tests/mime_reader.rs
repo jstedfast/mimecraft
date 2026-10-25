@@ -1,5 +1,5 @@
 // Adapted from MimeKit's MimeReader and MimeParser callback contracts.
-// Includes tests adapted from MimeKit's MimeReaderTests.cs.
+// Includes tests adapted from MimeKit's MimeReaderTests.cs and MimeParserTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
@@ -9,7 +9,7 @@ use mimecraft::{
     ContentEncoding, HeaderTooLong, MimeComplianceIssue,
     MimeCompliancePositionKind as PositionKind, MimeComplianceViolation as Violation,
     MimeContentKind, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityKind,
-    MimeEntityParseOptions, MimeEvent, MimeParser, MimePosition, MimeReader,
+    MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser, MimePosition, MimeReader,
     encodings::NewLineFormat,
 };
 
@@ -2189,6 +2189,8 @@ fn multipart_end_offsets_exclude_shared_boundary_new_line() {
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MimeOffsets {
+    #[serde(skip)]
+    kind: Option<MimeEntityKind>,
     mime_type: Option<String>,
     mbox_marker_offset: Option<u64>,
     line_number: u64,
@@ -2208,13 +2210,16 @@ impl MimeOffsets {
         wire: &[u8],
         position: MimePosition,
         child_end: Option<(MimePosition, u64)>,
+        preamble_end: Option<MimePosition>,
     ) {
         let mut end = position.offset as usize;
         // MimeKit's end callbacks trim a boundary's preceding newline and
         // clamp headersEndOffset to that end, even for an empty body. Rust's
         // begin callback already reported the physical end of the separator.
-        // Adapt only this empty-content convention, never nonempty content.
-        if position.offset == self.headers_end_offset
+        // Preamble callbacks retain that newline, too, but Rust also includes
+        // it in the entity's physical end. Adapt only these two conventions;
+        // never trim a nonempty leaf body or a multipart ending in children.
+        if (position.offset == self.headers_end_offset || preamble_end == Some(position))
             && (wire[end..].starts_with(b"--") || wire[end..].starts_with(b"From "))
         {
             if end > 0 && wire[end - 1] == b'\n' {
@@ -2243,6 +2248,7 @@ struct MboxOffsetFrame {
     offsets: MimeOffsets,
     headers_end_line: u64,
     child_end: Option<(MimePosition, u64)>,
+    preamble_end: Option<MimePosition>,
 }
 
 #[derive(Default)]
@@ -2275,6 +2281,7 @@ impl MboxOffsetReader {
                     offsets,
                     headers_end_line: 0,
                     child_end: None,
+                    preamble_end: None,
                 });
             }
             MimeEvent::EntityBegin {
@@ -2326,6 +2333,7 @@ impl MboxOffsetReader {
                 self.stack.push(MboxOffsetFrame {
                     kind: Some(kind),
                     offsets: MimeOffsets {
+                        kind: Some(kind),
                         mime_type: Some(mime_type),
                         begin_offset: position.offset,
                         line_number: position.line,
@@ -2334,12 +2342,15 @@ impl MboxOffsetReader {
                     },
                     headers_end_line: headers_end.line,
                     child_end: None,
+                    preamble_end: None,
                 });
             }
             MimeEvent::EntityEnd { kind, position, .. } => {
                 let mut frame = self.stack.pop().unwrap();
                 assert_eq!(frame.kind, Some(kind));
-                frame.offsets.finish(wire, position, frame.child_end);
+                frame
+                    .offsets
+                    .finish(wire, position, frame.child_end, frame.preamble_end);
                 // The Rust callbacks expose physical positions. Include a
                 // final unterminated content line, but not an empty body.
                 let end = frame.offsets.end_offset as usize;
@@ -2373,7 +2384,7 @@ impl MboxOffsetReader {
             MimeEvent::MessageEnd { position } => {
                 let mut frame = self.stack.pop().unwrap();
                 assert_eq!(frame.kind, None);
-                frame.offsets.finish(wire, position, frame.child_end);
+                frame.offsets.finish(wire, position, frame.child_end, None);
                 if let Some(parent) = self.stack.last_mut() {
                     assert_eq!(parent.kind, Some(MimeEntityKind::MessagePart));
                     assert!(parent.offsets.message.is_none());
@@ -2383,6 +2394,19 @@ impl MboxOffsetReader {
                     self.messages.push(frame.offsets);
                 }
             }
+            MimeEvent::Content {
+                kind: MimeContentKind::Preamble,
+                bytes,
+                position,
+            } => {
+                let frame = self.stack.last_mut().unwrap();
+                assert_eq!(frame.kind, Some(MimeEntityKind::Multipart));
+                frame.preamble_end = Some(MimePosition {
+                    offset: position.offset + bytes.len() as u64,
+                    line: position.line
+                        + bytes.iter().filter(|&&byte| byte == b'\n').count() as u64,
+                });
+            }
             MimeEvent::Content { .. } => {}
             MimeEvent::Headers { .. } => panic!("expected MIME tree events"),
         }
@@ -2391,6 +2415,9 @@ impl MboxOffsetReader {
 }
 
 fn assert_mime_offsets(expected: &MimeOffsets, actual: &MimeOffsets, path: &str) {
+    if expected.kind.is_some() {
+        assert_eq!(actual.kind, expected.kind, "{path}: entity kind");
+    }
     assert_eq!(actual.mime_type, expected.mime_type, "{path}: MIME type");
     assert_eq!(
         actual.mbox_marker_offset, expected.mbox_marker_offset,
@@ -2443,6 +2470,16 @@ fn assert_mbox_model<R: Read + Seek>(
     entity: &MimeEntity<R>,
     read: &impl Fn(&R, &MimeOffsets) -> Vec<u8>,
 ) {
+    if let Some(kind) = expected.kind {
+        assert_eq!(
+            kind,
+            match entity {
+                MimeEntity::Part(_) => MimeEntityKind::Part,
+                MimeEntity::Multipart(_) => MimeEntityKind::Multipart,
+                MimeEntity::Message(_) => MimeEntityKind::MessagePart,
+            }
+        );
+    }
     match entity {
         MimeEntity::Part(part) => {
             assert!(expected.children.is_none() && expected.message.is_none());
@@ -2452,7 +2489,10 @@ fn assert_mbox_model<R: Read + Seek>(
             );
         }
         MimeEntity::Multipart(multipart) => {
-            let children = expected.children.as_ref().expect("expected multipart");
+            assert!(
+                expected.kind == Some(MimeEntityKind::Multipart) || expected.children.is_some()
+            );
+            let children = expected.children.as_deref().unwrap_or_default();
             assert_eq!(multipart.children().len(), children.len());
             for (child, expected) in multipart.children().iter().zip(children) {
                 assert_mbox_model(wire, expected, child, read);
@@ -2470,6 +2510,41 @@ fn assert_mbox_model<R: Read + Seek>(
             (None, None) => {}
             _ => panic!("embedded message presence differs"),
         },
+    }
+}
+
+fn read_stored_body<R: Read + Seek>(
+    wire: &[u8],
+    stream: &MimeContentStream<R>,
+    expected: &MimeOffsets,
+) -> Vec<u8> {
+    match stream {
+        MimeContentStream::Memory(cursor) => cursor.get_ref().clone(),
+        MimeContentStream::Source(range) => {
+            if expected.headers_end_offset == expected.end_offset
+                && range.start_boundary() != expected.headers_end_offset
+            {
+                // Like MimeOffsets::finish, account only for MimeKit's empty-body
+                // offset clamp. Our empty range follows the consumed separator.
+                assert_eq!(range.end_boundary(), Some(range.start_boundary()));
+                let start = range.start_boundary() as usize;
+                let separator = &wire[expected.end_offset as usize..start];
+                assert!(separator == b"\n" || separator == b"\r\n");
+                assert!(wire[start..].starts_with(b"--") || wire[start..].starts_with(b"From "));
+            } else {
+                assert_eq!(range.start_boundary(), expected.headers_end_offset);
+                assert_eq!(range.end_boundary(), Some(expected.end_offset));
+            }
+            let mut copy = mimecraft::io::BoundedStream::new(
+                range.get_ref().clone(),
+                range.start_boundary(),
+                range.end_boundary(),
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            copy.read_to_end(&mut bytes).unwrap();
+            bytes
+        }
     }
 }
 
@@ -2609,39 +2684,259 @@ fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
                         &expected,
                         newline,
                         logged,
-                        |stream, expected| match stream {
-                            MimeContentStream::Memory(cursor) => cursor.get_ref().clone(),
-                            MimeContentStream::Source(range) => {
-                                if expected.headers_end_offset == expected.end_offset
-                                    && range.start_boundary() != expected.headers_end_offset
-                                {
-                                    // Like MimeOffsets::finish, account only for
-                                    // MimeKit's empty-body offset clamp. Our
-                                    // empty range follows the consumed separator.
-                                    assert_eq!(range.end_boundary(), Some(range.start_boundary()));
-                                    let start = range.start_boundary() as usize;
-                                    let separator = &wire[expected.end_offset as usize..start];
-                                    assert!(separator == b"\n" || separator == b"\r\n");
-                                    assert!(
-                                        wire[start..].starts_with(b"--")
-                                            || wire[start..].starts_with(b"From ")
-                                    );
-                                } else {
-                                    assert_eq!(range.start_boundary(), expected.headers_end_offset);
-                                    assert_eq!(range.end_boundary(), Some(expected.end_offset));
-                                }
-                                let mut copy = mimecraft::io::BoundedStream::new(
-                                    range.get_ref().clone(),
-                                    range.start_boundary(),
-                                    range.end_boundary(),
-                                )
-                                .unwrap();
-                                let mut bytes = Vec::new();
-                                copy.read_to_end(&mut bytes).unwrap();
-                                bytes
-                            }
-                        },
+                        |stream, expected| read_stored_body(wire, stream, expected),
                     );
+                }
+            }
+        }
+    }
+}
+
+// These messages mix multiparts and message/rfc822 parts, requiring the reader
+// to switch entity kinds, resume a parent and its following siblings, and unwind
+// several levels when an ancestor boundary terminates an inner multipart.
+const NESTED_TOPOLOGY_MESSAGES: &[(&str, &str)] = &[
+    (
+        "siblings",
+        concat!(
+            "From: a@example.org\r\nSubject: siblings\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n",
+            "preamble\r\n",
+            "--outer\r\nContent-Type: text/plain\r\n\r\nfirst\r\n",
+            "--outer\r\nContent-Type: message/rfc822\r\n\r\n",
+            "From: b@example.org\r\nSubject: embedded\r\nContent-Type: multipart/alternative; boundary=\"inner\"\r\n\r\n",
+            "--inner\r\nContent-Type: text/plain\r\n\r\nplain\r\n",
+            "--inner\r\nContent-Type: text/html\r\n\r\n<p>html</p>\r\n",
+            "--inner--\r\ninner epilogue\r\n",
+            "--outer\r\nContent-Type: text/plain\r\n\r\nafter the embedded message\r\n",
+            "--outer--\r\nouter epilogue\r\n",
+        ),
+    ),
+    (
+        "ancestor-boundary",
+        concat!(
+            "From: a@example.org\r\nSubject: ancestor boundaries\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n",
+            "--outer\r\nContent-Type: message/rfc822\r\n\r\n",
+            "From: b@example.org\r\nContent-Type: multipart/related; boundary=\"inner\"\r\n\r\n",
+            "--inner\r\nContent-Type: text/plain\r\n\r\nunterminated inner\r\n",
+            "--outer\r\nContent-Type: multipart/alternative; boundary=\"mid\"\r\n\r\n",
+            "--mid\r\nContent-Type: message/rfc822\r\n\r\n",
+            "From: c@example.org\r\nContent-Type: multipart/mixed; boundary=\"deep\"\r\n\r\n",
+            "--deep\r\nContent-Type: text/plain\r\n\r\ndeep part\r\n",
+            "--outer--\r\nepilogue\r\n",
+        ),
+    ),
+    (
+        "edge-cases",
+        concat!(
+            "From: a@example.org\r\nSubject: edge cases\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n",
+            "--outer\r\nContent-Type: multipart/digest; boundary=\"digest\"\r\n\r\n",
+            "--digest\r\n\r\nFrom: d1@example.org\r\nSubject: digest 1\r\n\r\ndigest body 1\r\n",
+            "--digest\r\n\r\nFrom: d2@example.org\r\nContent-Type: multipart/mixed; boundary=\"d2\"\r\n\r\n",
+            "--d2\r\nContent-Type: text/plain\r\n\r\nd2 part\r\n--d2--\r\n",
+            "--digest--\r\n",
+            "--outer\r\nContent-Type: message/rfc822\r\n\r\n",
+            "--outer\r\nContent-Type: multipart/mixed\r\n\r\nno boundary parameter\r\n",
+            "--outer\r\nContent-Type: message/rfc822\r\n\r\n",
+            "From: e@example.org\r\nContent-Type: message/rfc822\r\n\r\n",
+            "From: f@example.org\r\nContent-Type: multipart/mixed; boundary=\"f\"\r\n\r\n",
+            "--f\r\nContent-Type: text/plain\r\n\r\nf part\r\n--f--\r\n",
+            "--outer--\r\n",
+        ),
+    ),
+];
+
+fn nested_topology_offsets(name: &str, dos_wire: &[u8], newline: NewLineFormat) -> MimeOffsets {
+    // These events were generated by MimeKit's earlier recursive reader to
+    // guard the non-recursive reader's callback sequence. Never regenerate
+    // missing goldens from the implementation under test.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
+        .join("messages")
+        .join(format!("nested-topology-{name}.events"));
+    let events = fs::read_to_string(path).unwrap();
+    let offset = |offset: u64| {
+        if newline == NewLineFormat::Unix {
+            offset
+                - dos_wire[..offset as usize]
+                    .iter()
+                    .filter(|&&byte| byte == b'\r')
+                    .count() as u64
+        } else {
+            offset
+        }
+    };
+    let mut stack: Vec<MimeOffsets> = Vec::new();
+    let mut root = None;
+    for line in events.lines() {
+        let (event, args) = line.split_once('(').unwrap();
+        let (begin, kind) = match event {
+            "OnMimeMessageBegin" => (true, None),
+            "OnMimeMessageEnd" => (false, None),
+            "OnMimePartBegin" => (true, Some(MimeEntityKind::Part)),
+            "OnMimePartEnd" => (false, Some(MimeEntityKind::Part)),
+            "OnMessagePartBegin" => (true, Some(MimeEntityKind::MessagePart)),
+            "OnMessagePartEnd" => (false, Some(MimeEntityKind::MessagePart)),
+            "OnMultipartBegin" => (true, Some(MimeEntityKind::Multipart)),
+            "OnMultipartEnd" => (false, Some(MimeEntityKind::Multipart)),
+            // Rust exposes complete header blocks and chunked content, rather
+            // than every upstream header/content/delimiter callback.
+            _ => continue,
+        };
+        let mut args = args.strip_suffix(')').unwrap().split(',');
+        let mime_type = kind.map(|_| args.next().unwrap().to_owned());
+        let values: Vec<u64> = args.map(|value| value.parse().unwrap()).collect();
+        if begin {
+            assert_eq!(values.len(), 2);
+            stack.push(MimeOffsets {
+                kind,
+                mime_type,
+                begin_offset: offset(values[0]),
+                line_number: values[1],
+                ..Default::default()
+            });
+            continue;
+        }
+        assert_eq!(values.len(), 5);
+        let mut node = stack.pop().unwrap();
+        assert_eq!(node.kind, kind);
+        assert_eq!(node.mime_type, mime_type);
+        assert_eq!(node.begin_offset, offset(values[0]));
+        assert_eq!(node.line_number, values[1]);
+        node.headers_end_offset = offset(values[2]);
+        node.end_offset = offset(values[3]);
+        node.octets = node.end_offset - node.headers_end_offset;
+        node.lines = kind.map(|_| values[4]);
+        if let Some(parent) = stack.last_mut() {
+            match parent.kind {
+                None => {
+                    assert!(kind.is_some());
+                    assert!(parent.body.replace(Box::new(node)).is_none());
+                }
+                Some(MimeEntityKind::MessagePart) => {
+                    assert!(kind.is_none());
+                    assert!(parent.message.replace(Box::new(node)).is_none());
+                }
+                Some(MimeEntityKind::Multipart) => {
+                    assert!(kind.is_some());
+                    parent.children.get_or_insert_with(Vec::new).push(node);
+                }
+                Some(MimeEntityKind::Part) => panic!("leaf cannot contain entities"),
+            }
+        } else {
+            assert!(kind.is_none());
+            assert!(root.replace(node).is_none());
+        }
+    }
+    assert!(stack.is_empty());
+    root.expect("golden contains one complete message")
+}
+
+fn assert_nested_topology_message<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    wire: &[u8],
+    expected: &MimeOffsets,
+    newline: NewLineFormat,
+    read: impl Fn(&R, &MimeOffsets) -> Vec<u8>,
+) {
+    assert_mbox_model(
+        wire,
+        expected.body.as_ref().unwrap(),
+        message.body().unwrap(),
+        &read,
+    );
+    for _ in 0..2 {
+        let mut output = Vec::new();
+        message
+            .write_to_with_options(
+                &mut output,
+                &mimecraft::MimePartWriteOptions {
+                    new_line_format: newline,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(output, wire);
+    }
+}
+
+#[test]
+fn nested_topology() {
+    for &(name, text) in NESTED_TOPOLOGY_MESSAGES {
+        for newline in [NewLineFormat::Dos, NewLineFormat::Unix] {
+            let input = if newline == NewLineFormat::Unix {
+                text.replace("\r\n", "\n")
+            } else {
+                text.to_owned()
+            };
+            let wire = input.as_bytes();
+            let expected = nested_topology_offsets(name, text.as_bytes(), newline);
+            for capacity in [1, 7, 4096] {
+                for logged in [false, true] {
+                    let mut reader = MimeReader::new(BufReader::with_capacity(capacity, wire));
+                    let mut recorder = MboxOffsetReader::default();
+                    let mut record = |event: MimeEvent<'_>| {
+                        if let MimeEvent::Content {
+                            bytes, position, ..
+                        } = &event
+                        {
+                            assert_position(wire, *position);
+                            let start = position.offset as usize;
+                            assert_eq!(&wire[start..start + bytes.len()], *bytes);
+                        }
+                        recorder.record(wire, event)
+                    };
+                    if logged {
+                        reader.read_message_with_logger(&mut |_| Ok(()), &mut record)
+                    } else {
+                        reader.read_message(&mut record)
+                    }
+                    .unwrap();
+                    assert!(reader.is_end_of_stream());
+                    assert_eq!(reader.position().offset, wire.len() as u64);
+                    assert!(recorder.stack.is_empty());
+                    assert_eq!(recorder.messages.len(), 1);
+                    assert_mime_offsets(&expected, &recorder.messages[0], name);
+
+                    let mut parser = MimeParser::new(BufReader::with_capacity(capacity, wire));
+                    let message = if logged {
+                        parser.parse_message_with_logger(&mut |_| Ok(()))
+                    } else {
+                        parser.parse_message()
+                    }
+                    .unwrap();
+                    assert!(parser.is_end_of_stream());
+                    assert_eq!(parser.position().offset, wire.len() as u64);
+                    drop(parser);
+                    assert_nested_topology_message(
+                        message,
+                        wire,
+                        &expected,
+                        newline,
+                        |cursor, _| cursor.get_ref().clone(),
+                    );
+                    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                        let mut parser =
+                            MimeParser::with_storage(Cursor::new(wire), storage).unwrap();
+                        let shared = parser.get_ref().get_ref().clone();
+                        drop(parser.replace_source(BufReader::with_capacity(capacity, shared)));
+                        let message = if logged {
+                            parser.parse_message_with_logger(&mut |_| Ok(()))
+                        } else {
+                            parser.parse_message()
+                        }
+                        .unwrap();
+                        assert!(parser.is_end_of_stream());
+                        assert_eq!(parser.position().offset, wire.len() as u64);
+                        drop(parser);
+                        assert_nested_topology_message(
+                            message,
+                            wire,
+                            &expected,
+                            newline,
+                            |stream, expected| read_stored_body(wire, stream, expected),
+                        );
+                    }
                 }
             }
         }

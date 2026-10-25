@@ -6192,6 +6192,15 @@ including enclosing multipart/message and mbox framing, and early termination
 under the default limit. MimeKit's long-line mbox cases place fake midline
 markers at offset 4096 and span buffer refills; they verify
 message IDs, positions, raw bodies, and serialization in all storage modes.
+Mixed-nesting cases compare entity/message hierarchy, offsets, and line/octet
+counts against MimeKit's original recursive-reader event goldens. They cover
+following siblings, ancestor-boundary unwinding, multipart/digest defaults,
+empty message wrappers, and missing boundary parameters, with Unix/DOS input,
+fragmented reads, and logging. Owned trees, raw bodies/source ranges, and
+repeated byte-exact serialization are checked in all storage modes after the
+parser is dropped. Golden comparisons account for MimeKit's logical end
+offsets: Rust retains the delimiter-preceding newline in a truncated multipart's
+physical preamble range, just as the upstream preamble callbacks do.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases remain deferred. Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source
