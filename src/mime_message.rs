@@ -7,9 +7,10 @@ use crate::{
     AddressHeaderFormatError, AddressHeaderFormatOptions, AddressList, AddressParseError,
     AddressParseOptions, Attachments, BodyParts, DateTimeOffset, DateTimeOffsetError, Header,
     HeaderList, LeafParts, MailboxAddress, MailboxParseError, MailboxParseOptions, MessageId,
-    MessageIdParseError, MessageImportance, MessagePriority, MessagePriorityParseError, MimeEntity,
-    MimeEntityParseOptions, MimePart, MimePartWriteOptions, MimeVersion, MimeVersionParseError,
-    References, TextBodyError, TextFormat, XMessagePriority,
+    MessageIdParseError, MessageImportance, MessagePriority, MessagePriorityParseError,
+    MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimePart,
+    MimePartWriteOptions, MimeVersion, MimeVersionParseError, References, TextBodyError,
+    TextFormat, XMessagePriority,
 };
 
 /// An owned message with raw message headers and an optional MIME body tree.
@@ -1672,11 +1673,11 @@ impl MimeMessage {
     /// Records retain their bytes, relative order within each list, and original
     /// stream byte offsets for ordinary and masked message serialization.
     ///
-    /// The body is always `Some`, even for empty content. Sources start at zero
-    /// and retain encoded bytes and their stored encodings. Input must contain
-    /// a header/body separator unless [`MimeEntityParseOptions::allow_header_only`]
-    /// accepts present final headers at EOF. Multipart structure must still be
-    /// complete. This is not
+    /// The body is always `Some`, even for empty content. Body streams start at
+    /// zero and retain encoded bytes and their stored encodings. Header-only and
+    /// truncated-message recovery follow [`MimeEntity::load_with_options`];
+    /// disabling [`MimeEntityParseOptions::allow_header_only`] rejects present
+    /// final headers at EOF without a separator. This is not
     /// message-field validation: required From/Date fields are not enforced,
     /// and non-content metadata is not parsed or repaired.
     ///
@@ -1706,6 +1707,89 @@ impl MimeMessage {
         options: &MimeEntityParseOptions,
     ) -> io::Result<Self> {
         crate::MimeParser::with_options(reader, *options)?.parse_message()
+    }
+
+    /// Loads a complete message with explicit encoded-body storage.
+    ///
+    /// [`MimeContentStorage::Memory`] copies bodies; [`MimeContentStorage::Source`]
+    /// retains bounded ranges in the seekable source. Both retain headers and
+    /// framing in memory, including the message/body header partition described
+    /// in [`Self::load_with_options`]. Default parse options apply.
+    ///
+    /// Takes an owned source or a mutable borrow at its current position.
+    /// Owned sources remain alive until their last source-backed body drops.
+    /// Dropping a message never closes a borrowed source; its lifetime protects
+    /// all returned content. Keep source data unchanged while content is in use.
+    ///
+    /// Both modes require `Read + Seek`. The return type carries the source's
+    /// lifetime even in `Memory` mode. Use [`Self::load`] for nonseekable input
+    /// or copies independent of a borrowed source's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Propagates initial source-position and parsing errors without a partial
+    /// message or position rollback. See [`Self::load_with_storage_and_options`].
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContentStorage, MimeMessage, TextFormat};
+    ///
+    /// let source = Cursor::new(b"Subject: example\r\nContent-Type: text/plain\r\n\r\nbody");
+    /// let mut message = MimeMessage::load_with_storage(source, MimeContentStorage::Source)?;
+    /// assert!(message.headers().contains("Subject"));
+    /// assert!(!message.body().unwrap().headers().contains("Subject"));
+    /// assert_eq!(message.text_body(TextFormat::Plain)?.as_deref(), Some("body"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// A borrowed message cannot outlive the backing source:
+    ///
+    /// ```compile_fail
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContentStorage, MimeMessage};
+    ///
+    /// let mut message = {
+    ///     let mut source = Cursor::new(b"\r\nbody");
+    ///     MimeMessage::load_with_storage(&mut source, MimeContentStorage::Source).unwrap()
+    /// };
+    /// message.write_to(&mut Vec::new()).unwrap();
+    /// ```
+    ///
+    /// Source storage cannot silently copy nonseekable input:
+    ///
+    /// ```compile_fail
+    /// use mimecraft::{MimeContentStorage, MimeMessage};
+    ///
+    /// let message = MimeMessage::load_with_storage(b"\r\nbody".as_slice(), MimeContentStorage::Source);
+    /// ```
+    pub fn load_with_storage<R: Read + Seek>(
+        source: R,
+        storage: MimeContentStorage,
+    ) -> io::Result<MimeMessage<MimeContentStream<R>>> {
+        Self::load_with_storage_and_options(source, storage, &MimeEntityParseOptions::default())
+    }
+
+    /// Loads a message with explicit body storage and parsing options.
+    ///
+    /// Ownership follows [`Self::load_with_storage`]. Delegates to
+    /// [`crate::MimeParser::parse_message`], preserving header partitioning,
+    /// nested-message interpretation, recovery, and input-relative offsets.
+    /// Limits apply to the whole message, including headers and nested content.
+    ///
+    /// # Errors
+    ///
+    /// Validates options before I/O, then queries the initial source position
+    /// and parses through EOF. All errors propagate unchanged; no partial
+    /// message is returned. Failure drops owned sources, leaves borrowed sources
+    /// open without rewinding, and discards internal read-ahead. Use
+    /// [`crate::MimeParser`] directly to recover its buffered source or iterate
+    /// through mbox messages.
+    pub fn load_with_storage_and_options<R: Read + Seek>(
+        source: R,
+        storage: MimeContentStorage,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<MimeMessage<MimeContentStream<R>>> {
+        crate::MimeParser::with_storage_and_options(source, storage, *options)?.parse_message()
     }
 }
 

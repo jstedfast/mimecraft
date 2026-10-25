@@ -99,6 +99,274 @@ fn read_body<R: Read + Seek>(message: &mut MimeMessage<R>) -> Vec<u8> {
     bytes
 }
 
+#[derive(Clone, Copy, Debug)]
+enum StorageLoader {
+    Message,
+    MessageOptions,
+    Entity,
+    EntityOptions,
+}
+
+const STORAGE_LOADERS: [StorageLoader; 4] = [
+    StorageLoader::Message,
+    StorageLoader::MessageOptions,
+    StorageLoader::Entity,
+    StorageLoader::EntityOptions,
+];
+
+impl StorageLoader {
+    fn load<R: Read + Seek>(
+        self,
+        source: R,
+        storage: MimeContentStorage,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<MimeMessage<MimeContentStream<R>>> {
+        match self {
+            Self::Message => MimeMessage::load_with_storage(source, storage),
+            Self::MessageOptions => {
+                MimeMessage::load_with_storage_and_options(source, storage, options)
+            }
+            // Wrap entities only to reuse the same leaf-content assertions.
+            Self::Entity => {
+                MimeEntity::load_with_storage(source, storage).map(MimeMessage::with_body)
+            }
+            Self::EntityOptions => {
+                MimeEntity::load_with_storage_and_options(source, storage, options)
+                    .map(MimeMessage::with_body)
+            }
+        }
+    }
+}
+
+#[test]
+fn storage_loaders_keep_owned_sources_until_content_is_released() {
+    let prefix = b"prefix";
+    let headers = b"Content-Type: text/plain\r\n\r\n";
+    let bytes = b"original body";
+    for api in STORAGE_LOADERS {
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let input = [prefix.as_slice(), headers, bytes].concat();
+            let end = input.len() as u64;
+            let (mut source, observed) = Source::new(input, 7);
+            source.bytes.set_position(prefix.len() as u64);
+            let mut message = api
+                .load(source, storage, &MimeEntityParseOptions::default())
+                .unwrap();
+            assert_eq!(
+                observed.drops.load(Ordering::SeqCst),
+                usize::from(storage == MimeContentStorage::Memory),
+                "{api:?}/{storage:?}",
+            );
+            match body(&mut message) {
+                MimeContentStream::Memory(cursor) => {
+                    assert_eq!(storage, MimeContentStorage::Memory);
+                    assert_eq!(cursor.position(), 0);
+                    assert_eq!(cursor.get_ref(), bytes);
+                }
+                MimeContentStream::Source(range) => {
+                    assert_eq!(storage, MimeContentStorage::Source);
+                    assert_eq!(
+                        range.start_boundary(),
+                        (prefix.len() + headers.len()) as u64
+                    );
+                    assert_eq!(range.end_boundary(), Some(end));
+                    assert_eq!(range.position(), 0);
+                }
+            }
+            let reads = observed.reads.load(Ordering::SeqCst);
+            assert_eq!(read_body(&mut message), bytes);
+            assert_eq!(
+                observed.reads.load(Ordering::SeqCst) > reads,
+                storage == MimeContentStorage::Source,
+            );
+            drop(message);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[test]
+fn storage_loaders_leave_borrowed_sources_open() {
+    let input = b"Content-Type: text/plain\r\n\r\noriginal body";
+    for api in STORAGE_LOADERS {
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let (mut source, observed) = Source::new(input.to_vec(), 1);
+            let mut message = api
+                .load(&mut source, storage, &MimeEntityParseOptions::default())
+                .unwrap();
+            assert_eq!(read_body(&mut message), b"original body");
+            drop(message);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 0);
+            source.rewind().unwrap();
+            let mut original = Vec::new();
+            source.read_to_end(&mut original).unwrap();
+            assert_eq!(original, input);
+            drop(source);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[test]
+fn copying_loaders_remain_independent_of_borrowed_input() {
+    for entity in [false, true] {
+        let mut source = Cursor::new(b"Content-Type: text/plain\r\n\r\noriginal body".to_vec());
+        let mut message = if entity {
+            MimeMessage::with_body(MimeEntity::load(&mut source).unwrap())
+        } else {
+            MimeMessage::load(&mut source).unwrap()
+        };
+        let start = source.get_ref().len() - b"modified body".len();
+        source.get_mut()[start..].copy_from_slice(b"modified body");
+        drop(source);
+        assert_eq!(read_body(&mut message), b"original body");
+
+        let mut nonseekable = b"\r\nbody".as_slice();
+        let mut message = if entity {
+            MimeMessage::with_body(MimeEntity::load(&mut nonseekable).unwrap())
+        } else {
+            MimeMessage::load(&mut nonseekable).unwrap()
+        };
+        assert_eq!(read_body(&mut message), b"body");
+    }
+}
+
+#[test]
+fn storage_loader_failures_release_owned_but_not_borrowed_sources() {
+    for api in STORAGE_LOADERS {
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            for seek_failure in [false, true] {
+                let (source, observed) = Source::new(b"\r\nbody".to_vec(), 1);
+                observed.seek_error.store(seek_failure, Ordering::SeqCst);
+                observed.read_error.store(!seek_failure, Ordering::SeqCst);
+                let error = api
+                    .load(source, storage, &MimeEntityParseOptions::default())
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    error.to_string(),
+                    if seek_failure {
+                        "source seek failure"
+                    } else {
+                        "source read failure"
+                    }
+                );
+                assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            }
+            let (mut source, observed) = Source::new(b"\r\nbody".to_vec(), 1);
+            source.failure_at = Some(4);
+            let error = api
+                .load(&mut source, storage, &MimeEntityParseOptions::default())
+                .err()
+                .unwrap();
+            assert_eq!(error.to_string(), "partial source read failure");
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 0);
+            assert_eq!(source.bytes.position(), 4);
+            source.failure_at = None;
+            source.rewind().unwrap();
+            let mut recovered = api
+                .load(&mut source, storage, &MimeEntityParseOptions::default())
+                .unwrap();
+            assert_eq!(read_body(&mut recovered), b"body");
+            drop(recovered);
+            drop(source);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+
+            let (source, observed) = Source::new(Vec::new(), 1);
+            assert_eq!(
+                api.load(source, storage, &MimeEntityParseOptions::default())
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::UnexpectedEof,
+            );
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[test]
+fn storage_loaders_validate_and_apply_explicit_options() {
+    for api in [StorageLoader::MessageOptions, StorageLoader::EntityOptions] {
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let (source, observed) = Source::new(Vec::new(), 1);
+            let options = MimeEntityParseOptions {
+                max_header_length: 0,
+                ..Default::default()
+            };
+            assert_eq!(
+                api.load(source, storage, &options).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(observed.reads.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.seeks.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            for limit in [5, 6] {
+                let options = MimeEntityParseOptions {
+                    max_input_bytes: limit,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    api.load(Cursor::new(b"\r\nbody"), storage, &options)
+                        .is_ok(),
+                    limit == 6
+                );
+            }
+            let options = MimeEntityParseOptions {
+                parse_message_parts: false,
+                ..Default::default()
+            };
+            let mut message = api
+                .load(
+                    Cursor::new(b"Content-Type: message/rfc822\r\n\r\nSubject: inner\r\n\r\nbody"),
+                    storage,
+                    &options,
+                )
+                .unwrap();
+            assert_eq!(read_body(&mut message), b"Subject: inner\r\n\r\nbody");
+        }
+    }
+}
+
+#[test]
+fn storage_loaders_preserve_header_partition_and_nested_content() {
+    let input = b"Subject: outer\r\nContent-Type: message/rfc822\r\n\r\n\
+        Subject: inner\r\nContent-Type: text/plain\r\n\r\nbody";
+    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+        for api in STORAGE_LOADERS {
+            let mut message = api
+                .load(
+                    Cursor::new(input),
+                    storage,
+                    &MimeEntityParseOptions::default(),
+                )
+                .unwrap();
+            let body = message.body().unwrap();
+            assert!(body.headers().contains("Content-Type"));
+            let is_message = matches!(api, StorageLoader::Message | StorageLoader::MessageOptions);
+            assert_eq!(message.headers().contains("Subject"), is_message);
+            assert_eq!(body.headers().contains("Subject"), !is_message);
+            let MimeEntity::Message(part) = body else {
+                panic!("expected attached message");
+            };
+            let nested = part.message().unwrap();
+            assert!(nested.headers().contains("Subject"));
+            assert!(!nested.headers().contains("Content-Type"));
+            assert!(!nested.body().unwrap().headers().contains("Subject"));
+            let MimeEntity::Part(part) = nested.body().unwrap() else {
+                panic!("expected leaf");
+            };
+            assert_eq!(
+                matches!(part.content().get_ref(), MimeContentStream::Source(_)),
+                storage == MimeContentStorage::Source
+            );
+            let mut output = Vec::new();
+            message.write_to(&mut output).unwrap();
+            assert_eq!(output, input);
+        }
+    }
+}
+
 #[test]
 fn storage_keeps_ranges_or_copies_and_releases_last_owner() {
     for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {

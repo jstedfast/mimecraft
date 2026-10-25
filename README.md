@@ -1649,6 +1649,32 @@ the selected storage mode and options. Old messages keep the old source.
 A rejected replacement leaves parser state unchanged. The ordinary
 `replace_source` also accepts an already buffered `SharedStream` in this mode.
 
+`MimeEntity::load_with_storage(source, storage)` and
+`MimeMessage::load_with_storage(source, storage)` provide the same storage
+choice without retaining a parser. Each also has
+`load_with_storage_and_options(source, storage, &options)` for explicit limits
+and nested-message interpretation. They load one complete entity/message through
+EOF, using the same parser and preserving its headers, recovery, and framing.
+
+```rust
+use std::io::Cursor;
+use mimecraft::{MimeContentStorage, MimeMessage, TextFormat};
+
+let source = Cursor::new(b"Content-Type: text/plain\r\n\r\nbody");
+let mut message = MimeMessage::load_with_storage(source, MimeContentStorage::Source).unwrap();
+assert_eq!(message.text_body(TextFormat::Plain).unwrap().as_deref(), Some("body"));
+```
+
+The storage loaders accept owned or borrowed seekable sources with the same
+lifetime rules as `with_storage`. Their internal parser is dropped on return;
+source-backed bodies retain the backing source, while copied bodies do not.
+Invalid options fail before I/O, and source/parse errors return no partial
+model. Failure drops an owned source, leaves a borrowed source open without
+rewinding, and discards internal read-ahead. Use `MimeParser` directly when
+recovering that buffer, iterating mbox messages, or attaching a compliance logger.
+The original `load`/`load_with_options` APIs remain nonseekable-compatible
+copying loaders.
+
 Compliance reporting is opt-in. Reader methods `read_entity_with_logger`,
 `read_message_with_logger`, `read_mbox_message_with_logger`,
 `read_headers_with_logger`, and `read_status_group_with_logger` borrow a

@@ -1,9 +1,11 @@
-// Adapted from MimeKit's MimeReader.cs and MimeParser.cs.
+// Adapted from MimeKit's MimeEntity.cs, MimeReader.cs and MimeParser.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read, Seek};
 
-use crate::{MimeEntity, MimeEntityParseOptions, MimeParser};
+use crate::{
+    MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimeParser,
+};
 
 impl MimeEntity {
     /// Loads one MIME entity through EOF into owned in-memory body streams.
@@ -93,5 +95,91 @@ impl MimeEntity {
         options: &MimeEntityParseOptions,
     ) -> io::Result<Self> {
         MimeParser::with_options(reader, *options)?.parse_entity()
+    }
+
+    /// Loads a complete entity with explicit encoded-body storage.
+    ///
+    /// [`MimeContentStorage::Memory`] copies bodies; [`MimeContentStorage::Source`]
+    /// retains ranges in the seekable input. Headers and framing are stored in
+    /// memory in both modes. Parsing and recovery follow [`Self::load_with_options`].
+    ///
+    /// Takes an owned source or a mutable borrow at its current position.
+    /// Owned sources stay alive as long as source-backed content needs them;
+    /// dropping an entity never closes a borrowed source. Keep the underlying
+    /// data unchanged while source-backed content is in use.
+    ///
+    /// Both choices require `Read + Seek` and return [`MimeContentStream<R>`].
+    /// That type retains `R`'s lifetime even in `Memory` mode. For nonseekable
+    /// input, or copies independent of a borrowed source's lifetime, use
+    /// [`Self::load`] instead. There is no nonseekable fallback.
+    ///
+    /// # Errors
+    ///
+    /// Propagates initial source-position and parsing errors without a partial
+    /// entity or position rollback. Uses default limits; see
+    /// [`Self::load_with_storage_and_options`] for explicit limits.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContentStorage, MimeEntity};
+    ///
+    /// let input = Cursor::new(b"Content-Transfer-Encoding: base64\r\n\r\naGVsbG8=");
+    /// let MimeEntity::Part(mut part) =
+    ///     MimeEntity::load_with_storage(input, MimeContentStorage::Source)? else {
+    ///     unreachable!()
+    /// };
+    /// let mut decoded = Vec::new();
+    /// part.content_mut().decode_to(&mut decoded)?;
+    /// assert_eq!(decoded, b"hello");
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    ///
+    /// A borrowed entity cannot outlive the backing source:
+    ///
+    /// ```compile_fail
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContentStorage, MimeEntity};
+    ///
+    /// let mut entity = {
+    ///     let mut source = Cursor::new(b"\r\nbody");
+    ///     MimeEntity::load_with_storage(&mut source, MimeContentStorage::Source).unwrap()
+    /// };
+    /// entity.write_to(&mut Vec::new()).unwrap();
+    /// ```
+    ///
+    /// Source storage cannot silently copy nonseekable input:
+    ///
+    /// ```compile_fail
+    /// use mimecraft::{MimeContentStorage, MimeEntity};
+    ///
+    /// let entity = MimeEntity::load_with_storage(b"\r\nbody".as_slice(), MimeContentStorage::Source);
+    /// ```
+    pub fn load_with_storage<R: Read + Seek>(
+        source: R,
+        storage: MimeContentStorage,
+    ) -> io::Result<MimeEntity<MimeContentStream<R>>> {
+        Self::load_with_storage_and_options(source, storage, &MimeEntityParseOptions::default())
+    }
+
+    /// Loads an entity with explicit body storage and parsing options.
+    ///
+    /// Ownership and storage follow [`Self::load_with_storage`]. Uses the same
+    /// [`MimeParser`] path as the copying loader, including nested messages,
+    /// malformed-message recovery, and delimiter-newline ownership.
+    ///
+    /// # Errors
+    ///
+    /// Validates options before any source I/O. Then queries the initial source
+    /// position and parses through EOF, propagating all errors unchanged.
+    /// On failure, an owned source is dropped; a borrowed source stays open
+    /// but is not rewound. Internal read-ahead is discarded with the parser.
+    /// Use [`MimeParser`] directly to recover its buffered source after errors
+    /// or to parse an mbox archive incrementally.
+    pub fn load_with_storage_and_options<R: Read + Seek>(
+        source: R,
+        storage: MimeContentStorage,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<MimeEntity<MimeContentStream<R>>> {
+        MimeParser::with_storage_and_options(source, storage, *options)?.parse_entity()
     }
 }
