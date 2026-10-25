@@ -6743,6 +6743,7 @@ generation is not part of normal library builds.
 cargo bench --bench base64 --no-default-features
 cargo bench --bench base64
 cargo bench --bench mime_reader
+cargo bench --bench mime_reader --no-default-features
 ```
 
 The base64 benchmark, which needs no extra benchmarking framework, compares scalar-only and runtime-dispatched
@@ -6754,15 +6755,31 @@ and LF. Rates count input bytes and report the median of five timed
 samples after warm-up. These are in-memory microbenchmarks, not message-parser or
 end-to-end I/O throughput, and results depend on the CPU and compiler.
 
-The reader benchmark measures wrapped attachment data, long lines, multipart
-messages, and mbox batches of small messages and attachments. It compares
-reader callbacks with owned-model parsing, including model construction/drop,
-and tests slice sources plus 8 KiB/64 KiB buffered sources for leaf workloads.
-Fixtures are constructed outside timing, with warm-up and five samples of at
-least 100 ms. Results count input bytes; mbox reader cases also report messages
-per second. These are cached in-memory workloads without decoding, storage,
-network I/O, or application processing. They are not a throughput guarantee or
-a comparison against MimeKit; measure representative server workloads too.
+The `mime_reader` benchmark ports the synchronous, nonpersistent reader and
+parser workloads from MimeKit's `Benchmarks/MimeParserBenchmarks.cs`, retaining
+their benchmark names: `StarTrekMessage`, `ContentLengthMbox`, `JwzMbox`,
+`HeaderStressTest`, and `MixedNested64`. `NestedRfc822x1000` is reader-only, as
+upstream. These replace the generated attachment/long-line/mbox microbenchmarks.
+`benches/data/messages/startrek.eml` is the original benchmark message;
+`header-stress.eml` contains the exact ASCII bytes of MimeKit's header-stress
+string, including its line endings. The two mbox cases reuse the original
+archives in `tests/data/mbox` (29 and 152 messages). The Content-Length archive
+uses default mbox framing, matching upstream's benchmark, not its optional
+Content-Length-aware parsing mode. Nesting generators preserve the upstream
+wire format; only those cases raise the depth limit to include the final leaf.
+
+Fixtures are loaded/generated outside timing. Each iteration creates a fresh
+4 KiB buffered in-memory source and reader/parser; reader callbacks do no work,
+and parser timing includes owned-model construction and drop. Message counts,
+full input consumption, and EOF are checked before timing. After warm-up, five
+samples of at least 100 ms report median input MiB/s and messages/s. The existing
+timing harness is retained; it does not reproduce BenchmarkDotNet's allocation
+diagnostics or statistical machinery. Async, persistent-source, and
+LegacyMimeParser variants are not included.
+
+These are cached in-memory workloads without decoding, storage, network I/O,
+or application processing. Results are not a throughput guarantee or a direct
+cross-runtime comparison against MimeKit; measure server workloads too.
 
 The UU backend comparison is an ignored unit test so it can force scalar,
 SSSE3, AVX2, or NEON independently on supported hardware:
