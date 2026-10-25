@@ -451,12 +451,22 @@ impl Error for HeaderParseError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderTooLong {
     limit: usize,
+    offset: u64,
 }
 
 impl HeaderTooLong {
     /// Returns the maximum permitted size of one complete header record.
     pub fn limit(self) -> usize {
         self.limit
+    }
+
+    /// Returns the byte offset where the oversized header starts.
+    ///
+    /// Uses the same origin as the parser's header records. Direct
+    /// [`HeaderParser`] input starts at zero, including across chunked calls;
+    /// MIME readers retain the offset within their installed input source.
+    pub fn offset(self) -> u64 {
+        self.offset
     }
 }
 
@@ -490,7 +500,7 @@ impl Error for HeaderTooLong {}
 /// also returns an invalid first record. It does not recognize mbox markers,
 /// multipart boundaries, structured field values, or encoded words.
 ///
-/// The default maximum record size is 16 KiB, rather than MimeKit's 16 MiB.
+/// The default maximum record size is 16 KiB, matching MimeKit.
 /// The limit includes the field, colon, value, continuations, and their newline bytes;
 /// it excludes the body separator. Callers must separately bound the number
 /// of records and total input if needed. No I/O or finalization occurs on drop.
@@ -749,6 +759,7 @@ impl HeaderParser {
         if bytes.len() > self.max_header_length - self.pending.len() {
             let error = HeaderTooLong {
                 limit: self.max_header_length,
+                offset: self.offset,
             };
             self.error = Some(error);
             return Err(error);

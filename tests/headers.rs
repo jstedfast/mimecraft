@@ -320,6 +320,7 @@ fn record_limit_counts_folds_and_newlines_but_not_separator_or_body() {
             .find_map(|chunk| parser.parse(chunk, &mut headers).err())
             .expect("one byte over the limit must fail");
         assert_eq!(error.limit(), input.len() - 1);
+        assert_eq!(error.offset(), 0);
         assert!(headers.is_empty());
     }
 }
@@ -346,6 +347,7 @@ fn limit_errors_latch_preserve_output_and_reset_retains_limit() {
     assert_eq!(headers.len(), 1);
     assert_eq!(headers[0].raw(), b"A: b\n");
     assert_eq!(error.limit(), 5);
+    assert_eq!(error.offset(), 5);
     assert_eq!(
         error.to_string(),
         "header exceeds the maximum length of 5 bytes"
@@ -365,6 +367,11 @@ fn limit_errors_latch_preserve_output_and_reset_retains_limit() {
     parser.parse(b"C: d\n\n", &mut headers).unwrap();
     assert_eq!(headers.len(), 2);
     assert_eq!(headers[1].raw(), b"C: d\n");
+    parser.reset();
+    let error = parser
+        .parse(b"Too-Long: value\n", &mut headers)
+        .unwrap_err();
+    assert_eq!(error.offset(), 0);
 }
 
 #[test]

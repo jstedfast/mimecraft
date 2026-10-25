@@ -1932,7 +1932,9 @@ deferred. `HeaderList::load` continues to support independent raw header blocks.
 Zero limits return `InvalidInput` before I/O. Exceeded limits return `InvalidData`.
 Entity/message parsing also rejects invalid initial headers with `InvalidData`,
 and empty input with `UnexpectedEof`.
-Header-length errors retain `HeaderTooLong`.
+Header-length errors retain `HeaderTooLong`, whose `offset()` identifies the
+oversized header's start within the installed input source and `limit()`
+reports the configured maximum.
 Interrupted reads retry; other I/O failures propagate without returning a
 partial tree or restoring the source position. Retain the buffered reader
 after a failure; retries require restarting at the entity's beginning.
@@ -4503,13 +4505,15 @@ record too, rather than applying MimeKit's top-level message parser rejection
 rules. The current Rust message loader also retains these records.
 The scanner does not interpret mbox markers or multipart boundaries.
 
-The default per-record size limit is 16 KiB, rather than MimeKit's 16 MiB.
+The default per-record size limit is 16 KiB, matching MimeKit.
 Set a positive limit with `HeaderParser::with_max_header_length(NonZeroUsize)`. Field, colon, value,
 folded lines, and newline bytes count toward it; the body separator does not.
 An oversized record produces `HeaderTooLong` before buffering beyond the
-limit. Already-emitted records remain available, but the block must be
-abandoned: errors are latched until `reset`, not retryable. Reset retains the
-configured limit. Callers must separately limit total bytes and record counts.
+limit. Its `offset()` reports the record's start relative to the parser input,
+including bytes supplied in earlier chunks; `limit()` reports the maximum.
+Already-emitted records remain available, but the block must be abandoned:
+errors are latched until `reset`, not retryable. Reset retains the configured
+limit. Callers must separately limit total bytes and record counts.
 
 This is the raw header foundation, not yet complete header handling.
 Decoded display access is described below; general decoded-value editing and
@@ -6182,6 +6186,12 @@ These run across short reads and default, Memory, and Source storage.
 Leading-mbox-BOM cases check offsets, exact input limits, malformed/truncated
 marks, interrupted and failing reads, source replacement, and nonzero backing
 origins while preserving byte order marks inside bodies.
+Header-limit regressions accept an exact-sized folded header, reject one extra
+byte or an oversized field name, and verify the failing header's offset,
+including enclosing multipart/message and mbox framing, and early termination
+under the default limit. MimeKit's long-line mbox cases place fake midline
+markers at offset 4096 and span buffer refills; they verify
+message IDs, positions, raw bodies, and serialization in all storage modes.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases remain deferred. Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source

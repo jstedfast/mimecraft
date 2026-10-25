@@ -2,11 +2,13 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use mimecraft::{
-    MimeContentStorage, MimeEntity, MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser,
-    MimePartWriteOptions, MimePosition, MimeReader, TextFormat, encodings::NewLineFormat,
+    HeaderTooLong, MimeContentStorage, MimeEntity, MimeEntityParseOptions, MimeEvent, MimeMessage,
+    MimeParser, MimePartWriteOptions, MimePosition, MimeReader, TextFormat,
+    encodings::NewLineFormat,
 };
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 
+#[derive(Debug)]
 struct ShortSource<R> {
     inner: R,
     chunk: usize,
@@ -556,17 +558,22 @@ fn absent_parsed_content_does_not_gain_encoder_output() {
     }
 }
 
+fn create_message_with_huge_folded_header(lines: usize) -> (String, String, u64) {
+    let mut value = String::from(" participant0@example.com");
+    for index in 1..lines {
+        value.push_str(&format!(",\r\n participant{index}@example.com"));
+    }
+    value.push_str("\r\n");
+    let mut data = format!("From: sender@example.com\r\nTo:{value}");
+    let subject_offset = data.len() as u64;
+    data.push_str("Subject: huge header\r\n\r\nThis is the body.\r\n");
+    (data, value, subject_offset)
+}
+
 #[test]
 fn huge_folded_header() {
     for lines in [1, 100, 50_000] {
-        let mut value = String::from(" participant0@example.com");
-        for index in 1..lines {
-            value.push_str(&format!(",\r\n participant{index}@example.com"));
-        }
-        value.push_str("\r\n");
-        let mut data = format!("From: sender@example.com\r\nTo:{value}");
-        let subject_offset = data.len() as u64;
-        data.push_str("Subject: huge header\r\n\r\nThis is the body.\r\n");
+        let (data, value, subject_offset) = create_message_with_huge_folded_header(lines);
         let options = MimeEntityParseOptions {
             max_header_length: 16 * 1024 * 1024,
             ..Default::default()
@@ -629,6 +636,167 @@ fn assert_huge_folded_header<R: Read + Seek>(
     let mut body = Vec::new();
     part.content_mut().decode_to(&mut body).unwrap();
     assert_eq!(body, b"This is the body.\r\n");
+}
+
+#[test]
+fn max_header_length_boundary() {
+    let (data, value, subject_offset) = create_message_with_huge_folded_header(100);
+    let length = b"To:".len() + value.len();
+    // A header that is exactly max_header_length bytes long is accepted.
+    let options = MimeEntityParseOptions {
+        max_header_length: length,
+        ..Default::default()
+    };
+    for chunk in [1, 7, 4096] {
+        let mut parser =
+            MimeParser::with_options(BufReader::with_capacity(chunk, data.as_bytes()), options)
+                .unwrap();
+        assert_huge_folded_header(
+            parser.parse_message().unwrap(),
+            &data,
+            &value,
+            subject_offset,
+            100,
+        );
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser = MimeParser::with_storage_and_options(
+                ShortSource {
+                    inner: Cursor::new(data.as_bytes()),
+                    chunk,
+                },
+                storage,
+                options,
+            )
+            .unwrap();
+            assert_huge_folded_header(
+                parser.parse_message().unwrap(),
+                &data,
+                &value,
+                subject_offset,
+                100,
+            );
+        }
+    }
+    // A header that is one byte longer than max_header_length is rejected.
+    assert_header_length_failure(data.as_bytes(), length - 1, 26, false);
+}
+
+#[test]
+fn max_header_length_exceeded() {
+    let (data, _, _) = create_message_with_huge_folded_header(1000);
+    assert_eq!(
+        MimeEntityParseOptions::default().max_header_length,
+        16 * 1024
+    );
+    assert_header_length_failure(data.as_bytes(), 16 * 1024, 26, true);
+}
+
+#[test]
+fn max_header_length_shorter_than_field_name() {
+    let data = b"From: sender@example.com\r\nSubject: hi\r\n\r\nThis is the body.\r\n";
+    assert_header_length_failure(data, 4, 0, false);
+}
+
+fn assert_excessive_header_length(error: io::Error, offset: u64, limit: usize) {
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    let cause = error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<HeaderTooLong>()
+        .unwrap();
+    assert_eq!(cause.offset(), offset);
+    assert_eq!(cause.limit(), limit);
+}
+
+fn assert_header_length_failure(data: &[u8], limit: usize, offset: u64, stop_early: bool) {
+    let options = MimeEntityParseOptions {
+        max_header_length: limit,
+        ..Default::default()
+    };
+    for chunk in [1, 7, 4096] {
+        let mut parser =
+            MimeParser::with_options(BufReader::with_capacity(chunk, Cursor::new(data)), options)
+                .unwrap();
+        assert_excessive_header_length(parser.parse_message().unwrap_err(), offset, limit);
+        if stop_early {
+            // The parser should stop reading shortly after exceeding the limit.
+            assert!(parser.get_ref().get_ref().position() < data.len() as u64);
+        }
+        assert_eq!(
+            parser.parse_message().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser = MimeParser::with_storage_and_options(
+                ShortSource {
+                    inner: Cursor::new(data),
+                    chunk,
+                },
+                storage,
+                options,
+            )
+            .unwrap();
+            assert_excessive_header_length(parser.parse_message().unwrap_err(), offset, limit);
+            if stop_early {
+                assert!(parser.get_ref().get_ref().position() < data.len() as u64);
+            }
+            assert_eq!(
+                parser.parse_message().unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+}
+
+#[test]
+fn header_limit_offsets_include_enclosing_framing() {
+    let options = MimeEntityParseOptions {
+        max_header_length: 64,
+        ..Default::default()
+    };
+    for (prefix, mbox) in [
+        (
+            b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n".as_slice(),
+            false,
+        ),
+        (
+            b"Content-Type: message/rfc822\r\n\r\nSubject: inner\r\n",
+            false,
+        ),
+        (b"\xef\xbb\xbfFrom sender\r\nSubject: outer\r\n", true),
+    ] {
+        let data = [prefix, b"X-Long: ", &[b'x'; 65], b"\r\n\r\nbody"].concat();
+        for chunk in [1, 7, 4096] {
+            let mut parser =
+                MimeParser::with_options(BufReader::with_capacity(chunk, data.as_slice()), options)
+                    .unwrap();
+            let error = if mbox {
+                parser.parse_mbox_message().unwrap_err()
+            } else {
+                parser.parse_message().unwrap_err()
+            };
+            assert_excessive_header_length(error, prefix.len() as u64, 64);
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let mut source = Cursor::new([b"skip".as_slice(), &data].concat());
+                source.set_position(4);
+                let mut parser = MimeParser::with_storage_and_options(
+                    ShortSource {
+                        inner: source,
+                        chunk,
+                    },
+                    storage,
+                    options,
+                )
+                .unwrap();
+                let error = if mbox {
+                    parser.parse_mbox_message().unwrap_err()
+                } else {
+                    parser.parse_message().unwrap_err()
+                };
+                assert_excessive_header_length(error, prefix.len() as u64, 64);
+            }
+        }
+    }
 }
 
 #[test]
@@ -756,6 +924,155 @@ fn assert_unmunged_mbox<R: BufRead, C: Read + Seek>(mut parser: MimeParser<R, C>
         count += 1;
     }
     assert_eq!(count, 4);
+    assert!(parser.is_end_of_stream());
+}
+
+#[test]
+fn issue991() {
+    assert_refill_mbox(false);
+}
+
+#[test]
+fn mbox_with_lines_exceeding_max_smtp_line_length() {
+    assert_refill_mbox(true);
+}
+
+fn create_refill_mbox(long_lines: bool) -> (Vec<u8>, [usize; 2]) {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const MARKER: &[u8] = b"From -\n";
+    let headers = |index| {
+        format!(
+            "From: mimekit@example.org\r\nTo: mimekit@example.org\r\n\
+         Subject: This message contains long lines that will cause ScanContent() to require a buffer refill\r\n\
+         Message-Id: <1234567890.{index}@example.org>\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n"
+        )
+    };
+    let mut wire = MARKER.to_vec();
+    wire.extend_from_slice(headers(0).as_bytes());
+    let mut index = 0;
+    let first_limit = if long_lines { 4096 - 1001 } else { 4096 };
+    while wire.len() <= first_limit {
+        let byte = ALPHABET[index % ALPHABET.len()];
+        for _ in 0..255 {
+            if wire.len() >= first_limit {
+                break;
+            }
+            wire.push(byte);
+        }
+        if long_lines || wire.len() < 4096 {
+            wire.push(b'\n');
+        } else {
+            // Fake mbox marker that is midline.
+            wire.extend_from_slice(MARKER);
+        }
+        index += 1;
+    }
+    if long_lines {
+        // Write a line exceeding the SMTP maximum that also spans read boundaries.
+        let byte = ALPHABET[index % ALPHABET.len()];
+        wire.resize(4096, byte);
+        wire.extend_from_slice(MARKER);
+        index += 1;
+        let byte = ALPHABET[index % ALPHABET.len()];
+        wire.resize(wire.len() + 255, byte);
+        wire.extend_from_slice(MARKER);
+        index += 1;
+    }
+    wire.push(b'\n');
+    let first_end = wire.len();
+    assert_eq!(&wire[4096..4103], MARKER);
+    assert_ne!(wire[4095], b'\n');
+    if long_lines {
+        assert!(
+            wire.split(|&byte| byte == b'\n')
+                .any(|line| line.len() > 1000)
+        );
+    }
+
+    wire.extend_from_slice(MARKER);
+    wire.extend_from_slice(headers(1).as_bytes());
+    while wire.len() <= first_end + 4096 {
+        let byte = ALPHABET[index % ALPHABET.len()];
+        wire.resize(wire.len() + 255, byte);
+        wire.push(b'\n');
+        index += 1;
+    }
+    wire.push(b'\n');
+    let last_end = wire.len();
+    (wire, [first_end, last_end])
+}
+
+fn assert_refill_mbox(long_lines: bool) {
+    let (wire, ends) = create_refill_mbox(long_lines);
+    for capacity in [1, 7, 4095, 4096, 4097, 8192] {
+        let parser = MimeParser::new(BufReader::with_capacity(capacity, wire.as_slice()));
+        assert_refill_mbox_messages(parser, &wire, ends);
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser = MimeParser::with_storage(
+                ShortSource {
+                    inner: Cursor::new(wire.as_slice()),
+                    chunk: capacity,
+                },
+                storage,
+            )
+            .unwrap();
+            let shared = parser.get_ref().get_ref().clone();
+            drop(parser.replace_source(BufReader::with_capacity(capacity, shared)));
+            assert_refill_mbox_messages(parser, &wire, ends);
+        }
+    }
+}
+
+fn assert_refill_mbox_messages<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    wire: &[u8],
+    ends: [usize; 2],
+) {
+    for (index, end) in ends.into_iter().enumerate() {
+        let mut message = parser.parse_mbox_message().unwrap().unwrap();
+        assert_eq!(
+            message.message_id().unwrap().unwrap().as_str(),
+            format!("1234567890.{index}@example.org")
+        );
+        // MimeKit leaves Position at the next marker. Our reader consumes and
+        // retains its five-byte prefix as lookahead, outside this message.
+        assert_eq!(
+            parser.position().offset - parser.pending_input().len() as u64,
+            end as u64
+        );
+        assert_eq!(
+            parser.pending_input(),
+            if index == 0 { b"From ".as_slice() } else { b"" }
+        );
+        let start = if index == 0 { 7 } else { ends[0] + 7 };
+        let end = end - usize::from(index == 0);
+        let expected = &wire[start..end];
+        let mut output = Vec::new();
+        message
+            .write_to_with_options(
+                &mut output,
+                &MimePartWriteOptions {
+                    new_line_format: NewLineFormat::Unix,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let normalized = std::str::from_utf8(expected).unwrap().replace("\r\n", "\n");
+        assert_round_trip("mbox refill", normalized.as_bytes(), &output);
+        let body_start = expected
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let Some(MimeEntity::Part(part)) = message.body_mut() else {
+            panic!("expected text part")
+        };
+        let mut body = Vec::new();
+        part.content_mut().decode_to(&mut body).unwrap();
+        assert_eq!(body, &expected[body_start..]);
+    }
+    assert!(parser.parse_mbox_message().unwrap().is_none());
     assert!(parser.is_end_of_stream());
 }
 

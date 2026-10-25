@@ -146,6 +146,7 @@ fn record_limits_include_folding_but_exclude_the_body_separator() {
             .downcast_ref::<HeaderTooLong>()
             .unwrap();
         assert_eq!(inner.limit(), record.len() - 1);
+        assert_eq!(inner.offset(), 0);
     }
 }
 
