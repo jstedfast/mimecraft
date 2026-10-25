@@ -674,7 +674,9 @@ impl<R: BufRead> MimeReader<R> {
     /// partially read source. Byte/line positions remain archive-relative.
     ///
     /// Like MimeKit, a line beginning with exactly `From ` marks a message;
-    /// its date/sender is not validated. Initial non-marker lines are skipped.
+    /// its date/sender is not validated. A leading UTF-8 byte order mark and
+    /// initial non-marker lines are skipped; their bytes still count in offsets
+    /// and the input budget. An incomplete byte order mark is an error.
     /// A missing or unterminated marker is an error. `>From ` is ordinary data
     /// and is not unescaped. Enable
     /// [`MimeEntityParseOptions::respect_content_length`] for mbox variants that
@@ -727,12 +729,14 @@ impl<R: BufRead> MimeReader<R> {
         if self.state == ReadState::MboxEndOfStream {
             return Ok(false);
         }
+        let initial = self.state == ReadState::Ready;
         self.begin_read(ReadState::Mbox)?;
         let Some(remaining) = engine::read_mbox_marker(
             &mut self.source,
             &self.options,
             &mut self.position,
             &mut self.buffer,
+            initial,
             callback,
         )?
         else {

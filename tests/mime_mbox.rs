@@ -241,6 +241,119 @@ fn mbox_parser_constructs_independent_nested_models_and_replays_lookahead() {
 }
 
 #[test]
+fn mbox_byte_order_mark_preserves_offsets_content_and_limits() {
+    let wire = b"\xef\xbb\xbfFrom a\nX: y\n\n\xef\xbb\xbfbody\n";
+    for capacity in [1, 2, 3, 7, 4096] {
+        let mut reader = MimeReader::new(BufReader::with_capacity(capacity, wire.as_slice()));
+        let mut markers = 0;
+        let mut body = Vec::new();
+        assert!(
+            reader
+                .read_mbox_message(|event| {
+                    match event {
+                        MimeEvent::MboxMarker {
+                            bytes, position, ..
+                        } => {
+                            assert_eq!(bytes, b"From a\n");
+                            assert_eq!(position, MimePosition { offset: 3, line: 1 });
+                            markers += 1;
+                        }
+                        MimeEvent::EntityBegin { headers, .. } => {
+                            assert_eq!(headers.get("X").unwrap().offset(), Some(10));
+                        }
+                        MimeEvent::Content {
+                            bytes, position, ..
+                        } => {
+                            check_position(wire, position);
+                            assert_eq!(
+                                &wire[position.offset as usize
+                                    ..position.offset as usize + bytes.len()],
+                                bytes
+                            );
+                            body.extend_from_slice(bytes);
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(markers, 1);
+        assert_eq!(body, b"\xef\xbb\xbfbody\n");
+        assert_eq!(reader.position().offset, wire.len() as u64);
+        assert!(!reader.read_mbox_message(|_| panic!("EOF")).unwrap());
+
+        for max_input_bytes in [1, 2, 3, wire.len() - 1, wire.len()] {
+            let mut parser = MimeParser::with_options(
+                BufReader::with_capacity(capacity, wire.as_slice()),
+                MimeEntityParseOptions {
+                    max_input_bytes,
+                    max_header_length: 7,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let result = parser.parse_mbox_message();
+            if max_input_bytes == wire.len() {
+                assert!(result.unwrap().is_some());
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                assert!(!parser.is_end_of_stream());
+            }
+        }
+    }
+}
+
+#[test]
+fn mbox_byte_order_mark_eof_errors_interruptions_and_replacement() {
+    for input in [
+        b"".as_slice(),
+        b"\xef",
+        b"\xef\xbb",
+        b"\xef\xbb\xbf",
+        b"\xefFrom a\n\nbody",
+        b"\xef\xbbFrom a\n\nbody",
+        b"\xef\xbb\xbfFrom a\n\nbody",
+    ] {
+        for fail in [false, true] {
+            let mut parser = MimeParser::new(Interrupting {
+                input,
+                interrupt: false,
+                fail,
+                eof_seen: false,
+            });
+            let result = parser.parse_mbox_message();
+            if input == b"\xefFrom a\n\nbody" || input == b"\xef\xbbFrom a\n\nbody" {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            } else if fail {
+                assert_eq!(result.unwrap_err().to_string(), "source");
+                assert!(!parser.is_end_of_stream());
+            } else if input == b"\xef" || input == b"\xef\xbb" {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+            } else {
+                assert_eq!(result.unwrap().is_some(), input.len() > 3);
+                assert!(parser.is_end_of_stream());
+                assert!(parser.parse_mbox_message().unwrap().is_none());
+            }
+            if !parser.is_end_of_stream() {
+                assert_eq!(
+                    parser.parse_mbox_message().unwrap_err().kind(),
+                    io::ErrorKind::InvalidInput
+                );
+            }
+            parser.replace_source(Interrupting {
+                input: b"\xef\xbb\xbfFrom b\n\nreplacement",
+                interrupt: false,
+                fail: false,
+                eof_seen: false,
+            });
+            assert!(parser.parse_mbox_message().unwrap().is_some());
+            assert!(parser.parse_mbox_message().unwrap().is_none());
+        }
+    }
+}
+
+#[test]
 fn mbox_limits_reset_per_message_and_do_not_charge_the_next_marker() {
     let message = b"From a\nX: y\n\nbody\n";
     let wire = message.repeat(4);

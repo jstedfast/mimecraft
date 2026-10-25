@@ -1874,8 +1874,11 @@ assert!(parser.parse_mbox_message().unwrap().is_none());
 ```
 
 Like MimeKit, a line beginning with exactly `From ` is a marker, without
-validating its sender/date. Initial non-marker lines are skipped under the
-input budget; nonempty input without a marker and unterminated marker lines
+validating its sender/date. A leading UTF-8 byte order mark and initial
+non-marker lines are skipped under the input budget, without removing their
+bytes from reported offsets. The byte order mark is recognized only at the
+start of each installed source; incomplete marks are errors and a mark alone
+is an empty archive. Nonempty input without a marker and unterminated marker lines
 are errors. `>From ` remains unchanged ordinary content. The newline preceding
 a next marker belongs to framing; EOF retains trailing content newlines.
 Automatic unescaping is not implemented. To honor the outer message's
@@ -6149,6 +6152,9 @@ MimeKit's end-callback clamping of empty-body header separators to Rust's
 physical header-end positions reported at entity begin, including ancestors
 ending at the same delimiter. Closing-marker newlines shared with an immediate
 parent or mbox delimiter are excluded from entity-end positions; EOF retains them.
+Both corpora also check parsed model topology, raw body bytes, source ranges,
+and exact message serialization with and without logging in default, Memory,
+and Source modes.
 Tests retain MimeKit's names in
 snake_case and applicable inline comments; synchronous cases also cover the
 input-fragmentation scenarios from its asynchronous variants.
@@ -6169,6 +6175,13 @@ Ordinary header lines are rejected as boundary candidates before ancestor
 scanning, following MimeKit's boundary-prefix check.
 The double-boundary parser case also checks the recovered empty first child
 and exact serialization with and without logging.
+Further upstream parser regressions cover folded recipient headers with 1,
+100, and 50,000 addresses, preserving raw folds and following-header offsets;
+Japanese ISO-2022-JP subject/body decoding; and unmunged mbox `From ` lines.
+These run across short reads and default, Memory, and Source storage.
+Leading-mbox-BOM cases check offsets, exact input limits, malformed/truncated
+marks, interrupted and failing reads, source replacement, and nonzero backing
+origins while preserving byte order marks inside bodies.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases remain deferred. Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source

@@ -2569,11 +2569,8 @@ fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
                     &format!("{name}/{format}/{capacity}/message#{index}"),
                 );
             }
-            if !options.respect_content_length && name != "jwz" {
-                continue;
-            }
-            // For the Content-Length and jwz corpora, use the same upstream
-            // goldens to verify recovered topology and raw bodies.
+            // Use each corpus's upstream goldens to verify recovered topology
+            // and raw bodies.
             // Envelope markers live in reader events,
             // not owned messages; compare each serialized message's wire range.
             for logged in [false, true] {

@@ -3,9 +3,9 @@
 
 use mimecraft::{
     MimeContentStorage, MimeEntity, MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser,
-    MimePartWriteOptions, MimePosition, MimeReader, encodings::NewLineFormat,
+    MimePartWriteOptions, MimePosition, MimeReader, TextFormat, encodings::NewLineFormat,
 };
-use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 
 struct ShortSource<R> {
     inner: R,
@@ -554,6 +554,209 @@ fn absent_parsed_content_does_not_gain_encoder_output() {
             assert!(content.is_empty());
         }
     }
+}
+
+#[test]
+fn huge_folded_header() {
+    for lines in [1, 100, 50_000] {
+        let mut value = String::from(" participant0@example.com");
+        for index in 1..lines {
+            value.push_str(&format!(",\r\n participant{index}@example.com"));
+        }
+        value.push_str("\r\n");
+        let mut data = format!("From: sender@example.com\r\nTo:{value}");
+        let subject_offset = data.len() as u64;
+        data.push_str("Subject: huge header\r\n\r\nThis is the body.\r\n");
+        let options = MimeEntityParseOptions {
+            max_header_length: 16 * 1024 * 1024,
+            ..Default::default()
+        };
+        for chunk in [7, 4096] {
+            let mut parser =
+                MimeParser::with_options(BufReader::with_capacity(chunk, data.as_bytes()), options)
+                    .unwrap();
+            let message = parser.parse_message().unwrap();
+            assert!(parser.is_end_of_stream());
+            drop(parser);
+            assert_huge_folded_header(message, &data, &value, subject_offset, lines);
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let mut parser = MimeParser::with_storage_and_options(
+                    ShortSource {
+                        inner: Cursor::new(data.as_bytes()),
+                        chunk,
+                    },
+                    storage,
+                    options,
+                )
+                .unwrap();
+                let message = parser.parse_message().unwrap();
+                assert!(parser.is_end_of_stream());
+                drop(parser);
+                assert_huge_folded_header(message, &data, &value, subject_offset, lines);
+            }
+        }
+    }
+}
+
+fn assert_huge_folded_header<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    data: &str,
+    value: &str,
+    subject_offset: u64,
+    lines: usize,
+) {
+    assert_eq!(message.headers().len(), 3);
+    assert_eq!(
+        message.headers().get("To").unwrap().raw_value(),
+        value.as_bytes()
+    );
+    assert_eq!(
+        message.headers().get("Subject").unwrap().offset(),
+        Some(subject_offset)
+    );
+    assert_eq!(message.subject().unwrap().text, "huge header");
+    let to = message.to();
+    assert!(to.issues.is_empty());
+    assert_eq!(to.addresses.len(), lines);
+    let mut output = Vec::new();
+    message.write_to(&mut output).unwrap();
+    assert_round_trip("huge folded header", data.as_bytes(), &output);
+    // The input has no Content-Type. Unlike MimeKit, the raw model does not
+    // supply text/plain, so inspect its body without assuming a TextPart.
+    let Some(MimeEntity::Part(part)) = message.body_mut() else {
+        panic!("expected leaf")
+    };
+    let mut body = Vec::new();
+    part.content_mut().decode_to(&mut body).unwrap();
+    assert_eq!(body, b"This is the body.\r\n");
+}
+
+#[test]
+fn japanese_message() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
+        .join("messages")
+        .join("japanese.txt");
+    let data = std::fs::read(path).unwrap();
+    for chunk in [1, 7, 4096] {
+        let mut parser = MimeParser::new(BufReader::with_capacity(chunk, data.as_slice()));
+        assert_japanese_message(parser.parse_message().unwrap());
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser = MimeParser::with_storage(
+                ShortSource {
+                    inner: Cursor::new(data.as_slice()),
+                    chunk,
+                },
+                storage,
+            )
+            .unwrap();
+            let message = parser.parse_message().unwrap();
+            drop(parser);
+            assert_japanese_message(message);
+        }
+    }
+}
+
+fn assert_japanese_message<R: Read + Seek>(mut message: MimeMessage<R>) {
+    assert_eq!(
+        message.subject().unwrap().text,
+        "\u{65e5}\u{672c}\u{8a9e}\u{30e1}\u{30fc}\u{30eb}\u{30c6}\u{30b9}\u{30c8} (testing Japanese emails)",
+    );
+    let expected = concat!(
+        "Let's see if both subject and body works fine...\n\n",
+        "\u{65e5}\u{672c}\u{8a9e}\u{304c}\n",
+        "\u{6b63}\u{5e38}\u{306b}\n",
+        "\u{9001}\u{308c}\u{3066}\u{3044}\u{308b}\u{304b}\n",
+        "\u{30c6}\u{30b9}\u{30c8}.\n",
+    );
+    assert_eq!(
+        message
+            .text_body(TextFormat::Plain)
+            .unwrap()
+            .unwrap()
+            .replace("\r\n", "\n"),
+        expected,
+    );
+}
+
+#[test]
+fn unmunged_from_lines() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
+        .join("mbox")
+        .join("unmunged.mbox.txt");
+    let original = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+    for data in [original.clone(), original.replace('\n', "\r\n")] {
+        for chunk in [1, 7, 4096] {
+            let mut reader = MimeReader::new(BufReader::with_capacity(chunk, data.as_bytes()));
+            let mut markers = Vec::new();
+            while reader
+                .read_mbox_message(|event| {
+                    if let MimeEvent::MboxMarker {
+                        bytes,
+                        position,
+                        end,
+                    } = event
+                    {
+                        assert_eq!(
+                            &data.as_bytes()[position.offset as usize..end.offset as usize],
+                            bytes
+                        );
+                        markers.push(bytes.trim_ascii_end().to_vec());
+                    }
+                    Ok(())
+                })
+                .unwrap()
+            {}
+            assert_eq!(
+                markers,
+                [
+                    b"From -".as_slice(),
+                    b"From Russia with love",
+                    b"From -",
+                    b"From Russia with love",
+                ]
+            );
+            assert_unmunged_mbox(MimeParser::new(BufReader::with_capacity(
+                chunk,
+                data.as_bytes(),
+            )));
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let parser = MimeParser::with_storage(
+                    ShortSource {
+                        inner: Cursor::new(data.as_bytes()),
+                        chunk,
+                    },
+                    storage,
+                )
+                .unwrap();
+                assert_unmunged_mbox(parser);
+            }
+        }
+    }
+}
+
+fn assert_unmunged_mbox<R: BufRead, C: Read + Seek>(mut parser: MimeParser<R, C>) {
+    let mut count = 0;
+    while let Some(mut message) = parser.parse_mbox_message().unwrap() {
+        let expected_subject = match count {
+            0 => Some("This is a test message with an unmunged From line"),
+            2 => Some("Another test message with an unmunged From line"),
+            _ => None,
+        };
+        assert_eq!(
+            message.subject().as_ref().map(|value| value.text.as_str()),
+            expected_subject
+        );
+        // Force the parts to write their content streams. Seeking in their
+        // content checks that the parser correctly resumes on its shared source.
+        message.write_to(&mut io::sink()).unwrap();
+        count += 1;
+    }
+    assert_eq!(count, 4);
+    assert!(parser.is_end_of_stream());
 }
 
 #[test]

@@ -64,6 +64,7 @@ pub(crate) fn read_mbox_marker<R, F>(
     options: &MimeEntityParseOptions,
     position: &mut MimePosition,
     buffer: &mut ScanBuffer,
+    initial: bool,
     callback: &mut F,
 ) -> io::Result<Option<usize>>
 where
@@ -86,12 +87,16 @@ where
             eof: false,
             scanner: buffer.scanner,
         };
+        if initial {
+            input.skip_byte_order_mark()?;
+        }
+        let marker_start = *input.position;
         // Like MimeKit's StepMboxMarkerStart, skip whole lines until a line
         // begins with "From ". A split line must never match in its middle.
         while input.next(&mut buffer.line, &[], false, options.max_header_length)? {}
         buffer.mbox_prefix = input.mbox_prefix;
         if buffer.mbox_prefix.is_none() {
-            return if position.offset == origin.offset {
+            return if position.offset == marker_start.offset {
                 Ok(None)
             } else {
                 Err(io::Error::new(
@@ -1030,6 +1035,45 @@ fn input_limit_error() -> io::Error {
 }
 
 impl<R: BufRead + ?Sized> Lines<'_, R> {
+    fn skip_byte_order_mark(&mut self) -> io::Result<()> {
+        // MimeKit checks for a UTF-8 BOM only when initializing a source,
+        // before scanning its first mbox marker, even across short reads.
+        for (index, expected) in [0xef, 0xbb, 0xbf].into_iter().enumerate() {
+            let input = loop {
+                match self.reader.fill_buf() {
+                    Ok(input) => break input,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+            if input.first() != Some(&expected) {
+                if input.is_empty() {
+                    // Failed to read any data: EOF.
+                    self.eof = true;
+                }
+                return if index == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        if input.is_empty() {
+                            io::ErrorKind::UnexpectedEof
+                        } else {
+                            io::ErrorKind::InvalidData
+                        },
+                        "incomplete UTF-8 byte order mark",
+                    ))
+                };
+            }
+            if self.remaining == 0 {
+                return Err(input_limit_error());
+            }
+            *self.position = self.position.advance(&[expected]);
+            self.reader.consume(1);
+            self.remaining -= 1;
+        }
+        Ok(())
+    }
+
     fn forward_content<F: EventSink>(
         &mut self,
         state: &mut State,
