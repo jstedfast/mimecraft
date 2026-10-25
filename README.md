@@ -6030,8 +6030,17 @@ The corpus includes opaque signed MIME from the OpenPGP, DKIM, and S/MIME test
 directories, without implementing cryptographic operations. Additional cases
 exercise raw padded/mixed-newline markers, mutation invalidation, binary tails,
 logged parsing, and output-failure retries.
+Lifecycle regressions cover failure after partially reading a message body,
+nested callback failures followed by source replacement, and owned messages
+remaining readable after their sources and parser are dropped. Extreme-nesting
+reader cases use MimeKit's 10,000 multipart and 100,000 message-wrapper depths,
+checking balanced events and exact innermost content without building a model.
+Ordinary header lines are rejected as boundary candidates before ancestor
+scanning, following MimeKit's boundary-prefix check.
+The double-boundary parser case also checks the recovered empty first child
+and exact serialization with and without logging.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
-reader lifecycle tests and persistent-source round trips remain deferred.
+reader/parser cases and persistent-source round trips remain deferred.
 Content-Length-aware mbox parsing and its golden comparisons remain unsupported.
 No LegacyMimeParser tests are included.
 

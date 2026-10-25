@@ -387,6 +387,12 @@ enum Frame {
 }
 
 fn find_boundary(stack: &[Frame], line: &[u8]) -> Option<(usize, bool)> {
+    // Like MimeKit's IsPossibleBoundary, reject ordinary lines before walking
+    // ancestors. Otherwise deeply nested headers cause quadratic scanning.
+    // Mbox From-lines are recognized separately by the input scanner.
+    if !line.starts_with(b"--") {
+        return None;
+    }
     // Check the immediate container before its ancestors, including those
     // outside an embedded message.
     stack.iter().enumerate().rev().find_map(|(index, frame)| {

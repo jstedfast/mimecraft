@@ -936,6 +936,8 @@ struct ThrowingReadStream<'a> {
     bytes: &'a [u8],
     position: usize,
     limit: usize,
+    max_chunk: usize,
+    failure: &'static str,
 }
 
 impl Read for ThrowingReadStream<'_> {
@@ -944,14 +946,19 @@ impl Read for ThrowingReadStream<'_> {
             return Ok(0);
         }
         if self.position >= self.limit {
-            return Err(io::Error::other("boundary lookahead exceeded limit"));
+            return Err(io::Error::other(self.failure));
         }
         if self.position == self.bytes.len() {
             return Ok(0);
         }
-        output[0] = self.bytes[self.position];
-        self.position += 1;
-        Ok(1)
+        let count = output
+            .len()
+            .min(self.max_chunk)
+            .min(self.limit - self.position)
+            .min(self.bytes.len() - self.position);
+        output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
     }
 }
 
@@ -967,6 +974,8 @@ fn message_part_boundary_lookahead_is_bounded() {
             bytes: text.as_bytes(),
             position: 0,
             limit: prefix.len() + 128,
+            max_chunk: 1,
+            failure: "boundary lookahead exceeded limit",
         };
         let mut parser = MimeParser::new(BufReader::with_capacity(capacity, source));
         let message = parser.parse_mbox_message().unwrap().unwrap();
@@ -978,5 +987,141 @@ fn message_part_boundary_lookahead_is_bounded() {
         let (source, pending) = parser.into_parts();
         assert_eq!(pending, b"From ");
         assert!(source.get_ref().position <= prefix.len() + 128);
+    }
+}
+
+#[test]
+fn parse_message_recovers_after_read_failure() {
+    let headers = b"Subject: broken\r\n\r\n";
+    let mut failing = headers.to_vec();
+    failing.extend_from_slice(&[b'x'; 4096]);
+    let throw_offset = headers.len() + 64;
+    let recovered = b"Subject: recovered\r\n\r\nok";
+    for capacity in [1, 7, 4096] {
+        for logged in [false, true] {
+            let source = ThrowingReadStream {
+                bytes: &failing,
+                position: 0,
+                limit: throw_offset,
+                max_chunk: 7,
+                failure: "Read failed.",
+            };
+            let mut parser = MimeParser::new(BufReader::with_capacity(capacity, source));
+            let error = if logged {
+                parser.parse_message_with_logger(&mut |_| Ok(()))
+            } else {
+                parser.parse_message()
+            }
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "Read failed.");
+            assert_eq!(parser.position().offset, throw_offset as u64);
+            assert!(!parser.is_end_of_stream());
+            assert_eq!(
+                parser.parse_message().unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            let old = parser.replace_source(BufReader::with_capacity(
+                capacity,
+                ThrowingReadStream {
+                    bytes: recovered,
+                    position: 0,
+                    limit: usize::MAX,
+                    max_chunk: 7,
+                    failure: "unexpected read failure",
+                },
+            ));
+            assert_eq!(old.get_ref().position, throw_offset);
+            assert_eq!(parser.position(), MimePosition::default());
+            let mut message = parser.parse_message().unwrap();
+            assert_eq!(message.subject().unwrap().text, "recovered");
+            let MimeEntity::Part(part) = message.body().unwrap() else {
+                panic!("expected text body")
+            };
+            assert_eq!(part.content().get_ref().get_ref(), b"ok");
+            assert_eq!(parser.position().offset, recovered.len() as u64);
+            assert!(parser.is_end_of_stream());
+            let mut output = Vec::new();
+            message.write_to(&mut output).unwrap();
+            assert_round_trip("recovery after body read failure", recovered, &output);
+        }
+    }
+}
+
+#[test]
+fn replacing_and_dropping_sources_keeps_owned_messages_readable() {
+    use std::io::Cursor;
+
+    let first = b"Subject: first\r\n\r\nfirst body";
+    let second = b"Subject: second\r\n\r\nsecond body";
+    for capacity in [1, 7, 4096] {
+        let mut parser = MimeParser::new(BufReader::with_capacity(
+            capacity,
+            Cursor::new(first.to_vec()),
+        ));
+        let mut messages = vec![parser.parse_message().unwrap()];
+        assert_eq!(parser.position().offset, first.len() as u64);
+        // Adapt SetStream's source replacement to the copying parser. Unlike
+        // persistent-source bodies, these models must survive source disposal.
+        let old = parser.replace_source(BufReader::with_capacity(
+            capacity,
+            Cursor::new(second.to_vec()),
+        ));
+        drop(old);
+        assert_eq!(parser.position(), MimePosition::default());
+        assert!(!parser.is_end_of_stream());
+        messages.push(parser.parse_message().unwrap());
+        assert_eq!(parser.position().offset, second.len() as u64);
+        drop(parser);
+        for (message, expected) in messages
+            .iter_mut()
+            .zip([first.as_slice(), second.as_slice()])
+        {
+            let mut output = Vec::new();
+            message.write_to(&mut output).unwrap();
+            assert_round_trip("owned content after source disposal", expected, &output);
+        }
+    }
+}
+
+#[test]
+fn double_boundary_before_part_preserves_raw_boundary() {
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let text = "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\n--b\nContent-Type: text/plain\n\nbody\n--b--\n".replace('\n', newline);
+        for capacity in [1, 7, 4096] {
+            for logged in [false, true] {
+                let mut parser =
+                    MimeParser::new(BufReader::with_capacity(capacity, text.as_bytes()));
+                let mut message = if logged {
+                    parser.parse_message_with_logger(&mut |_| Ok(()))
+                } else {
+                    parser.parse_message()
+                }
+                .unwrap();
+                let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(multipart.children().len(), 2);
+                for (entity, expected) in multipart.children().iter().zip([b"".as_slice(), b"body"])
+                {
+                    let MimeEntity::Part(part) = entity else {
+                        panic!()
+                    };
+                    assert_eq!(part.content().get_ref().get_ref(), expected);
+                }
+                let mut output = Vec::new();
+                message
+                    .write_to_with_options(
+                        &mut output,
+                        &MimePartWriteOptions {
+                            new_line_format: format,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                assert_round_trip("double boundary before part", text.as_bytes(), &output);
+                assert!(parser.is_end_of_stream());
+            }
+        }
     }
 }

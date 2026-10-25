@@ -600,30 +600,173 @@ fn opaque_message_option_and_failed_parser_lifecycle_are_explicit() {
     );
 }
 
+const INNERMOST_CONTENT: &str = "This is the innermost part.";
+
+fn generate_extremely_nested_message(multipart: bool, depth: usize) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut wire = String::from("From: mimekit@example.org\r\n");
+    for index in 0..depth {
+        if multipart {
+            write!(
+                wire,
+                "Content-Type: multipart/mixed; boundary=\"{index}\"\r\n\r\n--{index}\r\n"
+            )
+            .unwrap();
+        } else {
+            wire.push_str("Content-Type: message/rfc822\r\n\r\n");
+        }
+    }
+    wire.push_str("Content-Type: text/plain\r\n\r\n");
+    wire.push_str(INNERMOST_CONTENT);
+    if multipart {
+        for index in (0..depth).rev() {
+            write!(wire, "\r\n--{index}--").unwrap();
+        }
+        wire.push_str("\r\n");
+    }
+    wire.into_bytes()
+}
+
+// MimeReader must not recurse through nested entities: extremely deep
+// multipart or message/rfc822 trees can overflow the stack and abort the process
+// when the caller raises the depth limit. Do not construct recursive models here.
 #[test]
-fn event_reader_handles_deep_wrappers_without_constructing_recursive_models() {
-    let depth = 10_000;
-    let mut wire = b"Content-Type: message/rfc822\r\n\r\n".repeat(depth);
-    wire.extend_from_slice(b"\r\nbody");
-    let options = MimeEntityParseOptions {
-        max_depth: depth + 1,
-        ..Default::default()
-    };
-    let mut begins = 0;
-    let mut ends = 0;
-    MimeReader::with_options(wire.as_slice(), options)
-        .unwrap()
-        .read_entity(|event| {
-            match event {
-                MimeEvent::EntityBegin { .. } => begins += 1,
-                MimeEvent::EntityEnd { .. } => ends += 1,
-                _ => {}
+fn extremely_nested_entities() {
+    for (multipart, nesting) in [(true, 10_000), (false, 100_000)] {
+        let wire = generate_extremely_nested_message(multipart, nesting);
+        let options = MimeEntityParseOptions {
+            max_depth: nesting + 1,
+            ..Default::default()
+        };
+        let mut reader =
+            MimeReader::with_options(BufReader::with_capacity(4096, wire.as_slice()), options)
+                .unwrap();
+        let mut depth = 0;
+        let mut maximum = 0;
+        let mut leaves = 0;
+        let mut messages = 0;
+        let mut content = Vec::new();
+        reader
+            .read_message(|event| {
+                match event {
+                    MimeEvent::EntityBegin { kind, .. } => {
+                        depth += 1;
+                        maximum = maximum.max(depth);
+                        if kind == MimeEntityKind::Part {
+                            leaves += 1;
+                        } else {
+                            assert_eq!(
+                                kind,
+                                if multipart {
+                                    MimeEntityKind::Multipart
+                                } else {
+                                    MimeEntityKind::MessagePart
+                                }
+                            );
+                        }
+                    }
+                    MimeEvent::EntityEnd { .. } => {
+                        assert!(depth > 0);
+                        depth -= 1;
+                    }
+                    MimeEvent::MessageBegin { .. } => messages += 1,
+                    MimeEvent::MessageEnd { .. } => {
+                        assert!(messages > 0);
+                        messages -= 1;
+                    }
+                    MimeEvent::Content { bytes, .. } => content.extend_from_slice(bytes),
+                    _ => panic!("unexpected standalone header or mbox event"),
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(maximum, nesting + 1);
+        assert_eq!(depth, 0);
+        assert_eq!(messages, 0);
+        assert_eq!(leaves, 1);
+        assert_eq!(content, INNERMOST_CONTENT.as_bytes());
+        assert_eq!(reader.position().offset, wire.len() as u64);
+        assert!(reader.is_end_of_stream());
+    }
+}
+
+#[test]
+fn entity_frames_are_released_when_parsing_fails() {
+    let recovered = b"From: mimekit@example.org\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+    for multipart in [false, true] {
+        let wire = generate_extremely_nested_message(multipart, 20);
+        for capacity in [1, 7, 4096] {
+            for logged in [false, true] {
+                let mut reader =
+                    MimeReader::new(BufReader::with_capacity(capacity, wire.as_slice()));
+                let mut begins = 0;
+                let mut callback = |event: MimeEvent<'_>| {
+                    if let MimeEvent::EntityBegin { kind, .. } = event {
+                        begins += 1;
+                        if kind == MimeEntityKind::Part {
+                            return Err(io::Error::other("OnMimePartBegin"));
+                        }
+                    } else {
+                        assert!(matches!(event, MimeEvent::MessageBegin { .. }));
+                    }
+                    Ok(())
+                };
+                let error = if logged {
+                    reader.read_message_with_logger(&mut |_| Ok(()), &mut callback)
+                } else {
+                    reader.read_message(&mut callback)
+                }
+                .unwrap_err();
+                assert_eq!(error.to_string(), "OnMimePartBegin");
+                assert_eq!(begins, 21);
+                assert!(!reader.is_end_of_stream());
+                let failed_position = reader.position();
+                assert_eq!(
+                    reader
+                        .read_message(|_| panic!("failed source must not emit events"))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidInput
+                );
+                assert_eq!(reader.position(), failed_position);
+
+                // MimeKit checks its reusable frame cache for retained types.
+                // Rust's frames are operation-local and dropped on error; reuse
+                // must start a fresh tree without completing any old frames.
+                let old =
+                    reader.replace_source(BufReader::with_capacity(capacity, recovered.as_slice()));
+                drop(old);
+                assert_eq!(reader.position(), MimePosition::default());
+                assert!(reader.pending_input().is_empty());
+                let mut events = Vec::new();
+                let mut content = Vec::new();
+                reader
+                    .read_message(|event| {
+                        match event {
+                            MimeEvent::MessageBegin { position } => {
+                                assert_eq!(position, MimePosition::default());
+                                events.push("message+");
+                            }
+                            MimeEvent::EntityBegin { kind, .. } => {
+                                assert_eq!(kind, MimeEntityKind::Part);
+                                events.push("part+");
+                            }
+                            MimeEvent::Content { bytes, .. } => content.extend_from_slice(bytes),
+                            MimeEvent::EntityEnd { .. } => events.push("part-"),
+                            MimeEvent::MessageEnd { .. } => events.push("message-"),
+                            _ => panic!("unexpected standalone header or mbox event"),
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(events, ["message+", "part+", "part-", "message-"]);
+                assert_eq!(content, b"body\r\n");
+                assert_eq!(reader.position().offset, recovered.len() as u64);
+                assert!(reader.is_end_of_stream());
             }
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(begins, depth + 1);
-    assert_eq!(ends, begins);
+        }
+    }
 }
 
 struct FaultSource<'a> {
