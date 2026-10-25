@@ -1707,8 +1707,10 @@ impl MimeMessage {
     ) -> io::Result<Self> {
         crate::MimeParser::with_options(reader, *options)?.parse_message()
     }
+}
 
-    pub(crate) fn from_loaded_entity(mut body: MimeEntity) -> Self {
+impl<R> MimeMessage<R> {
+    pub(crate) fn from_loaded_entity(mut body: MimeEntity<R>) -> Self {
         let mut headers = HeaderList::new();
         let mut content_headers = HeaderList::new();
         // Only a message root splits Content-* fields into its body.

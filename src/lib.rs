@@ -105,6 +105,8 @@
 //! [`MimeReader`] emits synchronous structural and borrowed content events with
 //! original byte offsets and line numbers. [`MimeParser`] builds the owned
 //! models from those events; both entity and message load APIs use this path.
+//! [`MimeContentStorage`] selects copied or source-backed bodies through
+//! [`MimeParser::with_storage`], with independent cursors and shared source ownership.
 //! [`MimeReader::read_headers`] and [`MimeParser::parse_headers`] read standalone
 //! raw header blocks with limits and offsets, leaving buffered body bytes unread.
 //! Reader/parser source replacement preserves limits and returns the old buffered
@@ -214,6 +216,7 @@
 //! to customize body tags and suppress link labels, paragraphs, or quotations.
 //! [`io::BoundedStream`] exposes a seekable source range without copying it,
 //! suitable for storing a MIME body's subrange in [`MimeContent`].
+//! [`io::SharedStream`] coordinates read-only access through independent cursors.
 //! [`io::ChainedStream`] joins seekable sources into one logical stream with
 //! cross-boundary reads/writes and combined-offset seeking.
 //! [`io::MemoryBlockStream`] supplies block-backed, growable in-memory storage
@@ -342,6 +345,7 @@ mod message_partial;
 mod message_priority;
 mod mime_compliance;
 mod mime_content;
+mod mime_content_storage;
 mod mime_entity;
 mod mime_entity_load;
 mod mime_entity_prepare;
@@ -416,6 +420,7 @@ pub use mime_compliance::{
     MimeComplianceSeverity, MimeComplianceValidators, MimeComplianceViolation,
 };
 pub use mime_content::MimeContent;
+pub use mime_content_storage::{MimeContentStorage, MimeContentStream};
 pub use mime_entity::{AttachmentEditError, Attachments, BodyParts, LeafParts, MimeEntity};
 pub use mime_entity_prepare::MimePrepareError;
 pub use mime_iterator::{MimeIterator, MimeIteratorPositionError, MimePathParseError};

@@ -1598,9 +1598,56 @@ between messages. This is not an unconditional constant-memory guarantee.
 
 `MimeParser` consumes the same reader events to build existing owned models.
 `parse_entity` and `parse_message` return their respective models, retaining
-stored encoded bodies in `Cursor<Vec<u8>>` at position zero. Message parsing
+stored encoded bodies in `Cursor<Vec<u8>>` at position zero by default. Message parsing
 partitions root Content-* fields onto the body without losing header offsets.
 `MimeEntity::load` and `MimeMessage::load` now delegate to this parser.
+
+`MimeParser::with_storage(source, storage)` selects body storage explicitly
+on the same parser. `MimeContentStorage::Memory` copies encoded bodies;
+`MimeContentStorage::Source` retains bounded ranges in the original seekable input, implementing
+MimeKit's formerly named persistent mode. Both choices return models whose
+body streams are `MimeContentStream<S>` instead of the default cursor type.
+The ordinary `new`/`with_options` constructors and `load` methods remain copying
+APIs with their original return types and accept nonseekable `BufRead` sources.
+
+```rust
+use std::io::Cursor;
+use mimecraft::{MimeContentStorage, MimeParser};
+
+let input = Cursor::new(b"Subject: example\r\n\r\nbody".to_vec());
+let mut parser = MimeParser::with_storage(input, MimeContentStorage::Source).unwrap();
+let mut message = parser.parse_message().unwrap();
+drop(parser);
+let mut output = Vec::new();
+message.write_to(&mut output).unwrap();
+assert_eq!(output, b"Subject: example\r\n\r\nbody");
+```
+
+The explicit-storage constructors require `Read + Seek`, with no nonseekable
+fallback. They query the initial position and add a 4 KiB input buffer;
+`with_storage_and_options(source, storage, options)` validates limits first.
+Reader/header offsets remain relative to that initial position, while body
+ranges include its absolute offset. Headers, tree structure, preambles,
+epilogues, and original boundary framing remain in memory. Source mode avoids
+body copies but still scans all input and enforces the same limits and reporting.
+
+An owned source stays alive until its last parser/body/shared handle drops.
+Passing `&mut source` instead borrows it; returned source-backed models cannot
+outlive that borrow. The explicit-storage return type carries the source's
+lifetime even when `Memory` is selected; use the ordinary copying constructors
+when borrowed input must be reusable while the returned models remain alive.
+The backing data must remain unchanged; writes through other file handles,
+truncation, or rewriting an mbox archive invalidate stored ranges.
+
+Each source-backed body and the parser have independent cursors. Reads may be
+interleaved with subsequent mbox parses, including buffered read-ahead, or run
+on separate threads when the source is `Send`. Shared seek/read operations are
+synchronized, and source errors propagate rather than falling back to copies.
+`replace_storage_source(source)` queries the replacement's position before
+resetting the parser, returns the previous buffered shared source, and preserves
+the selected storage mode and options. Old messages keep the old source.
+A rejected replacement leaves parser state unchanged. The ordinary
+`replace_source` also accepts an already buffered `SharedStream` in this mode.
 
 Compliance reporting is opt-in. Reader methods `read_entity_with_logger`,
 `read_message_with_logger`, `read_mbox_message_with_logger`,
@@ -1698,7 +1745,7 @@ assert_eq!(parser.into_inner(), b"body");
 ```
 
 Both types provide `with_options(source, MimeEntityParseOptions)`, `options`,
-`position`, `get_ref`, and `into_inner`. Constructors perform no I/O; zero
+`position`, `get_ref`, and `into_inner`. These copying/event constructors perform no I/O; zero
 limits fail immediately. Each installed source supports one standalone operation,
 or the status-group or mbox iteration modes described below. Standalone header reading
 stops at the separator or EOF, while entity/message reading runs through EOF.
@@ -4158,8 +4205,14 @@ also supports reading, and `Write` when it supports writing. Unlike MimeKit's
 nonseekable fallback, the start boundary always identifies a seekable offset.
 Owned streams and mutable references both work; borrowing replaces
 `leaveOpen`. Nested views use their immediate source's coordinate system.
-This supplies range-backed content storage, not automatic MIME-body discovery
-or a complete persistent message parser.
+The adapter does not discover MIME ranges itself; `MimeParser` with `Source`
+storage discovers them and constructs read-only bounded shared views.
+
+`io::SharedStream` owns a seekable input (or a mutable borrow), with an
+independent absolute cursor per clone and no source-mutation API. A shared
+mutex keeps each seek/read pair atomic. Construction queries the input
+position; the source is released when the last handle drops. Source errors,
+incorrect absolute seek results, and poisoned locks are explicit I/O errors.
 
 Reads are clipped to the remaining range and return zero at a fixed end
 without accessing the source. Earlier source EOF does not shorten the declared
@@ -6051,7 +6104,8 @@ snake_case and applicable inline comments; synchronous cases also cover the
 input-fragmentation scenarios from its asynchronous variants.
 Parser round-trip coverage now includes all 21 upstream delimiter-newline cases
 in LF and CRLF, with repeated `ensure_new_line` serialization, and the 69-file
-synchronous nonpersistent fixture corpus across one-byte, short, and full refills.
+synchronous fixture corpus across one-byte, short, and full refills, using
+both copying and source-backed storage as well as the original default API.
 The corpus includes opaque signed MIME from the OpenPGP, DKIM, and S/MIME test
 directories, without implementing cryptographic operations. Additional cases
 exercise raw padded/mixed-newline markers, mutation invalidation, binary tails,
@@ -6066,10 +6120,12 @@ scanning, following MimeKit's boundary-prefix check.
 The double-boundary parser case also checks the recovered empty first child
 and exact serialization with and without logging.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
-reader/parser cases and persistent-source round trips remain deferred.
+reader/parser cases remain deferred. Source-storage cases also cover shared
+mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source
+replacement, concurrent decoding, backing-source reads, and seek/read failures.
 Opt-in Content-Length-aware mbox parsing compares the original `content-length`
 Unix/DOS offset goldens across one-byte, short, and full refills. Parser cases
-check the same corpus's topology, raw bodies, and exact message serialization
+check the same corpus's topology, raw bodies/source ranges, and exact message serialization
 with and without logging. Additional regressions cover MimeKit's embedded
 From-marker case, numeric-prefix and duplicate-header rules, thresholds inside
 prefixes and buffered chunks, nested lengths, EOF, resource limits, source
@@ -6243,7 +6299,11 @@ handling adapts the outer-header length parsing and `CheckBoundary` /
 Borrowed buffered content and small withheld-newline storage adapt
 `ScanContent` without copying every ordinary line; ambiguous padded
 delimiter candidates still require buffering under the input-size limit.
-In-memory cursors replace the source's memory-block/persistent-stream choice.
+`MimeContentStorage::Memory` / `Source` follows MimeKit's enum-based storage
+contract. In-memory cursors implement copied bodies; bounded shared streams
+implement source-backed bodies. Rust ownership replaces caller-managed stream
+lifetime, and independent synchronized cursors adapt the parser-position
+restoration in `MimeParser.Initialize` without discarding buffered read-ahead.
 Preamble endings are retained; nested epilogues exclude parent framing and
 start after their own closing marker's newline. Recovery preserves malformed
 metadata and truncated containers while resource/source failures remain fatal.
@@ -6826,7 +6886,7 @@ and LF. Rates count input bytes and report the median of five timed
 samples after warm-up. These are in-memory microbenchmarks, not message-parser or
 end-to-end I/O throughput, and results depend on the CPU and compiler.
 
-The `mime_reader` benchmark ports the synchronous, nonpersistent reader and
+The `mime_reader` benchmark ports the synchronous reader and
 parser workloads from MimeKit's `Benchmarks/MimeParserBenchmarks.cs`, retaining
 their benchmark names: `StarTrekMessage`, `ContentLengthMbox`, `JwzMbox`,
 `HeaderStressTest`, and `MixedNested64`. `NestedRfc822x1000` is reader-only, as
@@ -6839,13 +6899,24 @@ uses default mbox framing, matching upstream's benchmark, not its optional
 Content-Length-aware parsing mode. Nesting generators preserve the upstream
 wire format; only those cases raise the depth limit to include the final leaf.
 
+Each parser workload reports the original `MimeParser_*` default-copying
+baseline plus a `MimeParser_Source_*` variant. The source-backed variant uses
+the explicit-storage constructor with borrowed seekable `Cursor` input,
+including shared-source setup in its timing. Both use the same fixture bytes
+without cloning the input. Reader baselines
+remain `MimeReader_*`; the 1,000-level reader-only workload stays reader-only.
+
 Fixtures are loaded/generated outside timing. Each iteration creates a fresh
 4 KiB buffered in-memory source and reader/parser; reader callbacks do no work,
-and parser timing includes owned-model construction and drop. Message counts,
+and parser timing includes source setup, model construction, and drop.
+Bodies are not read or decoded after parsing: `Source` measures scanning and
+retaining body ranges, whereas `Memory` also copies encoded bodies. Each mbox
+message is dropped before parsing the next, rather than retaining the archive's
+entire model. Message counts,
 full input consumption, and EOF are checked before timing. After warm-up, five
 samples of at least 100 ms report median input MiB/s and messages/s. The existing
 timing harness is retained; it does not reproduce BenchmarkDotNet's allocation
-diagnostics or statistical machinery. Async, persistent-source, and
+diagnostics or statistical machinery. Async and
 LegacyMimeParser variants are not included.
 
 These are cached in-memory workloads without decoding, storage, network I/O,

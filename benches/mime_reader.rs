@@ -5,12 +5,12 @@ use std::{
     fmt::Write as _,
     fs,
     hint::black_box,
-    io::BufReader,
+    io::{BufRead, BufReader, Cursor, Read, Seek},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use mimecraft::{MimeEntityParseOptions, MimeParser, MimeReader};
+use mimecraft::{MimeContentStorage, MimeEntityParseOptions, MimeParser, MimeReader};
 
 // MimeKit buffers its MemoryStream input internally. Rust takes BufRead
 // sources, so include a fresh 4 KiB input buffer in each operation instead.
@@ -65,9 +65,25 @@ fn read(data: &[u8], options: MimeEntityParseOptions, mbox: bool) -> (usize, u64
     )
 }
 
-fn parse(data: &[u8], options: MimeEntityParseOptions, mbox: bool) -> (usize, u64, bool) {
+fn parse_default(data: &[u8], options: MimeEntityParseOptions, mbox: bool) -> (usize, u64, bool) {
     let source = BufReader::with_capacity(BUFFER_SIZE, black_box(data));
-    let mut parser = MimeParser::with_options(source, options).unwrap();
+    parse(MimeParser::with_options(source, options).unwrap(), mbox)
+}
+
+fn parse_source(data: &[u8], options: MimeEntityParseOptions, mbox: bool) -> (usize, u64, bool) {
+    // The source-storage constructor includes a shared source and 4 KiB buffer.
+    // Cursor borrows the fixture without copying.
+    let source = Cursor::new(black_box(data));
+    let parser =
+        MimeParser::with_storage_and_options(source, MimeContentStorage::Source, options).unwrap();
+    assert_eq!(parser.get_ref().capacity(), BUFFER_SIZE);
+    parse(parser, mbox)
+}
+
+fn parse<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    mbox: bool,
+) -> (usize, u64, bool) {
     let messages = if mbox {
         let mut messages = 0;
         while let Some(message) = parser.parse_mbox_message().unwrap() {
@@ -153,6 +169,9 @@ fn main() {
     println!(
         "Fresh 4 KiB buffered sources; reader callbacks are no-ops; parsing includes model construction/drop."
     );
+    println!(
+        "MimeParser = default copying API; MimeParser_Source = source-backed API; bodies are not read after parsing."
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let messages = root.join("benches").join("data").join("messages");
     let mbox = root.join("tests").join("data").join("mbox");
@@ -206,8 +225,14 @@ fn main() {
             read(&data, options, mbox)
         });
         measure(&format!("MimeParser_{name}"), data.len(), messages, || {
-            parse(&data, options, mbox)
+            parse_default(&data, options, mbox)
         });
+        measure(
+            &format!("MimeParser_Source_{name}"),
+            data.len(),
+            messages,
+            || parse_source(&data, options, mbox),
+        );
     }
     // Upstream benchmarks this depth with the reader only, not owned parsing.
     measure("MimeReader_NestedRfc822x1000", nested.len(), 1, || {

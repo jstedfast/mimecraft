@@ -2,14 +2,15 @@
 // Includes tests adapted from MimeKit's MimeReaderTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
 use std::{fs, path::Path};
 
 use mimecraft::{
     ContentEncoding, HeaderTooLong, MimeComplianceIssue,
     MimeCompliancePositionKind as PositionKind, MimeComplianceViolation as Violation,
-    MimeContentKind, MimeEntity, MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeParser,
-    MimePosition, MimeReader, encodings::NewLineFormat,
+    MimeContentKind, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityKind,
+    MimeEntityParseOptions, MimeEvent, MimeParser, MimePosition, MimeReader,
+    encodings::NewLineFormat,
 };
 
 fn assert_position(wire: &[u8], position: MimePosition) {
@@ -2436,12 +2437,17 @@ fn assert_mime_offsets(expected: &MimeOffsets, actual: &MimeOffsets, path: &str)
     }
 }
 
-fn assert_mbox_model(wire: &[u8], expected: &MimeOffsets, entity: &MimeEntity) {
+fn assert_mbox_model<R: Read + Seek>(
+    wire: &[u8],
+    expected: &MimeOffsets,
+    entity: &MimeEntity<R>,
+    read: &impl Fn(&R, &MimeOffsets) -> Vec<u8>,
+) {
     match entity {
         MimeEntity::Part(part) => {
             assert!(expected.children.is_none() && expected.message.is_none());
             assert_eq!(
-                part.content().get_ref().get_ref(),
+                read(part.content().get_ref(), expected),
                 &wire[expected.headers_end_offset as usize..expected.end_offset as usize],
             );
         }
@@ -2449,7 +2455,7 @@ fn assert_mbox_model(wire: &[u8], expected: &MimeOffsets, entity: &MimeEntity) {
             let children = expected.children.as_ref().expect("expected multipart");
             assert_eq!(multipart.children().len(), children.len());
             for (child, expected) in multipart.children().iter().zip(children) {
-                assert_mbox_model(wire, expected, child);
+                assert_mbox_model(wire, expected, child, read);
             }
         }
         MimeEntity::Message(part) => match (part.message(), &expected.message) {
@@ -2458,12 +2464,56 @@ fn assert_mbox_model(wire: &[u8], expected: &MimeOffsets, entity: &MimeEntity) {
                     wire,
                     expected.body.as_ref().unwrap(),
                     message.body().unwrap(),
+                    read,
                 );
             }
             (None, None) => {}
             _ => panic!("embedded message presence differs"),
         },
     }
+}
+
+fn assert_mbox_messages<R: BufRead, C: Read + Seek>(
+    parser: &mut MimeParser<R, C>,
+    wire: &[u8],
+    expected: &[MimeOffsets],
+    format: NewLineFormat,
+    logged: bool,
+    read: impl Fn(&C, &MimeOffsets) -> Vec<u8>,
+) {
+    for expected in expected {
+        let mut message = if logged {
+            parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+        } else {
+            parser.parse_mbox_message()
+        }
+        .unwrap()
+        .expect("expected mbox message");
+        assert_mbox_model(
+            wire,
+            expected.body.as_ref().unwrap(),
+            message.body().unwrap(),
+            &read,
+        );
+        let mut output = Vec::new();
+        message
+            .write_to_with_options(
+                &mut output,
+                &mimecraft::MimePartWriteOptions {
+                    new_line_format: format,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            &wire[expected.begin_offset as usize..expected.end_offset as usize],
+            "message at {}",
+            expected.begin_offset,
+        );
+    }
+    assert!(parser.parse_mbox_message().unwrap().is_none());
+    assert!(parser.is_end_of_stream());
 }
 
 fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
@@ -2532,42 +2582,54 @@ fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
                     options,
                 )
                 .unwrap();
-                for expected in &expected {
-                    let mut message = if logged {
-                        parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
-                    } else {
-                        parser.parse_mbox_message()
-                    }
-                    .unwrap()
-                    .expect("expected mbox message");
-                    assert_mbox_model(
+                let newline = if format == "unix" {
+                    NewLineFormat::Unix
+                } else {
+                    NewLineFormat::Dos
+                };
+                assert_mbox_messages(
+                    &mut parser,
+                    wire,
+                    &expected,
+                    newline,
+                    logged,
+                    |cursor, _| cursor.get_ref().clone(),
+                );
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let mut parser = MimeParser::with_storage_and_options(
+                        Cursor::new(wire.as_slice()),
+                        storage,
+                        options,
+                    )
+                    .unwrap();
+                    // Retain the shared backing while varying actual reader
+                    // refills, rather than nesting a bypassable BufReader.
+                    let source = parser.get_ref().get_ref().clone();
+                    drop(parser.replace_source(BufReader::with_capacity(capacity, source)));
+                    assert_mbox_messages(
+                        &mut parser,
                         wire,
-                        expected.body.as_ref().unwrap(),
-                        message.body().unwrap(),
-                    );
-                    let mut output = Vec::new();
-                    message
-                        .write_to_with_options(
-                            &mut output,
-                            &mimecraft::MimePartWriteOptions {
-                                new_line_format: if format == "unix" {
-                                    NewLineFormat::Unix
-                                } else {
-                                    NewLineFormat::Dos
-                                },
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap();
-                    assert_eq!(
-                        output,
-                        &wire[expected.begin_offset as usize..expected.end_offset as usize],
-                        "{name}/{format}/{capacity}, message at {}",
-                        expected.begin_offset,
+                        &expected,
+                        newline,
+                        logged,
+                        |stream, expected| match stream {
+                            MimeContentStream::Memory(cursor) => cursor.get_ref().clone(),
+                            MimeContentStream::Source(range) => {
+                                assert_eq!(range.start_boundary(), expected.headers_end_offset);
+                                assert_eq!(range.end_boundary(), Some(expected.end_offset));
+                                let mut copy = mimecraft::io::BoundedStream::new(
+                                    range.get_ref().clone(),
+                                    range.start_boundary(),
+                                    range.end_boundary(),
+                                )
+                                .unwrap();
+                                let mut bytes = Vec::new();
+                                copy.read_to_end(&mut bytes).unwrap();
+                                bytes
+                            }
+                        },
                     );
                 }
-                assert!(parser.parse_mbox_message().unwrap().is_none());
-                assert!(parser.is_end_of_stream());
             }
         }
     }

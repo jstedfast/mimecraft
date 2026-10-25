@@ -4,6 +4,7 @@
 //!
 //! [`BoundedStream`] provides relative seeking and range-limited reading/writing
 //! over a seekable source, without copying MIME body bytes.
+//! [`SharedStream`] shares read-only source access through independent cursors.
 //! [`ChainedStream`] concatenates seekable sources without combining their data.
 //! [`MemoryBlockStream`] stores growable body data in separate memory blocks,
 //! with seeking and zero-initialized resizing.
@@ -21,6 +22,7 @@ mod filtered_reader;
 mod filtered_writer;
 mod measuring_stream;
 mod memory_block_stream;
+mod shared_stream;
 
 pub use bounded_stream::BoundedStream;
 pub use chained_stream::ChainedStream;
@@ -28,6 +30,7 @@ pub use filtered_reader::FilteredReader;
 pub use filtered_writer::FilteredWriter;
 pub use measuring_stream::MeasuringStream;
 pub use memory_block_stream::MemoryBlockStream;
+pub use shared_stream::SharedStream;
 
 use std::io::{self, Seek, SeekFrom};
 

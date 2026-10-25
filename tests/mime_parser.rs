@@ -2,10 +2,67 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use mimecraft::{
-    MimeEntity, MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser, MimePartWriteOptions,
-    MimePosition, MimeReader, encodings::NewLineFormat,
+    MimeContentStorage, MimeEntity, MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser,
+    MimePartWriteOptions, MimePosition, MimeReader, encodings::NewLineFormat,
 };
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
+
+struct ShortSource<R> {
+    inner: R,
+    chunk: usize,
+}
+
+impl<R: Read> Read for ShortSource<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let count = bytes.len().min(self.chunk);
+        self.inner.read(&mut bytes[..count])
+    }
+}
+
+impl<R: Seek> Seek for ShortSource<R> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(from)
+    }
+}
+
+fn assert_storage_round_trip(
+    input: &[u8],
+    expected: &[u8],
+    mbox: bool,
+    chunk: usize,
+    options: MimePartWriteOptions,
+) {
+    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+        let mut parser = MimeParser::with_storage_and_options(
+            ShortSource {
+                inner: Cursor::new(input),
+                chunk,
+            },
+            storage,
+            MimeEntityParseOptions {
+                max_header_length: 16 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut message = if mbox {
+            parser.parse_mbox_message().unwrap().unwrap()
+        } else {
+            parser.parse_message().unwrap()
+        };
+        assert!(parser.is_end_of_stream());
+        assert_eq!(parser.position().offset, input.len() as u64);
+        drop(parser);
+        let mut output = Vec::new();
+        if mbox {
+            output.extend_from_slice(&input[..=input.iter().position(|&b| b == b'\n').unwrap()]);
+        }
+        message
+            .write_to_with_options(&mut output, &options)
+            .unwrap();
+        assert_round_trip(&format!("{storage:?}, chunk {chunk}"), expected, &output);
+    }
+}
 
 const DELIMITER_NEW_LINE_HEADERS: &str = "From: mimekit@example.com\nTo: mimekit@example.com\nSubject: delimiter new-line test\nMIME-Version: 1.0\n";
 
@@ -105,6 +162,21 @@ fn delimiter_new_line_round_trip() {
                             text.as_bytes()
                         },
                         &output,
+                    );
+                    assert_storage_round_trip(
+                        text.as_bytes(),
+                        if ensure_new_line {
+                            ensured.as_bytes()
+                        } else {
+                            text.as_bytes()
+                        },
+                        false,
+                        capacity,
+                        MimePartWriteOptions {
+                            new_line_format: format,
+                            ensure_new_line,
+                            ..Default::default()
+                        },
                     );
                 }
             }
@@ -220,6 +292,16 @@ fn round_trip_test_data_messages() {
                     failures.push(format!("{label}: write: {error}"));
                     break;
                 }
+                assert_storage_round_trip(
+                    expected,
+                    expected,
+                    mbox,
+                    capacity,
+                    MimePartWriteOptions {
+                        new_line_format: format,
+                        ..Default::default()
+                    },
+                );
                 if output != expected {
                     let offset = expected
                         .iter()

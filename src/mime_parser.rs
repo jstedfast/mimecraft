@@ -1,17 +1,21 @@
 // Adapted from MimeKit's MimeParser.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead, Cursor};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
+use std::ops::Range;
 
 use crate::{
-    ContentEncoding, HeaderList, MessagePart, MimeContent, MimeContentKind, MimeEntity,
-    MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeMessage, MimePart, MimePosition,
-    MimeReader, Multipart,
+    ContentEncoding, HeaderList, MessagePart, MimeContent, MimeContentKind, MimeContentStorage,
+    MimeContentStream, MimeEntity, MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeMessage,
+    MimePart, MimePosition, MimeReader, Multipart,
+    io::{BoundedStream, SharedStream},
 };
 
 /// Constructs owned MIME models from the synchronous [`MimeReader`] events.
 ///
-/// Leaf content is stored undecoded in memory at position zero. Message roots
+/// Leaf content is stored undecoded at position zero, in memory by default.
+/// [`Self::with_storage`] can instead retain bounded seekable-source ranges.
+/// Message roots
 /// partition Content-* headers onto their bodies; ordinary child entities keep
 /// all their headers. Header offsets retain their original input origin.
 ///
@@ -20,8 +24,8 @@ use crate::{
 /// Alternatively, [`Self::parse_status_group`] incrementally reads a sequence
 /// of delivery-status header groups on the same source.
 /// [`Self::parse_mbox_message`] selects incremental mbox iteration instead.
-/// It does not provide persistent-source bodies or async parsing. Models still buffer
-/// content; use [`MimeReader`] directly to process content incrementally.
+/// Async parsing is not provided. Use [`MimeReader`] directly to process content
+/// incrementally without constructing a model.
 ///
 /// ```
 /// use mimecraft::MimeParser;
@@ -32,8 +36,10 @@ use crate::{
 /// assert_eq!(parser.position().offset, 24);
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub struct MimeParser<R> {
+pub struct MimeParser<R, C = Cursor<Vec<u8>>> {
     reader: MimeReader<R>,
+    factory: ContentFactory<C>,
+    factory_for: fn(&R, MimeContentStorage) -> ContentFactory<C>,
 }
 
 impl<R: BufRead> MimeParser<R> {
@@ -41,6 +47,8 @@ impl<R: BufRead> MimeParser<R> {
     pub fn new(source: R) -> Self {
         Self {
             reader: MimeReader::new(source),
+            factory: memory_factory(&(), MimeContentStorage::Memory),
+            factory_for: memory_factory,
         }
     }
 
@@ -52,7 +60,109 @@ impl<R: BufRead> MimeParser<R> {
     pub fn with_options(source: R, options: MimeEntityParseOptions) -> io::Result<Self> {
         Ok(Self {
             reader: MimeReader::with_options(source, options)?,
+            factory: memory_factory(&(), MimeContentStorage::Memory),
+            factory_for: memory_factory,
         })
+    }
+}
+
+impl MimeParser<()> {
+    /// Creates a parser with explicit body storage and default limits.
+    ///
+    /// Accepts an owned or borrowed `Read + Seek` source at its current position.
+    /// Both modes use a 4 KiB buffer; use the ordinary [`MimeParser::new`] constructor
+    /// for nonseekable input and the existing in-memory body type.
+    ///
+    /// Source-backed bodies retain the input independently of the parser and
+    /// remain readable after source replacement or parser drop. Each body and
+    /// the parser have independent cursors, including buffered mbox read-ahead.
+    /// Offsets reported by the parser are relative to the initial input position;
+    /// body ranges refer to absolute positions in the backing source.
+    /// The return type carries `S`'s lifetime even in `Memory` mode; use
+    /// [`MimeParser::new`] for copies independent of a borrowed source's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the initial source-position query failure.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContentStorage, MimeParser};
+    ///
+    /// let input = Cursor::new(b"Subject: example\r\n\r\nbody".to_vec());
+    /// let mut parser = MimeParser::with_storage(input, MimeContentStorage::Source)?;
+    /// let mut message = parser.parse_message()?;
+    /// drop(parser);
+    /// let mut wire = Vec::new();
+    /// message.write_to(&mut wire)?;
+    /// assert_eq!(wire, b"Subject: example\r\n\r\nbody");
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    ///
+    /// Borrowed content cannot outlive its source:
+    ///
+    /// ```compile_fail
+    /// use std::io::Cursor;
+    /// use mimecraft::{MimeContentStorage, MimeParser};
+    ///
+    /// let mut message = {
+    ///     let mut input = Cursor::new(b"\r\nbody");
+    ///     let mut parser = MimeParser::with_storage(&mut input, MimeContentStorage::Source).unwrap();
+    ///     parser.parse_message().unwrap()
+    /// };
+    /// message.write_to(&mut Vec::new()).unwrap();
+    /// ```
+    ///
+    /// Nonseekable sources cannot select source storage (there is no fallback):
+    ///
+    /// ```compile_fail
+    /// use mimecraft::{MimeContentStorage, MimeParser};
+    ///
+    /// let parser = MimeParser::with_storage(b"\r\nbody".as_slice(), MimeContentStorage::Source);
+    /// ```
+    pub fn with_storage<S: Read + Seek>(
+        source: S,
+        storage: MimeContentStorage,
+    ) -> io::Result<MimeParser<BufReader<SharedStream<S>>, MimeContentStream<S>>> {
+        Self::with_storage_and_options(source, storage, MimeEntityParseOptions::default())
+    }
+
+    /// Creates a seekable-source parser with explicit storage and limits.
+    ///
+    /// Validates limits before querying the source position. Ownership,
+    /// buffering, and source errors follow [`Self::with_storage`].
+    pub fn with_storage_and_options<S: Read + Seek>(
+        source: S,
+        storage: MimeContentStorage,
+        options: MimeEntityParseOptions,
+    ) -> io::Result<MimeParser<BufReader<SharedStream<S>>, MimeContentStream<S>>> {
+        options.validate()?;
+        let source = BufReader::with_capacity(4096, SharedStream::new(source)?);
+        Ok(MimeParser {
+            factory: source_factory(&source, storage),
+            factory_for: source_factory,
+            reader: MimeReader::with_options(source, options)?,
+        })
+    }
+}
+
+impl<S: Read + Seek> MimeParser<BufReader<SharedStream<S>>, MimeContentStream<S>> {
+    /// Replaces the backing source, retaining the selected storage and options.
+    ///
+    /// The old source and buffered read-ahead are returned. Previously parsed
+    /// bodies keep the old source; new bodies reference the replacement.
+    /// Queries the new source position before changing parser state; a failed
+    /// query leaves the parser unchanged. Save pending mbox lookahead separately.
+    pub fn replace_storage_source(&mut self, source: S) -> io::Result<BufReader<SharedStream<S>>> {
+        let source = BufReader::with_capacity(4096, SharedStream::new(source)?);
+        Ok(self.replace_source(source))
+    }
+}
+
+impl<R: BufRead, C: Read + Seek> MimeParser<R, C> {
+    /// Returns the selected body storage.
+    pub fn storage(&self) -> MimeContentStorage {
+        self.factory.storage
     }
 
     /// Returns the supplied options.
@@ -115,8 +225,8 @@ impl<R: BufRead> MimeParser<R> {
     pub fn parse_entity_with_logger(
         &mut self,
         logger: &mut dyn crate::MimeComplianceLogger,
-    ) -> io::Result<MimeEntity> {
-        let mut builder = Builder::default();
+    ) -> io::Result<MimeEntity<C>> {
+        let mut builder = Builder::new(&self.factory);
         self.reader.read(false, &mut builder, Some(logger))?;
         Ok(builder
             .entity
@@ -131,8 +241,8 @@ impl<R: BufRead> MimeParser<R> {
     pub fn parse_message_with_logger(
         &mut self,
         logger: &mut dyn crate::MimeComplianceLogger,
-    ) -> io::Result<MimeMessage> {
-        let mut builder = Builder::default();
+    ) -> io::Result<MimeMessage<C>> {
+        let mut builder = Builder::new(&self.factory);
         self.reader.read(true, &mut builder, Some(logger))?;
         Ok(builder
             .message
@@ -146,8 +256,8 @@ impl<R: BufRead> MimeParser<R> {
     pub fn parse_mbox_message_with_logger(
         &mut self,
         logger: &mut dyn crate::MimeComplianceLogger,
-    ) -> io::Result<Option<MimeMessage>> {
-        let mut builder = Builder::default();
+    ) -> io::Result<Option<MimeMessage<C>>> {
+        let mut builder = Builder::new(&self.factory);
         if self
             .reader
             .read_mbox_message_impl(&mut builder, Some(logger))?
@@ -181,7 +291,7 @@ impl<R: BufRead> MimeParser<R> {
     /// Follows [`MimeReader::replace_source`]: preserves options, resets
     /// positions and completion/failure state, and performs no source I/O.
     /// Save [`Self::pending_input`] first if mbox prefix lookahead is needed.
-    /// Previously returned models own their content and remain unchanged.
+    /// Previously returned models keep their copied content or shared old source.
     ///
     /// ```
     /// use mimecraft::MimeParser;
@@ -199,6 +309,7 @@ impl<R: BufRead> MimeParser<R> {
     /// # Ok::<(), std::io::Error>(())
     /// ```
     pub fn replace_source(&mut self, source: R) -> R {
+        self.factory = (self.factory_for)(&source, self.factory.storage);
         self.reader.replace_source(source)
     }
 
@@ -301,8 +412,8 @@ impl<R: BufRead> MimeParser<R> {
     ///
     /// Propagates reader errors without returning a partial tree. A second parse
     /// attempt returns `InvalidInput`, even if the first attempt failed.
-    pub fn parse_entity(&mut self) -> io::Result<MimeEntity> {
-        let mut builder = Builder::default();
+    pub fn parse_entity(&mut self) -> io::Result<MimeEntity<C>> {
+        let mut builder = Builder::new(&self.factory);
         self.reader.read(false, &mut builder, None)?;
         Ok(builder
             .entity
@@ -312,8 +423,8 @@ impl<R: BufRead> MimeParser<R> {
     /// Parses a message, separating its headers from its root body's headers.
     ///
     /// Follows [`Self::parse_entity`]'s ownership, limits, and error behavior.
-    pub fn parse_message(&mut self) -> io::Result<MimeMessage> {
-        let mut builder = Builder::default();
+    pub fn parse_message(&mut self) -> io::Result<MimeMessage<C>> {
+        let mut builder = Builder::new(&self.factory);
         self.reader.read(true, &mut builder, None)?;
         Ok(builder
             .message
@@ -340,8 +451,8 @@ impl<R: BufRead> MimeParser<R> {
     /// assert!(parser.parse_mbox_message()?.is_none());
     /// # Ok::<(), std::io::Error>(())
     /// ```
-    pub fn parse_mbox_message(&mut self) -> io::Result<Option<MimeMessage>> {
-        let mut builder = Builder::default();
+    pub fn parse_mbox_message(&mut self) -> io::Result<Option<MimeMessage<C>>> {
+        let mut builder = Builder::new(&self.factory);
         if self.reader.read_mbox_message_impl(&mut builder, None)? {
             Ok(Some(
                 builder
@@ -364,41 +475,109 @@ impl<R: BufRead> MimeParser<R> {
     }
 }
 
-#[derive(Default)]
-struct Builder {
-    stack: Vec<Frame>,
-    entity: Option<MimeEntity>,
-    message: Option<MimeMessage>,
+struct ContentFactory<C> {
+    // A prototype and constructor keep the builder generic without changing
+    // the default Cursor body type or requiring a public storage-strategy trait.
+    seed: C,
+    storage: MimeContentStorage,
+    create: fn(&C, Vec<u8>, Range<u64>) -> io::Result<C>,
+}
+
+fn memory_factory<R>(_: &R, _: MimeContentStorage) -> ContentFactory<Cursor<Vec<u8>>> {
+    ContentFactory {
+        seed: Cursor::new(Vec::new()),
+        storage: MimeContentStorage::Memory,
+        create: |_, bytes, _| Ok(Cursor::new(bytes)),
+    }
+}
+
+fn source_factory<R: Read + Seek>(
+    source: &BufReader<SharedStream<R>>,
+    storage: MimeContentStorage,
+) -> ContentFactory<MimeContentStream<R>> {
+    // Replacement may already have unread buffered input. The reader starts
+    // there, not at the backing handle's post-refill position.
+    let origin = source.get_ref().position() - source.buffer().len() as u64;
+    ContentFactory {
+        seed: match storage {
+            MimeContentStorage::Memory => MimeContentStream::Memory(Cursor::new(Vec::new())),
+            MimeContentStorage::Source => MimeContentStream::Source(
+                BoundedStream::new(source.get_ref().clone(), origin, Some(origin))
+                    .expect("empty range is valid"),
+            ),
+        },
+        storage,
+        create: |seed, bytes, range| match seed {
+            MimeContentStream::Memory(_) => Ok(MimeContentStream::Memory(Cursor::new(bytes))),
+            MimeContentStream::Source(source) => {
+                let origin = source.start_boundary();
+                let start = origin.checked_add(range.start);
+                let end = origin.checked_add(range.end);
+                let (Some(start), Some(end)) = (start, end) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "body source offset overflow",
+                    ));
+                };
+                Ok(MimeContentStream::Source(BoundedStream::new(
+                    source.get_ref().clone(),
+                    start,
+                    Some(end),
+                )?))
+            }
+        },
+    }
+}
+
+struct Builder<'a, C> {
+    factory: &'a ContentFactory<C>,
+    stack: Vec<Frame<C>>,
+    entity: Option<MimeEntity<C>>,
+    message: Option<MimeMessage<C>>,
     body_separator: bool,
     end_boundary: Option<MimePosition>,
 }
 
-enum Frame {
+impl<'a, C> Builder<'a, C> {
+    fn new(factory: &'a ContentFactory<C>) -> Self {
+        Self {
+            factory,
+            stack: Vec::new(),
+            entity: None,
+            message: None,
+            body_separator: false,
+            end_boundary: None,
+        }
+    }
+}
+
+enum Frame<C> {
     Entity {
         headers: HeaderList,
-        content: Content,
+        content: Content<C>,
         parsed: crate::mime_entity::ParsedEntity,
         headers_end: MimePosition,
     },
-    Message(Option<MimeEntity>),
+    Message(Option<MimeEntity<C>>),
 }
 
-enum Content {
+enum Content<C> {
     Part {
         encoding: ContentEncoding,
         bytes: Vec<u8>,
+        length: u64,
     },
     Multipart {
-        children: Vec<MimeEntity>,
+        children: Vec<MimeEntity<C>>,
         preamble: Vec<u8>,
         epilogue: Vec<u8>,
         framing: crate::multipart::ParsedMultipart,
         boundary_end: u64,
     },
-    MessagePart(Option<MimeMessage>),
+    MessagePart(Option<MimeMessage<C>>),
 }
 
-impl crate::mime_reader::EventSink for Builder {
+impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
     fn end_boundary(&mut self, position: Option<MimePosition>) {
         self.end_boundary = position;
     }
@@ -453,6 +632,7 @@ impl crate::mime_reader::EventSink for Builder {
                         MimeEntityKind::Part => Content::Part {
                             encoding,
                             bytes: Vec::new(),
+                            length: 0,
                         },
                         MimeEntityKind::Multipart => Content::Multipart {
                             children: Vec::new(),
@@ -465,15 +645,41 @@ impl crate::mime_reader::EventSink for Builder {
                     },
                 });
             }
-            MimeEvent::Content { kind, bytes, .. } => {
-                let Some(Frame::Entity { content, .. }) = self.stack.last_mut() else {
+            MimeEvent::Content {
+                kind,
+                bytes,
+                position,
+            } => {
+                let Some(Frame::Entity {
+                    content,
+                    headers_end,
+                    ..
+                }) = self.stack.last_mut()
+                else {
                     unreachable!("content events belong to an entity");
                 };
                 // The reader already excludes the newline owned by a following
                 // delimiter. Copy stored bytes without decoding or normalizing.
                 match (kind, content) {
-                    (MimeContentKind::Body, Content::Part { bytes: body, .. }) => {
-                        body.extend_from_slice(bytes)
+                    (
+                        MimeContentKind::Body,
+                        Content::Part {
+                            bytes: body,
+                            length,
+                            ..
+                        },
+                    ) => {
+                        assert_eq!(
+                            position.offset,
+                            headers_end.offset + *length,
+                            "body ranges are contiguous"
+                        );
+                        *length += bytes.len() as u64;
+                        // MimeKit keeps no memory stream in Source mode. The
+                        // reader still scans content, but only its range is kept.
+                        if self.factory.storage == MimeContentStorage::Memory {
+                            body.extend_from_slice(bytes);
+                        }
                     }
                     (MimeContentKind::Preamble, Content::Multipart { preamble, .. }) => {
                         preamble.extend_from_slice(bytes)
@@ -499,17 +705,35 @@ impl crate::mime_reader::EventSink for Builder {
                 else {
                     unreachable!("entity end matches an entity frame");
                 };
-                let mut entity: MimeEntity = match (kind, content) {
-                    (MimeEntityKind::Part, Content::Part { bytes, encoding }) => {
+                let mut entity: MimeEntity<C> = match (kind, content) {
+                    (
+                        MimeEntityKind::Part,
+                        Content::Part {
+                            bytes,
+                            encoding,
+                            length,
+                        },
+                    ) => {
                         // With no body, the header block's final newline also
                         // precedes the next boundary. Rust retains an empty
                         // stream rather than MimeKit's null Content.
-                        parsed.no_content = bytes.is_empty()
+                        parsed.no_content = length == 0
                             && new_line_format.is_none()
                             && self
                                 .end_boundary
                                 .is_none_or(|boundary| boundary.offset <= headers_end.offset);
-                        let mut body = MimeContent::with_encoding(Cursor::new(bytes), encoding);
+                        // MimeReader passes only bytes within the content range,
+                        // excluding delimiter-owned newlines. At an empty body,
+                        // its header newline can also belong to the delimiter.
+                        let end = headers_end.offset.checked_add(length).ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::InvalidData, "body end offset overflow")
+                        })?;
+                        let source = (self.factory.create)(
+                            &self.factory.seed,
+                            bytes,
+                            headers_end.offset..end,
+                        )?;
+                        let mut body = MimeContent::with_encoding(source, encoding);
                         body.set_new_line_format(new_line_format);
                         let recovered_encoding = crate::mime_part::transfer_encoding(&headers)
                             .is_err()
