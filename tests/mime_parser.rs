@@ -1125,3 +1125,101 @@ fn double_boundary_before_part_preserves_raw_boundary() {
         }
     }
 }
+
+#[test]
+fn message_rfc822_with_from_marker_before_message() {
+    let original = concat!(
+        "From -\n",
+        "From: mimekit@example.com\n",
+        "To: mimekit@example.com\n",
+        "Subject: test of message/rfc822 part with a From-marker before the message\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\n",
+        "MIME-Version: 1.0\n",
+        "Message-ID: <54AD68C9E3B0184CAC6041320424FD1B5B81E74D@localhost.localdomain>\n",
+        "X-Mailer: Microsoft Office Outlook 12.0\n",
+        "Content-Type: multipart/mixed;\n",
+        "\tboundary=\"----=_NextPart_000_003F_01CE98CE.6E826F90\"\n",
+        "Content-Length: 420\n\n\n",
+        "------=_NextPart_000_003F_01CE98CE.6E826F90\n",
+        "Content-Type: text/plain; charset=utf-8\n\n",
+        "This is the message body.\n\n",
+        "------=_NextPart_000_003F_01CE98CE.6E826F90\n",
+        "Content-Type: message/rfc822\n\n",
+        "From -\n",
+        "From: mimekit@example.com\n",
+        "To: mimekit@example.com\n",
+        "Subject: embedded message\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\n",
+        "MIME-Version: 1.0\n",
+        "Content-Type: text/plain; charset=utf-8\n\n",
+        "This is the embedded message body.\n",
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        // Like MimeKit's regression, convert newlines without correcting the
+        // declared length. It protects the From-line, not an exact body slice.
+        let text = original.replace("\r\n", "\n").replace('\n', newline);
+        for capacity in [1, 7, 4096] {
+            for logged in [false, true] {
+                let mut parser = MimeParser::with_options(
+                    BufReader::with_capacity(capacity, text.as_bytes()),
+                    MimeEntityParseOptions {
+                        respect_content_length: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut message = if logged {
+                    parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+                } else {
+                    parser.parse_mbox_message()
+                }
+                .unwrap()
+                .unwrap();
+                let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(multipart.children().len(), 2);
+                let MimeEntity::Part(part) = &multipart.children()[0] else {
+                    panic!()
+                };
+                assert_eq!(
+                    part.content().get_ref().get_ref(),
+                    format!("This is the message body.{newline}").as_bytes()
+                );
+                let MimeEntity::Message(wrapper) = &multipart.children()[1] else {
+                    panic!()
+                };
+                let embedded = wrapper.message().unwrap();
+                assert_eq!(embedded.subject().unwrap().text, "embedded message");
+                let MimeEntity::Part(part) = embedded.body().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(
+                    part.content_type().unwrap().unwrap().charset(),
+                    Some("utf-8")
+                );
+                assert_eq!(
+                    part.content().get_ref().get_ref(),
+                    format!("This is the embedded message body.{newline}").as_bytes()
+                );
+                let mut output = Vec::new();
+                message
+                    .write_to_with_options(
+                        &mut output,
+                        &MimePartWriteOptions {
+                            new_line_format: format,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                assert_round_trip(
+                    "embedded From-line with Content-Length",
+                    &text.as_bytes()["From -".len() + newline.len()..],
+                    &output,
+                );
+                assert!(parser.is_end_of_stream());
+                assert!(parser.parse_mbox_message().unwrap().is_none());
+            }
+        }
+    }
+}

@@ -327,6 +327,8 @@ impl<R: BufRead> MimeParser<R> {
     /// recovery, archive-relative offsets, and failure lifecycle.
     /// Envelope markers are not stored in the model; use the reader's marker
     /// events to retain them. Previously returned messages remain independent.
+    /// Enable [`MimeEntityParseOptions::respect_content_length`] to protect
+    /// body `From ` lines using the outer message's declared length.
     ///
     /// ```
     /// use mimecraft::MimeParser;

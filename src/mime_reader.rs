@@ -676,7 +676,9 @@ impl<R: BufRead> MimeReader<R> {
     /// Like MimeKit, a line beginning with exactly `From ` marks a message;
     /// its date/sender is not validated. Initial non-marker lines are skipped.
     /// A missing or unterminated marker is an error. `>From ` is ordinary data
-    /// and is not unescaped. Content-Length-based mbox variants are not supported.
+    /// and is not unescaped. Enable
+    /// [`MimeEntityParseOptions::respect_content_length`] for mbox variants that
+    /// use the outer Content-Length to protect body `From ` lines.
     /// The newline preceding a next marker is framing, not message content;
     /// at actual EOF all trailing content bytes are preserved.
     ///
@@ -744,6 +746,7 @@ impl<R: BufRead> MimeReader<R> {
             limits: self.options,
             reporting: Reporting::new(logger, self.compliance_options, true),
             message: true,
+            mbox_content_end: self.options.respect_content_length.then_some(0),
         };
         let end = engine::read_tree(
             &mut self.source,
@@ -795,6 +798,7 @@ impl<R: BufRead> MimeReader<R> {
             limits: self.options,
             reporting: Reporting::new(logger, self.compliance_options, message),
             message,
+            mbox_content_end: None,
         };
         engine::read_tree(
             &mut self.source,

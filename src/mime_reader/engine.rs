@@ -18,6 +18,8 @@ pub(crate) struct ReadContext<'a> {
     pub(crate) limits: MimeEntityParseOptions,
     pub(crate) reporting: crate::mime_compliance::Reporting<'a>,
     pub(crate) message: bool,
+    // None disables length handling; Some(0) awaits the outer message's headers.
+    pub(crate) mbox_content_end: Option<u64>,
 }
 
 impl std::ops::Deref for ReadContext<'_> {
@@ -78,6 +80,7 @@ where
             piece_at_line_start: true,
             piece_position: origin,
             mbox: true,
+            content_end: 0,
             mbox_prefix: None,
             borrowed: 0,
             eof: false,
@@ -175,6 +178,7 @@ where
         piece_at_line_start: true,
         piece_position: MimePosition::default(),
         mbox,
+        content_end: 0,
         mbox_prefix: None,
         borrowed: 0,
         eof: false,
@@ -195,6 +199,25 @@ where
     let mut pending_position = *input.position;
 
     loop {
+        if options.mbox_content_end.is_some()
+            && stack.is_empty()
+            && matches!(state, State::Headers { .. })
+        {
+            // MimeKit sets contentEnd after the outer headers, before probing
+            // any body line. Do not let our withheld separator delay this:
+            // the very first body line can be a protected mbox From-line.
+            consume_line(
+                pending,
+                pending_position,
+                &mut state,
+                &mut stack,
+                options,
+                header_limit,
+                callback,
+            )?;
+            pending.clear();
+            input.content_end = options.mbox_content_end.expect("mbox length mode enabled");
+        }
         if !matches!(state, State::Headers { .. })
             && input.forward_content(
                 &mut state,
@@ -606,6 +629,31 @@ fn emit_content<F: EventSink>(
     Ok(())
 }
 
+fn content_length(headers: &HeaderList) -> Option<u64> {
+    headers
+        .iter()
+        .filter(|header| !header.is_invalid() && header.id() == crate::HeaderId::ContentLength)
+        .find_map(|header| {
+            let raw = header.raw_value();
+            let mut index = 0;
+            crate::parse_utils::skip_whitespace(raw, &mut index);
+            // MimeKit requires SkipWhiteSpace to advance, then TryParseInt32 to
+            // consume digits. It ignores trailing text and keeps the first value
+            // that parses, rather than letting later duplicates replace it.
+            if index == 0 {
+                return None;
+            }
+            let start = index;
+            let mut value = 0i32;
+            while let Some(&byte) = raw.get(index).filter(|byte| byte.is_ascii_digit()) {
+                // Reject integer overflow instead of saturating an invalid length.
+                value = value.checked_mul(10)?.checked_add(i32::from(byte - b'0'))?;
+                index += 1;
+            }
+            (index > start).then_some(value as u64)
+        })
+}
+
 fn start_entity<F: EventSink>(
     headers: HeaderList,
     position: MimePosition,
@@ -615,6 +663,18 @@ fn start_entity<F: EventSink>(
     header_limit: NonZeroUsize,
     callback: &mut F,
 ) -> io::Result<State> {
+    if stack.is_empty()
+        && options.mbox_content_end.is_some()
+        && let Some(length) = content_length(&headers)
+    {
+        options.mbox_content_end =
+            Some(headers_end.offset.checked_add(length).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mbox content end offset overflow",
+                )
+            })?);
+    }
     if stack.is_empty() {
         // Before the first valid header, MimeKit permits only (munged) mbox
         // From-lines. A file containing ordinary garbage is not a MIME entity.
@@ -956,6 +1016,7 @@ struct Lines<'a, R: ?Sized> {
     piece_at_line_start: bool,
     piece_position: MimePosition,
     mbox: bool,
+    content_end: u64,
     mbox_prefix: Option<MimePosition>,
     borrowed: usize,
     eof: bool,
@@ -1008,16 +1069,24 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
         let multipart = stack
             .iter()
             .any(|frame| matches!(frame, Frame::Multipart { closed: false, .. }));
-        let possible = |byte: u8| (multipart && byte == b'-') || (self.mbox && byte == b'F');
+        let mbox = self.mbox && self.position.offset >= self.content_end;
+        let possible = |byte: u8| (multipart && byte == b'-') || (mbox && byte == b'F');
         if self.at_line_start && possible(input[0]) {
             return Ok(false);
         }
-        let input = &input[..input.len().min(self.remaining).min(CHUNK_SIZE)];
+        let mut count = input.len().min(self.remaining).min(CHUNK_SIZE);
+        if self.mbox && self.position.offset < self.content_end {
+            // A From-line only becomes an mbox boundary at or beyond contentEnd.
+            // Stop the borrowed scan at that offset so a later marker in this
+            // same buffer cannot be swallowed with the protected content.
+            count = (count as u64).min(self.content_end - self.position.offset) as usize;
+        }
+        let input = &input[..count];
         // Fuse candidate matching, line counting and newline-format detection,
         // rather than searching this same content again for each observation.
-        let mut scanned =
-            self.scanner
-                .scan(input, multipart, self.mbox, pending.last() == Some(&b'\r'));
+        let mut scanned = self
+            .scanner
+            .scan(input, multipart, mbox, pending.last() == Some(&b'\r'));
         let count = scanned.len;
         let bytes = &input[..count];
         let end = MimePosition {
@@ -1072,6 +1141,9 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
         line.clear();
         self.piece_position = *self.position;
         self.piece_at_line_start = self.at_line_start;
+        // As in MimeKit's CheckBoundary/IsPartialBoundary, compare the start
+        // of the line, not the position after reading its From-prefix.
+        let mbox = self.mbox && self.piece_position.offset >= self.content_end;
         if self.eof {
             return Ok(false);
         }
@@ -1097,17 +1169,15 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
                 .max(74)
         };
         loop {
-            if self.mbox && self.piece_at_line_start && line == b"From " {
+            if mbox && self.piece_at_line_start && line == b"From " {
                 // MimeKit's mbox boundary matching only checks the first five
                 // bytes, not the sender/date. Retain this prefix for the next
                 // call instead of buffering the next message or its marker.
                 self.mbox_prefix = Some(self.piece_position);
                 return Ok(false);
             }
-            let prefix = self.mbox
-                && self.piece_at_line_start
-                && line.len() < 5
-                && b"From ".starts_with(line);
+            let prefix =
+                mbox && self.piece_at_line_start && line.len() < 5 && b"From ".starts_with(line);
             if !prefix && self.borrowed != 0 {
                 return Err(input_limit_error());
             }

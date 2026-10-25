@@ -1781,7 +1781,33 @@ validating its sender/date. Initial non-marker lines are skipped under the
 input budget; nonempty input without a marker and unterminated marker lines
 are errors. `>From ` remains unchanged ordinary content. The newline preceding
 a next marker belongs to framing; EOF retains trailing content newlines.
-Content-Length-based mbox variants and automatic unescaping are not implemented.
+Automatic unescaping is not implemented. To honor the outer message's
+Content-Length, set `MimeEntityParseOptions::respect_content_length`:
+
+```rust
+use mimecraft::{MimeEntityParseOptions, MimeParser};
+
+let archive = b"From first\nContent-Length: 10\n\nFrom body\n\nFrom second\n\nlast";
+let options = MimeEntityParseOptions {
+    respect_content_length: true,
+    ..Default::default()
+};
+let mut parser = MimeParser::with_options(archive.as_slice(), options).unwrap();
+assert!(parser.parse_mbox_message().unwrap().is_some());
+assert!(parser.parse_mbox_message().unwrap().is_some());
+assert!(parser.parse_mbox_message().unwrap().is_none());
+```
+
+This option defaults to false and applies only to mbox iteration. Like MimeKit,
+it ignores `From ` lines whose start precedes the declared body end, including
+inside embedded messages, while still recognizing MIME boundaries. The length
+is a minimum marker offset, not a hard body limit: parsing continues until an
+eligible marker or EOF. An oversized length can absorb subsequent messages;
+it does not bypass input limits or produce a truncation error at EOF.
+The first usable outer Content-Length wins. A usable raw value begins with
+space, tab, CR, or LF, then unsigned decimal digits fitting in `i32`; trailing
+text is ignored. Invalid values and nested Content-Length fields do not change
+the threshold. Original header bytes are retained.
 
 Positions remain archive-relative. The input budget resets per message,
 including its envelope and framing (and initially skipped data), but excludes
@@ -1800,7 +1826,7 @@ source, and `replace_source` discards reader-owned lookahead, so save
 
 This is **not yet complete MimeKit reader/parser parity**. Entity/message parsing
 uses default malformed-message recovery and optional compliance diagnostics;
-Content-Length handling, persistent-source parsing, and async APIs remain
+Persistent-source parsing and async APIs remain
 deferred. `HeaderList::load` continues to support independent raw header blocks.
 
 Zero limits return `InvalidInput` before I/O. Exceeded limits return `InvalidData`.
@@ -6041,7 +6067,13 @@ The double-boundary parser case also checks the recovered empty first child
 and exact serialization with and without logging.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases and persistent-source round trips remain deferred.
-Content-Length-aware mbox parsing and its golden comparisons remain unsupported.
+Opt-in Content-Length-aware mbox parsing compares the original `content-length`
+Unix/DOS offset goldens across one-byte, short, and full refills. Parser cases
+check the same corpus's topology, raw bodies, and exact message serialization
+with and without logging. Additional regressions cover MimeKit's embedded
+From-marker case, numeric-prefix and duplicate-header rules, thresholds inside
+prefixes and buffered chunks, nested lengths, EOF, resource limits, source
+replacement, and fallible callbacks/loggers.
 No LegacyMimeParser tests are included.
 
 Async adapters remain deferred while message parsing and serialization APIs
@@ -6205,8 +6237,10 @@ Rust callbacks receive owned headers and borrowed content chunks with original
 byte/line positions. Mbox iteration adapts the source's five-byte marker
 recognition, initial-line skipping, envelope events, and outer-boundary newline
 ownership. Explicit method selection replaces a format property, and limits
-reset per message. Truncated multipart frames unwind; Content-Length handling is
-deferred. Borrowed buffered content and small withheld-newline storage adapt
+reset per message. Truncated multipart frames unwind; opt-in Content-Length
+handling adapts the outer-header length parsing and `CheckBoundary` /
+`IsPartialBoundary` offset checks, including `MessagePartBegin` lookahead.
+Borrowed buffered content and small withheld-newline storage adapt
 `ScanContent` without copying every ordinary line; ambiguous padded
 delimiter candidates still require buffering under the input-size limit.
 In-memory cursors replace the source's memory-block/persistent-stream choice.

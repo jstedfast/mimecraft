@@ -593,3 +593,397 @@ fn large_ordinary_content_is_borrowed_from_the_source_not_copied_into_lines() {
         "{borrowed}/{total} bytes borrowed"
     );
 }
+
+#[test]
+fn content_length_uses_the_first_usable_outer_value() {
+    for (headers, protects) in [
+        ("", false),
+        ("Content-Length: 0\n", false),
+        ("Content-Length: 1\n", true),
+        ("Content-Length:1\n", false),
+        ("Content-Length:\t0001 trailing text\n", true),
+        ("Content-Length:\n \t1\n", true),
+        ("Content-Length: \u{b}1\n", false),
+        ("Content-Length: -1\n", false),
+        ("Content-Length: +1\n", false),
+        ("Content-Length: invalid\n", false),
+        ("Content-Length: 2147483648\n", false),
+        ("Content-Length: 9999999999999999999999999999\n", false),
+        ("Content-Length: \nContent-Length: 1\n", true),
+        ("Content-Length: bad\nContent-Length: 1\n", true),
+        ("Content-Length: 2147483648\nContent-Length: 1\n", true),
+        ("Content-Length: 0\nContent-Length: 1\n", false),
+        ("Content-Length: 1\nContent-Length: 0\n", true),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let protected = "From body\nSubject: inside\n\npayload".replace('\n', newline);
+            let text = format!("From first\nSubject: first\n{headers}\nFrom body\nSubject: inside\n\npayload\nFrom next\nSubject: next\n\nlast").replace('\n', newline);
+            for capacity in [1, 7, 4096] {
+                for respect_content_length in [false, true] {
+                    for logged in [false, true] {
+                        let mut parser = MimeParser::with_options(
+                            BufReader::with_capacity(capacity, text.as_bytes()),
+                            MimeEntityParseOptions {
+                                respect_content_length,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        let first = if logged {
+                            parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+                        } else {
+                            parser.parse_mbox_message()
+                        }
+                        .unwrap()
+                        .unwrap();
+                        let MimeEntity::Part(part) = first.body().unwrap() else {
+                            panic!()
+                        };
+                        assert_eq!(
+                            part.content().get_ref().get_ref(),
+                            if respect_content_length && protects {
+                                protected.as_bytes()
+                            } else {
+                                b""
+                            },
+                            "{headers:?}/{newline:?}/{capacity}/{respect_content_length}/{logged}",
+                        );
+                        if !(respect_content_length && protects) {
+                            let inside = parser.parse_mbox_message().unwrap().unwrap();
+                            assert_eq!(inside.subject().unwrap().text, "inside");
+                        }
+                        let next = parser.parse_mbox_message().unwrap().unwrap();
+                        assert_eq!(next.subject().unwrap().text, "next");
+                        assert!(parser.parse_mbox_message().unwrap().is_none());
+                        assert!(parser.is_end_of_stream());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn content_length_threshold_is_a_line_start_floor_not_a_body_limit() {
+    for newline in ["\n", "\r\n"] {
+        let body = format!(
+            "From protected{newline}{}{newline}From next{newline}Subject: next{newline}{newline}last{newline}",
+            "plain\nFrog\n>From escaped\nxFrom midline\n"
+                .repeat(150)
+                .replace('\n', newline),
+        );
+        let next = body.find("From next").unwrap();
+        for length in [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            4095,
+            4096,
+            4097,
+            next - 1,
+            next,
+            next + 1,
+            body.len(),
+            i32::MAX as usize,
+        ] {
+            let headers = format!("From first{newline}Content-Length: {length}{newline}{newline}");
+            let text = format!("{headers}{body}");
+            let stop = if length == 0 {
+                Some(0)
+            } else if length <= next {
+                Some(next)
+            } else {
+                None
+            };
+            let expected = stop.map_or(body.as_str(), |stop| {
+                body[..stop].strip_suffix(newline).unwrap_or(&body[..stop])
+            });
+            for capacity in [1, 2, 3, 4, 5, 7, 31, 4095, 4096, 4097, 16384] {
+                let options = MimeEntityParseOptions {
+                    respect_content_length: true,
+                    max_input_bytes: stop.map_or(text.len(), |stop| headers.len() + stop),
+                    ..Default::default()
+                };
+                let mut reader = MimeReader::with_options(
+                    BufReader::with_capacity(capacity, text.as_bytes()),
+                    options,
+                )
+                .unwrap();
+                let mut content = Vec::new();
+                reader
+                    .read_mbox_message(|event| {
+                        if let MimeEvent::Content {
+                            bytes, position, ..
+                        } = event
+                        {
+                            check_position(text.as_bytes(), position);
+                            assert_eq!(
+                                bytes,
+                                &text.as_bytes()[position.offset as usize
+                                    ..position.offset as usize + bytes.len()]
+                            );
+                            content.extend_from_slice(bytes);
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(content, expected.as_bytes(), "{length}/{capacity}");
+                assert_eq!(
+                    reader.position().offset as usize,
+                    stop.map_or(text.len(), |stop| headers.len() + stop + 5)
+                );
+                assert_eq!(
+                    reader.pending_input(),
+                    if stop.is_some() {
+                        b"From ".as_slice()
+                    } else {
+                        b""
+                    }
+                );
+                assert_eq!(reader.is_end_of_stream(), stop.is_none());
+                let mut parser = MimeParser::with_options(
+                    BufReader::with_capacity(capacity, text.as_bytes()),
+                    options,
+                )
+                .unwrap();
+                let first = parser.parse_mbox_message().unwrap().unwrap();
+                let MimeEntity::Part(part) = first.body().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(part.content().get_ref().get_ref(), expected.as_bytes());
+            }
+        }
+    }
+}
+
+#[test]
+fn content_length_does_not_disable_mime_boundaries_or_use_nested_lengths() {
+    for nested_length in [0, i32::MAX] {
+        for newline in ["\n", "\r\n"] {
+            let body = format!("From preamble\n--b\nContent-Type: message/rfc822\nContent-Length: {nested_length}\n\nFrom embedded\nSubject: embedded\nContent-Length: {nested_length}\n\nFrom body\npayload\n--b--\nFrom epilogue\n").replace('\n', newline);
+            let headers = format!(
+                "Content-Type: multipart/mixed; boundary=b{newline}Content-Length: {}{newline}{newline}",
+                body.len()
+            );
+            let first = format!("{headers}{body}");
+            let text = format!(
+                "From first{newline}{first}{newline}From next{newline}Subject: next{newline}{newline}last"
+            );
+            for capacity in [1, 7, 4096] {
+                let options = MimeEntityParseOptions {
+                    respect_content_length: true,
+                    ..Default::default()
+                };
+                let mut parser = MimeParser::with_options(
+                    BufReader::with_capacity(capacity, text.as_bytes()),
+                    options,
+                )
+                .unwrap();
+                let mut message = parser
+                    .parse_mbox_message_with_logger(&mut |_| Ok(()))
+                    .unwrap()
+                    .unwrap();
+                let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(multipart.children().len(), 1);
+                let MimeEntity::Message(wrapper) = &multipart.children()[0] else {
+                    panic!()
+                };
+                let embedded = wrapper.message().unwrap();
+                assert_eq!(embedded.subject().unwrap().text, "embedded");
+                let MimeEntity::Part(part) = embedded.body().unwrap() else {
+                    panic!()
+                };
+                assert_eq!(
+                    part.content().get_ref().get_ref(),
+                    format!("From body{newline}payload").as_bytes()
+                );
+                let mut output = Vec::new();
+                message
+                    .write_to_with_options(
+                        &mut output,
+                        &mimecraft::MimePartWriteOptions {
+                            new_line_format: if newline == "\n" {
+                                NewLineFormat::Unix
+                            } else {
+                                NewLineFormat::Dos
+                            },
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(output, first.as_bytes());
+                assert_eq!(
+                    parser
+                        .parse_mbox_message()
+                        .unwrap()
+                        .unwrap()
+                        .subject()
+                        .unwrap()
+                        .text,
+                    "next"
+                );
+                assert!(parser.parse_mbox_message().unwrap().is_none());
+
+                // Content-Length has no effect outside mbox mode.
+                let mut standalone = MimeParser::with_options(
+                    BufReader::with_capacity(capacity, first.as_bytes()),
+                    options,
+                )
+                .unwrap();
+                let mut ordinary =
+                    MimeParser::new(BufReader::with_capacity(capacity, first.as_bytes()));
+                let mut actual = Vec::new();
+                let mut expected = Vec::new();
+                standalone
+                    .parse_message()
+                    .unwrap()
+                    .write_to(&mut actual)
+                    .unwrap();
+                ordinary
+                    .parse_message()
+                    .unwrap()
+                    .write_to(&mut expected)
+                    .unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn protected_content_respects_input_limits() {
+    let wire = b"From a\nContent-Length: 2147483647\n\nFrom body\n\nbody\n";
+    for max_input_bytes in [wire.len() - 1, wire.len()] {
+        let mut parser = MimeParser::with_options(
+            wire.as_slice(),
+            MimeEntityParseOptions {
+                respect_content_length: true,
+                max_input_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = parser.parse_mbox_message();
+        if max_input_bytes < wire.len() {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert!(!parser.is_end_of_stream());
+        } else {
+            assert!(result.unwrap().is_some());
+            assert!(parser.is_end_of_stream());
+        }
+    }
+}
+
+#[test]
+fn protected_content_errors_and_source_replacement() {
+    use mimecraft::{MimeComplianceIssue, MimeComplianceViolation};
+
+    let wire = b"From first\nContent-Length: 1000\n\nFrom body\n\0content\n";
+    for capacity in [1, 7, 4096] {
+        for logged in [false, true] {
+            let mut reader = MimeReader::with_options(
+                BufReader::with_capacity(capacity, wire.as_slice()),
+                MimeEntityParseOptions {
+                    respect_content_length: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut ended = false;
+            let mut callback = |event: MimeEvent<'_>| {
+                ended |= matches!(
+                    event,
+                    MimeEvent::EntityEnd { .. } | MimeEvent::MessageEnd { .. }
+                );
+                if !logged && matches!(event, MimeEvent::Content { .. }) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "content rejected",
+                    ));
+                }
+                Ok(())
+            };
+            let error = if logged {
+                reader.read_mbox_message_with_logger(
+                    &mut |issue: MimeComplianceIssue| {
+                        if issue.violation == MimeComplianceViolation::UnexpectedNullBytesInBody {
+                            assert_eq!(
+                                issue.stream_offset as usize,
+                                wire.iter().position(|&b| b == 0).unwrap()
+                            );
+                            Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "content rejected",
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    &mut callback,
+                )
+            } else {
+                reader.read_mbox_message(&mut callback)
+            }
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), "content rejected");
+            assert!(!ended);
+            assert!(!reader.is_end_of_stream());
+            assert_eq!(
+                reader
+                    .read_mbox_message(|_| panic!("failed reader"))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            reader.replace_source(BufReader::with_capacity(
+                capacity,
+                b"From a\n\nfirst\nFrom b\n\nsecond".as_slice(),
+            ));
+            assert!(reader.read_mbox_message(|_| Ok(())).unwrap());
+            assert!(reader.read_mbox_message(|_| Ok(())).unwrap());
+            assert!(!reader.read_mbox_message(|_| Ok(())).unwrap());
+        }
+    }
+    for fail in [false, true] {
+        let mut parser = MimeParser::with_options(
+            Interrupting {
+                input: wire,
+                interrupt: false,
+                fail,
+                eof_seen: false,
+            },
+            MimeEntityParseOptions {
+                respect_content_length: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = parser.parse_mbox_message();
+        if fail {
+            assert_eq!(result.unwrap_err().to_string(), "source");
+            assert_eq!(
+                parser.parse_mbox_message().unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        } else {
+            assert!(result.unwrap().is_some());
+            assert!(parser.is_end_of_stream());
+        }
+        parser.replace_source(Interrupting {
+            input: b"From a\n\nfirst\nFrom b\n\nsecond",
+            interrupt: false,
+            fail: false,
+            eof_seen: false,
+        });
+        assert!(parser.options().respect_content_length);
+        assert!(parser.parse_mbox_message().unwrap().is_some());
+        assert!(parser.parse_mbox_message().unwrap().is_some());
+        assert!(parser.parse_mbox_message().unwrap().is_none());
+    }
+}

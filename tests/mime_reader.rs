@@ -1131,6 +1131,7 @@ fn source_replacement_and_completion_queries_perform_no_io() {
         max_header_length: 128,
         max_depth: 4,
         parse_message_parts: false,
+        respect_content_length: true,
         allow_header_only: false,
     };
     let mut reader = MimeReader::with_options(NoIo, options).unwrap();
@@ -1212,6 +1213,7 @@ fn source_replacement_preserves_limits_and_message_interpretation_after_failures
         max_header_length: 32,
         max_depth: 1,
         parse_message_parts: false,
+        respect_content_length: true,
         allow_header_only: false,
     };
     for invalid in [
@@ -2434,7 +2436,37 @@ fn assert_mime_offsets(expected: &MimeOffsets, actual: &MimeOffsets, path: &str)
     }
 }
 
-fn assert_mbox_offsets(name: &str) {
+fn assert_mbox_model(wire: &[u8], expected: &MimeOffsets, entity: &MimeEntity) {
+    match entity {
+        MimeEntity::Part(part) => {
+            assert!(expected.children.is_none() && expected.message.is_none());
+            assert_eq!(
+                part.content().get_ref().get_ref(),
+                &wire[expected.headers_end_offset as usize..expected.end_offset as usize],
+            );
+        }
+        MimeEntity::Multipart(multipart) => {
+            let children = expected.children.as_ref().expect("expected multipart");
+            assert_eq!(multipart.children().len(), children.len());
+            for (child, expected) in multipart.children().iter().zip(children) {
+                assert_mbox_model(wire, expected, child);
+            }
+        }
+        MimeEntity::Message(part) => match (part.message(), &expected.message) {
+            (Some(message), Some(expected)) => {
+                assert_mbox_model(
+                    wire,
+                    expected.body.as_ref().unwrap(),
+                    message.body().unwrap(),
+                );
+            }
+            (None, None) => {}
+            _ => panic!("embedded message presence differs"),
+        },
+    }
+}
+
+fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("data")
@@ -2462,7 +2494,11 @@ fn assert_mbox_offsets(name: &str) {
         )
         .unwrap();
         for capacity in [1, 7, 4096] {
-            let mut reader = MimeReader::new(BufReader::with_capacity(capacity, wire.as_slice()));
+            let mut reader = MimeReader::with_options(
+                BufReader::with_capacity(capacity, wire.as_slice()),
+                options,
+            )
+            .unwrap();
             let mut recorder = MboxOffsetReader::default();
             while reader
                 .read_mbox_message(|event| recorder.record(wire, event))
@@ -2483,18 +2519,79 @@ fn assert_mbox_offsets(name: &str) {
                     &format!("{name}/{format}/{capacity}/message#{index}"),
                 );
             }
+            if !options.respect_content_length {
+                continue;
+            }
+            // For the Content-Length corpus, the parser uses the same upstream
+            // goldens to verify recovered topology and raw bodies.
+            // Envelope markers live in reader events,
+            // not owned messages; compare each serialized message's wire range.
+            for logged in [false, true] {
+                let mut parser = MimeParser::with_options(
+                    BufReader::with_capacity(capacity, wire.as_slice()),
+                    options,
+                )
+                .unwrap();
+                for expected in &expected {
+                    let mut message = if logged {
+                        parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+                    } else {
+                        parser.parse_mbox_message()
+                    }
+                    .unwrap()
+                    .expect("expected mbox message");
+                    assert_mbox_model(
+                        wire,
+                        expected.body.as_ref().unwrap(),
+                        message.body().unwrap(),
+                    );
+                    let mut output = Vec::new();
+                    message
+                        .write_to_with_options(
+                            &mut output,
+                            &mimecraft::MimePartWriteOptions {
+                                new_line_format: if format == "unix" {
+                                    NewLineFormat::Unix
+                                } else {
+                                    NewLineFormat::Dos
+                                },
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        output,
+                        &wire[expected.begin_offset as usize..expected.end_offset as usize],
+                        "{name}/{format}/{capacity}, message at {}",
+                        expected.begin_offset,
+                    );
+                }
+                assert!(parser.parse_mbox_message().unwrap().is_none());
+                assert!(parser.is_end_of_stream());
+            }
         }
     }
 }
 
 #[test]
 fn issue1189_mbox() {
-    assert_mbox_offsets("issue1189");
+    assert_mbox_offsets("issue1189", MimeEntityParseOptions::default());
 }
 
 #[test]
 fn jwz_mbox() {
-    assert_mbox_offsets("jwz");
+    assert_mbox_offsets("jwz", MimeEntityParseOptions::default());
+}
+
+#[test]
+fn content_length_mbox() {
+    assert_mbox_offsets(
+        "content-length",
+        MimeEntityParseOptions {
+            respect_content_length: true,
+            ..Default::default()
+        },
+    );
 }
 
 type ExpectedIssue = (Violation, u64, u64, PositionKind);

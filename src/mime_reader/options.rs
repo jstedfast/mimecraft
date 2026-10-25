@@ -39,6 +39,20 @@ pub struct MimeEntityParseOptions {
     /// this option. Truncated inner headers recover like ordinary entity headers.
     /// Existing bodies are not discarded.
     pub parse_message_parts: bool,
+    /// Honor the outer message's Content-Length when reading an mbox archive.
+    ///
+    /// Defaults to false. When enabled, `From ` lines before the declared body
+    /// end are ordinary data, including inside embedded messages. MIME
+    /// boundaries still match normally. The length is a minimum marker offset,
+    /// not a hard body limit: reading continues to the next eligible marker or
+    /// EOF. Input limits still apply, and a length beyond EOF is not an error.
+    ///
+    /// Matches MimeKit's first usable raw Content-Length: leading MIME
+    /// whitespace is required, followed by unsigned decimal digits fitting in
+    /// `i32`; trailing text is ignored. Invalid values are skipped. Nested
+    /// Content-Length fields do not override the outer length. Standalone
+    /// entity/message/header reading is unaffected.
+    pub respect_content_length: bool,
     /// Accept entity/message headers interrupted by EOF or an enclosing marker.
     ///
     /// Defaults to true, matching MimeKit's recovery. Applies to embedded headers
@@ -61,6 +75,7 @@ impl Default for MimeEntityParseOptions {
             max_depth: 64,
             max_header_length: 16 * 1024,
             parse_message_parts: true,
+            respect_content_length: false,
             allow_header_only: true,
         }
     }
