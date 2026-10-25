@@ -198,7 +198,7 @@ fn unknown_charsets_fail_before_io_and_invalid_bytes_fail_after_rewind() {
 
 #[test]
 fn decoding_failure_does_not_fall_back_to_an_earlier_alternative() {
-    let mut alternative = Multipart::new("alternative", "alt").unwrap();
+    let mut alternative = Multipart::with_boundary("alternative", "alt").unwrap();
     alternative.children_mut().extend([
         entity(Some("text/plain"), b"valid", ContentEncoding::Unspecified),
         entity(Some("text/plain"), b"\xff", ContentEncoding::Unspecified),

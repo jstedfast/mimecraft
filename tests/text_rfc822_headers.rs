@@ -202,7 +202,7 @@ fn absent_and_present_empty_messages_round_trip_at_eof_and_report_boundaries() {
             // Recovery can create a message without inventing its wire separator.
             assert_eq!(write(&mut parsed, format), wire);
 
-            let mut report: Multipart = Multipart::new("report", "b").unwrap();
+            let mut report: Multipart = Multipart::with_boundary("report", "b").unwrap();
             report.children_mut().push(entity);
             report
                 .children_mut()

@@ -202,14 +202,14 @@ fn transparent_implicit_wrappers_keep_wrapper_encoding_separate_from_inner_body(
 fn empty_implicit_messages_and_binary_suffixes_round_trip_in_nested_digests() {
     for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
         for suffix in [b"".as_slice(), b"\0\xff\r", b"\n", b"\r\n", b"\r\n\r\n"] {
-            let mut inner: Multipart = Multipart::new("digest", "inner").unwrap();
+            let mut inner: Multipart = Multipart::with_boundary("digest", "inner").unwrap();
             inner.children_mut().extend([
                 implicit(None),
                 implicit(Some(MimeMessage::new())),
                 implicit(Some(MimeMessage::with_body(binary(suffix)))),
             ]);
             inner.set_epilogue(b"inner epilogue\r".to_vec());
-            let mut outer: Multipart = Multipart::new("digest", "outer").unwrap();
+            let mut outer: Multipart = Multipart::with_boundary("digest", "outer").unwrap();
             outer.set_preamble(b"preamble\r\n".to_vec());
             outer
                 .children_mut()
@@ -264,7 +264,7 @@ fn detached_implicit_messages_need_an_explicit_type_before_standalone_writing() 
 
 #[test]
 fn writer_context_tracks_current_parent_headers_and_does_not_leak_through_messages() {
-    let mut digest: Multipart = Multipart::new("digest", "d").unwrap();
+    let mut digest: Multipart = Multipart::with_boundary("digest", "d").unwrap();
     digest.children_mut().push(implicit(None));
     digest
         .headers_mut()
@@ -292,7 +292,7 @@ fn writer_context_tracks_current_parent_headers_and_does_not_leak_through_messag
         Some(MessagePartError::MissingContentType)
     ));
 
-    let mut mixed: Multipart = Multipart::new("mixed", "m").unwrap();
+    let mut mixed: Multipart = Multipart::with_boundary("mixed", "m").unwrap();
     mixed.children_mut().push(implicit(None));
     digest.children_mut().clear();
     digest.children_mut().push(mixed.into());
@@ -335,7 +335,7 @@ fn invalid_explicit_types_remain_leaves_and_unknown_encodings_recover() {
         b"Content-Transfer-Encoding: unknown\r\n",
     ] {
         let part: MessagePart = MessagePart::from_parts(headers(raw_header), None);
-        let mut digest: Multipart = Multipart::new("digest", "d").unwrap();
+        let mut digest: Multipart = Multipart::with_boundary("digest", "d").unwrap();
         digest.children_mut().push(part.into());
         let mut output = Vec::new();
         assert_eq!(
@@ -420,8 +420,8 @@ fn implicit_messages_recover_structure_while_writers_reject_ancestor_overlap() {
                 .is_some()
         );
     }
-    let inner: Multipart = Multipart::new("mixed", "d-long").unwrap();
-    let mut digest: Multipart = Multipart::new("digest", "d").unwrap();
+    let inner: Multipart = Multipart::with_boundary("mixed", "d-long").unwrap();
+    let mut digest: Multipart = Multipart::with_boundary("digest", "d").unwrap();
     digest
         .children_mut()
         .push(implicit(Some(MimeMessage::with_body(inner.into()))));

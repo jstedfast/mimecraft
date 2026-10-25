@@ -192,7 +192,7 @@ pub fn write_entity<R: Read + Seek, W: Write + ?Sized>(
 /// ```
 /// use mimecraft::{MimeEntity, Multipart, TextPart, anonymize};
 ///
-/// let mut mixed: Multipart = Multipart::new("mixed", "example")?;
+/// let mut mixed: Multipart = Multipart::with_boundary("mixed", "example")?;
 /// mixed.children_mut().push(TextPart::new("plain", "secret")?.into());
 /// let mut entity: MimeEntity = mixed.into();
 /// let mut output = Vec::new();

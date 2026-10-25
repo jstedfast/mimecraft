@@ -60,7 +60,7 @@ fn encode_triplet(bytes: [u8; 3], count: usize) -> [u8; 4] {
     ]
 }
 
-pub(super) fn encode_unwrapped(input: &[u8], output: &mut Vec<u8>) {
+pub(crate) fn encode_unwrapped(input: &[u8], output: &mut Vec<u8>) {
     encode_unwrapped_with_backend(input, output, Backend::detect(input.len()));
 }
 

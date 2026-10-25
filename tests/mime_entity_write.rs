@@ -8,7 +8,7 @@ use mimecraft::{
 };
 
 fn container(boundary: &str) -> Multipart {
-    Multipart::new("mixed", boundary).unwrap()
+    Multipart::with_boundary("mixed", boundary).unwrap()
 }
 
 fn leaf(bytes: &[u8], encoding: ContentEncoding) -> MimeEntity {
@@ -589,7 +589,7 @@ fn child_io_failure_stops_before_following_siblings_and_preserves_borrows() {
         failing.fail_seek = fail_seek;
         let mut last = Source::new(false);
         {
-            let mut root = Multipart::new("mixed", "outer").unwrap();
+            let mut root = Multipart::with_boundary("mixed", "outer").unwrap();
             for source in [&mut first, &mut failing, &mut last] {
                 root.children_mut()
                     .push(MimePart::new(MimeContent::new(source)).into());
@@ -650,7 +650,7 @@ fn large_raw_sections_and_chunked_binary_sources_cross_filter_buffers() {
     source.inner = Cursor::new(payload.clone());
     let mut body = MimePart::new(MimeContent::new(source));
     body.set_content_transfer_encoding(ContentEncoding::Binary);
-    let mut root = Multipart::new("mixed", "outer").unwrap();
+    let mut root = Multipart::with_boundary("mixed", "outer").unwrap();
     root.children_mut().push(body.into());
     root.set_preamble(b"a\r\nb\n".repeat(4096));
     root.set_epilogue(b"a\r\nb\n".repeat(4096));
@@ -806,7 +806,7 @@ fn content_only_wrappers_keep_enclosed_message_headers_and_do_not_filter_bcc() {
 #[test]
 fn content_only_preserves_digest_child_defaults_but_not_for_standalone_wrappers() {
     let wrapper = MessagePart::from_parts(HeaderList::new(), Some(MimeMessage::new()));
-    let mut digest: Multipart = Multipart::new("digest", "digest").unwrap();
+    let mut digest: Multipart = Multipart::with_boundary("digest", "digest").unwrap();
     digest.children_mut().push(wrapper.into());
     let mut output = Vec::new();
     digest.write_content_to(&mut output).unwrap();
@@ -980,7 +980,7 @@ fn content_only_child_io_failure_leaves_later_borrowed_sources_untouched() {
     let mut failing = Source::new(true);
     let mut last = Source::new(false);
     {
-        let mut root = Multipart::new("mixed", "outer").unwrap();
+        let mut root = Multipart::with_boundary("mixed", "outer").unwrap();
         for source in [&mut first, &mut failing, &mut last] {
             root.children_mut()
                 .push(MimePart::new(MimeContent::new(source)).into());

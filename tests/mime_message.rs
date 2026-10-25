@@ -43,7 +43,7 @@ fn constructors_are_deterministic_and_do_not_require_a_readable_source_type() {
     assert!(empty.headers().is_empty());
     assert!(empty.body().is_none());
     assert_eq!(empty.leaf_parts().count(), 0);
-    let container = Multipart::<NoIo>::new("mixed", "boundary").unwrap();
+    let container = Multipart::<NoIo>::with_boundary("mixed", "boundary").unwrap();
     let mut message = MimeMessage::with_body(container.into());
     assert!(message.headers().is_empty());
     assert!(message.body_mut().is_some());
@@ -155,11 +155,11 @@ fn header_edits_are_independent_and_typed_factories_work_without_caches() {
 
 #[test]
 fn message_leaf_traversal_preserves_depth_first_order() {
-    let mut inner: Multipart = Multipart::new("alternative", "inner").unwrap();
+    let mut inner: Multipart = Multipart::with_boundary("alternative", "inner").unwrap();
     inner.children_mut().extend([leaf(b"one"), leaf(b"two")]);
-    let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     outer.children_mut().extend([
-        Multipart::new("mixed", "empty").unwrap().into(),
+        Multipart::with_boundary("mixed", "empty").unwrap().into(),
         inner.into(),
         leaf(b"three"),
     ]);
@@ -424,7 +424,7 @@ fn message_options_reach_body_encoders_and_root_newline_handling() {
     part.content_mut().decode_to(&mut decoded).unwrap();
     assert_eq!(decoded, vec![b'a'; 80]);
 
-    let mut multipart: Multipart = Multipart::new("mixed", "boundary").unwrap();
+    let mut multipart: Multipart = Multipart::with_boundary("mixed", "boundary").unwrap();
     multipart.set_epilogue(b"epilogue".to_vec());
     let mut messages = [
         MimeMessage::new(),
@@ -461,12 +461,12 @@ fn supplied_bcc_and_misplaced_headers_are_not_silently_removed_or_moved() {
 #[test]
 fn nested_load_edit_write_preserves_binary_bytes_and_root_epilogue() {
     for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
-        let mut inner: Multipart = Multipart::new("alternative", "inner").unwrap();
+        let mut inner: Multipart = Multipart::with_boundary("alternative", "inner").unwrap();
         inner
             .children_mut()
             .extend([leaf(b"\0\xff\r"), leaf(b"\r\n")]);
         inner.set_epilogue(b"tail\r".to_vec());
-        let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+        let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
         outer.children_mut().push(inner.into());
         outer.set_preamble(b"preamble".to_vec());
         outer.set_epilogue(b"final".to_vec());

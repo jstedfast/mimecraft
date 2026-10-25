@@ -11,7 +11,8 @@ use crate::{
 /// A multipart/related container with checked root-document access and editing.
 ///
 /// Composes [`Multipart`], using the same root-selection rules as text-body
-/// lookup. Construction requires an explicit boundary. Loading and conversion
+/// lookup. [`Self::new`] generates a boundary; [`Self::with_boundary`] accepts
+/// an explicit value instead. Loading and conversion
 /// retain the ordinary [`MimeEntity::Multipart`] variant. Raw headers remain
 /// authoritative; operations do not read, seek, or copy child content.
 ///
@@ -23,7 +24,7 @@ use crate::{
 /// ```
 /// use mimecraft::{MimeEntity, MultipartRelated, TextFormat, TextPart};
 ///
-/// let mut related: MultipartRelated = MultipartRelated::new("related-boundary")?;
+/// let mut related: MultipartRelated = MultipartRelated::new()?;
 /// assert!(related.root()?.is_none());
 /// related.set_root(TextPart::new("html", "<p>Root document</p>")?.into())?;
 /// assert_eq!(related.root_index()?, Some(0));
@@ -37,6 +38,21 @@ pub struct MultipartRelated<R = Cursor<Vec<u8>>> {
 }
 
 impl<R> MultipartRelated<R> {
+    /// Creates an empty multipart/related with a generated random boundary.
+    ///
+    /// Uses [`Multipart::new`]. Generates no children, IDs, type/start
+    /// parameters, or other headers, and performs no child-source I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns Content-Type formatting or OS-randomness errors wrapped in
+    /// [`MultipartRelatedError::Multipart`].
+    pub fn new() -> Result<Self, MultipartRelatedError> {
+        Ok(Self {
+            multipart: Multipart::new("related").map_err(MultipartRelatedError::Multipart)?,
+        })
+    }
+
     /// Creates an empty multipart/related with an explicit checked boundary.
     ///
     /// Generates no children, IDs, type/start parameters, or other headers.
@@ -44,9 +60,9 @@ impl<R> MultipartRelated<R> {
     /// # Errors
     ///
     /// Returns boundary validation or Content-Type formatting errors.
-    pub fn new(boundary: &str) -> Result<Self, MultipartRelatedError> {
+    pub fn with_boundary(boundary: &str) -> Result<Self, MultipartRelatedError> {
         Ok(Self {
-            multipart: Multipart::new("related", boundary)
+            multipart: Multipart::with_boundary("related", boundary)
                 .map_err(MultipartRelatedError::Multipart)?,
         })
     }

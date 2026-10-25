@@ -101,7 +101,7 @@ fn each_entry_point_forwards_the_constraint_to_leaves() {
     ] {
         let mut entity = opaque();
         entity.prepare(constraint).unwrap();
-        let mut multipart = Multipart::new("mixed", "test").unwrap();
+        let mut multipart = Multipart::with_boundary("mixed", "test").unwrap();
         multipart.children_mut().push(opaque());
         multipart.prepare(constraint).unwrap();
         let mut wrapper = MessagePart::new(MimeMessage::with_body(opaque()));
@@ -317,14 +317,14 @@ fn recorded_leaf(
 #[test]
 fn failure_stops_depth_first_traversal_without_rolling_back_prior_changes() {
     let seeks = Rc::new(RefCell::new(Vec::new()));
-    let mut inner = Multipart::new("mixed", "inner").unwrap();
+    let mut inner = Multipart::with_boundary("mixed", "inner").unwrap();
     inner.children_mut().extend([
         recorded_leaf(2, &seeks, false),
         recorded_leaf(3, &seeks, true),
     ]);
     let nested = MessagePart::new(MimeMessage::with_body(inner.into()));
     let unvisited = MessagePart::new(MimeMessage::with_body(recorded_leaf(4, &seeks, false)));
-    let mut root = Multipart::new("mixed", "outer").unwrap();
+    let mut root = Multipart::with_boundary("mixed", "outer").unwrap();
     root.children_mut().extend([
         recorded_leaf(1, &seeks, false),
         nested.into(),
@@ -433,7 +433,7 @@ fn version_insertion_precedes_leaf_metadata_failure_and_retry_observes_raw_edits
 #[test]
 fn explicit_line_options_reach_nested_leaves_and_round_trip_through_writing() {
     let input = "x".repeat(180);
-    let mut root: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut root: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     root.children_mut().extend([
         TextPart::new("plain", &input).unwrap().into(),
         MessagePart::new(MimeMessage::with_body(
@@ -529,7 +529,7 @@ fn borrowed_leaf_sources_keep_their_ownership_and_rewind_rules() {
 #[test]
 fn nested_version_failure_preserves_prior_edits_and_leaves_later_siblings_untouched() {
     let invalid_message = MimeMessage::from_parts(headers("MIME-Version: bad\r\n"), Some(opaque()));
-    let mut root = Multipart::new("mixed", "outer").unwrap();
+    let mut root = Multipart::with_boundary("mixed", "outer").unwrap();
     root.children_mut()
         .extend([opaque(), MessagePart::new(invalid_message).into(), opaque()]);
     let mut message = MimeMessage::with_body(root.into());
@@ -595,7 +595,7 @@ fn deep_mixed_trees_prepare_without_recursive_calls() {
             let mut root = opaque();
             for depth in 0..4000 {
                 root = if depth % 2 == 0 {
-                    let mut multipart = Multipart::new("mixed", "same").unwrap();
+                    let mut multipart = Multipart::with_boundary("mixed", "same").unwrap();
                     multipart.children_mut().push(root);
                     multipart.into()
                 } else {
@@ -636,7 +636,7 @@ fn deep_mixed_trees_prepare_without_recursive_calls() {
 
 #[test]
 fn wide_multipart_prepares_every_child() {
-    let mut root = Multipart::new("mixed", "wide").unwrap();
+    let mut root = Multipart::with_boundary("mixed", "wide").unwrap();
     root.children_mut().extend((0..10_000).map(|_| opaque()));
     root.prepare(EncodingConstraint::EightBit).unwrap();
     assert_eq!(root.children().len(), 10_000);

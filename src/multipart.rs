@@ -17,10 +17,12 @@ use crate::{
 
 /// An ordered multipart container with authoritative raw headers.
 ///
-/// Unlike MimeKit's constructor, [`Self::new`] requires an explicit boundary.
+/// Like MimeKit's constructor, [`Self::new`] generates an OS-random boundary;
+/// [`Self::with_boundary`] accepts an explicit boundary instead.
 /// Checked edits enforce boundary syntax but do not scan bodies or detect
 /// collisions with ancestor/descendant boundaries. The caller must choose
-/// collision-free values; no random-generation dependency is introduced.
+/// collision-free values; random generation makes collisions unlikely but
+/// does not verify their absence.
 ///
 /// Preamble and epilogue are raw bytes, not decoded strings or delimiter lines.
 /// Raw setters store them without newline conversion or folding; text setters
@@ -43,7 +45,7 @@ use crate::{
 /// ```
 /// use mimecraft::{MimeEntity, Multipart, TextPart};
 ///
-/// let mut alternative: Multipart = Multipart::new("alternative", "alt-boundary")?;
+/// let mut alternative: Multipart = Multipart::with_boundary("alternative", "alt-boundary")?;
 /// alternative.children_mut().push(TextPart::new("plain", "hello")?.into());
 /// alternative.children_mut().push(TextPart::new("html", "<b>hello</b>")?.into());
 /// let root: MimeEntity = alternative.into();
@@ -67,6 +69,48 @@ pub(crate) struct ParsedMultipart {
     pub boundary: Option<String>,
     pub boundaries: Vec<Vec<u8>>,
     pub end: Option<Vec<u8>>,
+}
+
+impl Multipart {
+    /// Generates a multipart boundary without assigning it to a container.
+    ///
+    /// Ports MimeKit's `Multipart.GenerateBoundary`: 16 OS-random bytes encoded
+    /// as unwrapped, padded Base64, prefixed with `=-`. The result is exactly
+    /// 26 ASCII bytes and satisfies the checked boundary grammar.
+    /// No clock, process identifier, or fallback random source is used.
+    ///
+    /// No content or existing boundaries are inspected. Collisions remain
+    /// possible; this is generation, not collision detection. Use the result
+    /// with [`Self::with_boundary`], [`Self::set_boundary`], or the specialized multipart
+    /// constructors.
+    ///
+    /// ```
+    /// use mimecraft::Multipart;
+    ///
+    /// let boundary = Multipart::generate_boundary()?;
+    /// let part: Multipart = Multipart::with_boundary("mixed", &boundary)?;
+    /// assert_eq!(part.boundary()?.as_deref(), Some(boundary.as_str()));
+    /// # Ok::<(), mimecraft::MultipartError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultipartError::Random`] if OS randomness is unavailable,
+    /// retaining the underlying error without returning a partial boundary.
+    pub fn generate_boundary() -> Result<String, MultipartError> {
+        Self::generate_boundary_with(getrandom::fill)
+    }
+
+    fn generate_boundary_with(
+        fill: impl FnOnce(&mut [u8]) -> Result<(), getrandom::Error>,
+    ) -> Result<String, MultipartError> {
+        let mut random = [0; 16];
+        fill(&mut random).map_err(MultipartError::Random)?;
+        let mut boundary = Vec::with_capacity(26);
+        boundary.extend_from_slice(b"=-");
+        crate::encodings::encode_base64_unwrapped(&random, &mut boundary);
+        Ok(String::from_utf8(boundary).expect("the boundary prefix and Base64 alphabet are ASCII"))
+    }
 }
 
 impl<R> Multipart<R> {
@@ -93,9 +137,43 @@ impl<R> Multipart<R> {
     /// # Errors
     ///
     /// Returns invalid subtype/boundary or header-formatting errors.
-    pub fn new(subtype: &str, boundary: &str) -> Result<Self, MultipartError> {
-        let mut content_type =
+    pub fn with_boundary(subtype: &str, boundary: &str) -> Result<Self, MultipartError> {
+        let content_type =
             ContentType::new("multipart", subtype).map_err(MultipartError::ContentType)?;
+        Self::from_type_and_boundary(content_type, boundary)
+    }
+
+    /// Creates an empty multipart with a generated random boundary.
+    ///
+    /// Like [`Self::with_boundary`], creates only the Content-Type header and no children.
+    /// Uses [`Multipart::generate_boundary`] after validating subtype syntax.
+    /// Parsers, getters, and writers never generate a missing boundary
+    /// automatically. No child-source I/O is performed.
+    ///
+    /// ```
+    /// use mimecraft::{Multipart, TextPart};
+    ///
+    /// let mut part: Multipart = Multipart::new("alternative")?;
+    /// part.children_mut().push(TextPart::new("plain", "hello")?.into());
+    /// part.children_mut().push(TextPart::new("html", "<b>hello</b>")?.into());
+    /// assert_eq!(part.boundary()?.unwrap().len(), 26);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns subtype, header-formatting, or OS-randomness errors.
+    pub fn new(subtype: &str) -> Result<Self, MultipartError> {
+        let content_type =
+            ContentType::new("multipart", subtype).map_err(MultipartError::ContentType)?;
+        let boundary = Multipart::generate_boundary()?;
+        Self::from_type_and_boundary(content_type, &boundary)
+    }
+
+    fn from_type_and_boundary(
+        mut content_type: ContentType,
+        boundary: &str,
+    ) -> Result<Self, MultipartError> {
         content_type.set_boundary(Some(boundary));
         let mut multipart = Self::from_parts(HeaderList::new(), Vec::new(), Vec::new(), Vec::new());
         multipart.set_content_type(&content_type)?;
@@ -317,7 +395,7 @@ impl<R> Multipart<R> {
     /// ```
     /// use mimecraft::Multipart;
     ///
-    /// let mut part: Multipart = Multipart::new("mixed", "boundary")?;
+    /// let mut part: Multipart = Multipart::with_boundary("mixed", "boundary")?;
     /// part.set_preamble_text("This message has multiple parts.");
     /// assert_eq!(part.preamble_text()?, "This message has multiple parts.\r\n");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -663,6 +741,8 @@ pub enum MultipartError {
     ContentType(ContentHeaderParseError),
     /// Checked Content-Type formatting failed.
     HeaderFormat(HeaderFormatError),
+    /// The operating system could not supply bytes for a generated boundary.
+    Random(getrandom::Error),
 }
 
 impl fmt::Display for MultipartError {
@@ -678,6 +758,7 @@ impl fmt::Display for MultipartError {
             }
             Self::ContentType(error) => error.fmt(f),
             Self::HeaderFormat(error) => error.fmt(f),
+            Self::Random(error) => write!(f, "multipart boundary randomness failed: {error}"),
         }
     }
 }
@@ -687,7 +768,57 @@ impl Error for MultipartError {
         match self {
             Self::ContentType(error) => Some(error),
             Self::HeaderFormat(error) => Some(error),
+            Self::Random(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn boundary_generation_preserves_mimekits_prefix_padding_and_random_bytes() {
+        for (random, expected) in [
+            ([0; 16], "=-AAAAAAAAAAAAAAAAAAAAAA=="),
+            ([255; 16], "=-/////////////////////w=="),
+            ([251; 16], "=-+/v7+/v7+/v7+/v7+/v7+w=="),
+            (
+                std::array::from_fn(|index| index as u8),
+                "=-AAECAwQFBgcICQoLDA0ODw==",
+            ),
+        ] {
+            let boundary = Multipart::generate_boundary_with(|bytes| {
+                assert_eq!(bytes.len(), 16);
+                bytes.copy_from_slice(&random);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(boundary, expected);
+            assert_eq!(boundary.len(), 26);
+            assert!(validate_boundary(&boundary).is_ok());
+            let mut decoded = Vec::new();
+            crate::encodings::Base64Decoder::new().decode(&boundary.as_bytes()[2..], &mut decoded);
+            assert_eq!(decoded, random);
+        }
+    }
+
+    #[test]
+    fn boundary_entropy_failure_is_propagated_without_fallback() {
+        let error = Multipart::generate_boundary_with(|bytes| {
+            bytes[..8].fill(42);
+            Err(getrandom::Error::UNSUPPORTED)
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            MultipartError::Random(getrandom::Error::UNSUPPORTED)
+        ));
+        assert_eq!(
+            error.source().unwrap().downcast_ref::<getrandom::Error>(),
+            Some(&getrandom::Error::UNSUPPORTED)
+        );
+        assert!(error.to_string().contains("boundary randomness"));
     }
 }

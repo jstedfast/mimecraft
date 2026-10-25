@@ -47,7 +47,7 @@ fn message_part(name: &str, disposition: Option<&str>, body: Option<MimeEntity>)
 
 #[test]
 fn body_parts_preserve_depth_first_order_but_stop_at_message_wrappers() {
-    let mut inner: Multipart = Multipart::new("mixed", "inner").unwrap();
+    let mut inner: Multipart = Multipart::with_boundary("mixed", "inner").unwrap();
     inner.children_mut().extend([
         leaf("second", Some("attachment")),
         message_part(
@@ -58,7 +58,7 @@ fn body_parts_preserve_depth_first_order_but_stop_at_message_wrappers() {
         leaf("third", None),
     ]);
     let missing: MessagePart = MessagePart::from_parts(HeaderList::new(), None);
-    let mut root: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut root: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     root.children_mut().extend([
         leaf("first", None),
         inner.into(),
@@ -117,7 +117,7 @@ fn roots_empty_trees_and_absent_messages_follow_distinct_traversal_rules() {
         assert_eq!(root.attachments().count(), 1);
         assert_eq!(root.leaf_parts().count(), 0);
     }
-    let container: Multipart = Multipart::new("mixed", "empty").unwrap();
+    let container: Multipart = Multipart::with_boundary("mixed", "empty").unwrap();
     let root = tag(container.into(), "empty", Some("attachment"));
     assert!(root.is_attachment().unwrap());
     assert_eq!(root.body_parts().count(), 0);
@@ -204,7 +204,7 @@ fn malformed_dispositions_keep_typed_offsets_without_affecting_body_enumeration(
 
 #[test]
 fn attachment_filter_is_lazy_can_resume_after_errors_and_is_fused() {
-    let mut container: Multipart = Multipart::new("mixed", "boundary").unwrap();
+    let mut container: Multipart = Multipart::with_boundary("mixed", "boundary").unwrap();
     container.children_mut().extend([
         leaf("first", Some("attachment")),
         leaf("bad", Some("")),
@@ -239,7 +239,7 @@ fn attachment_filter_is_lazy_can_resume_after_errors_and_is_fused() {
 
 #[test]
 fn containers_and_attached_contents_are_not_classified_by_attachment_filtering() {
-    let mut container: Multipart = Multipart::new("mixed", "boundary").unwrap();
+    let mut container: Multipart = Multipart::with_boundary("mixed", "boundary").unwrap();
     container
         .headers_mut()
         .add(Header::parse(b"Content-Disposition:").unwrap());
@@ -262,7 +262,7 @@ fn containers_and_attached_contents_are_not_classified_by_attachment_filtering()
 
 #[test]
 fn iteration_uses_model_variants_without_parsing_unrelated_metadata() {
-    let mut container: Multipart = Multipart::new("mixed", "boundary").unwrap();
+    let mut container: Multipart = Multipart::with_boundary("mixed", "boundary").unwrap();
     container
         .headers_mut()
         .replace_all(Header::parse(b"Content-Type: invalid").unwrap())
@@ -295,7 +295,7 @@ fn metadata_and_traversal_work_without_readable_or_seekable_source_bounds() {
     struct NoIo;
     let part =
         MessagePart::<NoIo>::from_parts(headers(b"Content-Disposition: attachment\r\n"), None);
-    let mut container: Multipart<NoIo> = Multipart::new("mixed", "boundary").unwrap();
+    let mut container: Multipart<NoIo> = Multipart::with_boundary("mixed", "boundary").unwrap();
     container.children_mut().push(part.into());
     let mut root: MimeEntity<NoIo> = container.into();
     root.headers_mut()
@@ -376,7 +376,7 @@ fn loaded_digest_and_explicit_wrappers_are_enumerated_without_entering_messages(
 fn deep_multipart_enumeration_uses_an_explicit_stack() {
     let mut root = leaf("deep", Some("attachment"));
     for _ in 0..4000 {
-        let mut parent: Multipart = Multipart::new("mixed", "same").unwrap();
+        let mut parent: Multipart = Multipart::with_boundary("mixed", "same").unwrap();
         parent.children_mut().push(root);
         root = parent.into();
     }

@@ -164,7 +164,7 @@ fn nested_wrappers_forward_encoder_line_limits_and_root_epilogue_options() {
             .collect::<Vec<_>>(),
         [60, 48, 0]
     );
-    let mut multipart: Multipart = Multipart::new("mixed", "inner").unwrap();
+    let mut multipart: Multipart = Multipart::with_boundary("mixed", "inner").unwrap();
     multipart.set_epilogue(b"tail".to_vec());
     let mut part = attachment(attachment(multipart.into()).into());
     assert!(wire(&mut part, NewLineFormat::Unix, true).ends_with(b"--inner--\ntail\n"));
@@ -174,7 +174,7 @@ fn nested_wrappers_forward_encoder_line_limits_and_root_epilogue_options() {
 #[test]
 fn multipart_children_do_not_force_newlines_inside_attached_messages() {
     let child = attachment(TextPart::new("plain", "hello").unwrap().into());
-    let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     outer.children_mut().push(child.into());
     outer.set_epilogue(b"tail".to_vec());
     let mut output = Vec::new();
@@ -215,7 +215,7 @@ fn binary_suffixes_survive_parent_framing_across_message_wrappers() {
             b"\r\n\r\n",
             b"\0\xff",
         ] {
-            let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+            let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
             let mut child = attachment(attachment(leaf(suffix)).into());
             let expected_child_body = wire(&mut child, format, false);
             let body_start = expected_child_body
@@ -260,9 +260,9 @@ fn ancestor_boundaries_remain_active_across_multiple_message_wrappers() {
         ("prefix", "prefix-long"),
         ("prefix-long", "prefix"),
     ] {
-        let inner: Multipart = Multipart::new("mixed", inner_boundary).unwrap();
+        let inner: Multipart = Multipart::with_boundary("mixed", inner_boundary).unwrap();
         let child = attachment(attachment(inner.into()).into());
-        let mut outer: Multipart = Multipart::new("mixed", outer_boundary).unwrap();
+        let mut outer: Multipart = Multipart::with_boundary("mixed", outer_boundary).unwrap();
         outer.children_mut().push(child.into());
         let mut output = Vec::new();
         assert_eq!(
@@ -287,9 +287,9 @@ fn ancestor_boundaries_remain_active_across_multiple_message_wrappers() {
                 .any(|bytes| bytes == format!("--{inner_boundary}--").as_bytes())
         );
     }
-    let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     for _ in 0..2 {
-        let sibling: Multipart = Multipart::new("mixed", "reused").unwrap();
+        let sibling: Multipart = Multipart::with_boundary("mixed", "reused").unwrap();
         outer.children_mut().push(attachment(sibling.into()).into());
     }
     let mut output = Vec::new();
@@ -463,7 +463,7 @@ fn borrowed_source_errors_propagate_through_message_and_multipart_frames() {
         let mut source = FailingSource { fail_seek };
         let body = MimePart::new(MimeContent::new(&mut source));
         let part = MessagePart::new(MimeMessage::with_body(body.into()));
-        let mut outer = Multipart::new("mixed", "outer").unwrap();
+        let mut outer = Multipart::with_boundary("mixed", "outer").unwrap();
         outer.children_mut().push(part.into());
         let mut output = Vec::new();
         assert_eq!(

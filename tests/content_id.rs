@@ -292,7 +292,7 @@ fn container_and_wrapper_edits_leave_children_messages_and_sources_unchanged() {
 
 #[test]
 fn source_trait_bounds_are_not_needed_for_metadata_access() {
-    let mut part: Multipart<()> = Multipart::new("mixed", "boundary").unwrap();
+    let mut part: Multipart<()> = Multipart::with_boundary("mixed", "boundary").unwrap();
     part.set_content_id(Some("container@x")).unwrap();
     assert_eq!(part.content_id().unwrap().unwrap().as_str(), "container@x");
     let mut wrapper = MessagePart::new(MimeMessage::<()>::new());
@@ -305,7 +305,7 @@ fn source_trait_bounds_are_not_needed_for_metadata_access() {
 
 #[test]
 fn related_root_lookup_observes_id_changes_without_updating_selectors() {
-    let mut related: MultipartRelated = MultipartRelated::new("related").unwrap();
+    let mut related: MultipartRelated = MultipartRelated::with_boundary("related").unwrap();
     related
         .set_root(TextPart::new("plain", "fallback").unwrap().into())
         .unwrap();

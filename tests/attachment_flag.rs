@@ -411,7 +411,7 @@ fn node_flags_do_not_modify_nested_metadata_or_need_source_traits() {
     let mut wrapper = MessagePart::new(MimeMessage::<()>::new());
     wrapper.set_is_attachment(true).unwrap();
     assert!(wrapper.is_attachment().unwrap());
-    let mut container: Multipart<()> = Multipart::new("mixed", "boundary").unwrap();
+    let mut container: Multipart<()> = Multipart::with_boundary("mixed", "boundary").unwrap();
     container.set_is_attachment(true).unwrap();
     assert!(container.is_attachment().unwrap());
     container.children_mut().push(wrapper.into());

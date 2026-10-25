@@ -1596,7 +1596,7 @@ impl<R> MimeMessage<R> {
     /// ```
     /// use mimecraft::{MimeMessage, Multipart, TextFormat, TextPart};
     ///
-    /// let mut alternative = Multipart::new("alternative", "boundary")?;
+    /// let mut alternative = Multipart::with_boundary("alternative", "boundary")?;
     /// alternative.children_mut().push(TextPart::new("plain", "hello")?.into());
     /// alternative.children_mut().push(TextPart::new("html", "<b>hello</b>")?.into());
     /// let mut message = MimeMessage::with_body(alternative.into());

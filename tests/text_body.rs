@@ -31,7 +31,7 @@ fn leaf(media_type: Option<&str>, name: &str) -> MimeEntity {
 }
 
 fn multipart(subtype: &str, children: Vec<MimeEntity>) -> MimeEntity {
-    let mut part = Multipart::new(subtype, "boundary").unwrap();
+    let mut part = Multipart::with_boundary(subtype, "boundary").unwrap();
     *part.children_mut() = children;
     part.into()
 }
@@ -448,8 +448,11 @@ fn selection_requires_no_io_bounds_and_never_touches_sources() {
                 .is_none()
         );
     }
-    let mut empty: MimeMessage<NoIo> =
-        MimeMessage::with_body(Multipart::new("mixed", "boundary").unwrap().into());
+    let mut empty: MimeMessage<NoIo> = MimeMessage::with_body(
+        Multipart::with_boundary("mixed", "boundary")
+            .unwrap()
+            .into(),
+    );
     unbounded(&mut empty);
     struct PanicIo;
     impl Read for PanicIo {

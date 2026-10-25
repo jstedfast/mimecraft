@@ -390,7 +390,7 @@ impl Seek for NoIo {
 fn metadata_operations_do_not_access_borrowed_child_sources() {
     let mut source = NoIo;
     let leaf = MimePart::new(MimeContent::new(&mut source));
-    let mut part = Multipart::new("report", "b").unwrap();
+    let mut part = Multipart::with_boundary("report", "b").unwrap();
     part.children_mut().push(leaf.into());
     let mut report = MultipartReport::from_multipart(part).unwrap();
     assert_eq!(report.report_type().unwrap(), None);

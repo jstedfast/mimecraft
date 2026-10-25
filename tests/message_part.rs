@@ -199,12 +199,12 @@ fn checked_content_type_updates_are_atomic_and_collapse_duplicates_in_place() {
 #[test]
 fn traversal_descends_nested_messages_in_order_and_is_fused() {
     fn assert_fused<T: FusedIterator>(_: &T) {}
-    let mut mixed: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut mixed: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     let absent = MessagePart::new(MimeMessage::new());
     let mut no_message = MessagePart::new(MimeMessage::new());
     no_message.set_message(None);
     let attached = MessagePart::new(MimeMessage::with_body(leaf(b"second")));
-    let mut inner: Multipart = Multipart::new("mixed", "inner").unwrap();
+    let mut inner: Multipart = Multipart::with_boundary("mixed", "inner").unwrap();
     inner
         .children_mut()
         .extend([leaf(b"first"), attached.into(), leaf(b"third")]);

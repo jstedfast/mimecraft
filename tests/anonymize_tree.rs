@@ -160,7 +160,7 @@ fn empty_messages_wrappers_and_multiparts_keep_distinct_framing() {
         );
     }
     for preamble in [b"".as_slice(), b"private"] {
-        let mut multipart: Multipart = Multipart::new("mixed", "b").unwrap();
+        let mut multipart: Multipart = Multipart::with_boundary("mixed", "b").unwrap();
         multipart.set_preamble(preamble.to_vec());
         let mut entity = multipart.into();
         output.clear();
@@ -340,7 +340,7 @@ fn configured_encoder_width_and_newline_format_reach_ordinary_leaves() {
 
 #[test]
 fn invalid_container_metadata_is_checked_after_masked_headers() {
-    let mut multipart: Multipart = Multipart::new("mixed", "b").unwrap();
+    let mut multipart: Multipart = Multipart::with_boundary("mixed", "b").unwrap();
     multipart
         .headers_mut()
         .replace_all(mimecraft::Header::parse(b"Content-Type: multipart/mixed\n").unwrap())
@@ -390,7 +390,7 @@ fn binary_bare_cr_survives_before_lf_delimiters() {
     let mut direct = Vec::new();
     anonymize::write_part_content(&mut part, &mut direct).unwrap();
     assert_eq!(direct, b"xxxxxx\r");
-    let mut multipart = Multipart::new("mixed", "b").unwrap();
+    let mut multipart = Multipart::with_boundary("mixed", "b").unwrap();
     multipart.children_mut().push(part.into());
     let mut entity = multipart.into();
     let mut options = WriteOptions::default();
@@ -418,7 +418,7 @@ fn final_newlines_follow_wrappers_but_not_multipart_children() {
             output,
             format!("Content-Type: text/plain{nl}{nl}xxx{nl}").as_bytes()
         );
-        let mut multipart = Multipart::new("mixed", "b").unwrap();
+        let mut multipart = Multipart::with_boundary("mixed", "b").unwrap();
         multipart.children_mut().push(wrapper);
         multipart.set_epilogue(b"tail".to_vec());
         let mut entity = multipart.into();
@@ -432,16 +432,18 @@ fn final_newlines_follow_wrappers_but_not_multipart_children() {
 fn digest_defaults_and_ancestor_boundaries_survive_message_wrappers() {
     let mut wrapper = MessagePart::new(MimeMessage::with_body(leaf(b"Cat")));
     wrapper.headers_mut().remove_all("Content-Type");
-    let mut digest = Multipart::new("digest", "outer").unwrap();
+    let mut digest = Multipart::with_boundary("digest", "outer").unwrap();
     digest.children_mut().push(wrapper.into());
     let mut entity = digest.into();
     let mut output = Vec::new();
     anonymize::write_entity(&mut entity, &mut output).unwrap();
     assert_eq!(output, b"Content-Type: multipart/digest; boundary=outer\r\n\r\n--outer\r\n\r\nContent-Type: text/plain\r\n\r\nxxx\r\n--outer--\r\n");
 
-    let inner: MimeEntity = Multipart::new("mixed", "outer-child").unwrap().into();
+    let inner: MimeEntity = Multipart::with_boundary("mixed", "outer-child")
+        .unwrap()
+        .into();
     let wrapper = MessagePart::new(MimeMessage::with_body(inner));
-    let mut outer = Multipart::new("mixed", "outer").unwrap();
+    let mut outer = Multipart::with_boundary("mixed", "outer").unwrap();
     outer.children_mut().push(wrapper.into());
     let mut entity = outer.into();
     output.clear();
@@ -782,7 +784,7 @@ fn deep_messages_and_multiparts_remain_iterative() {
 
     let mut root: MimeEntity = TextPart::new("plain", "Cat").unwrap().into();
     for depth in 0..512 {
-        let mut multipart = Multipart::new("mixed", &format!("b{depth:04}-end")).unwrap();
+        let mut multipart = Multipart::with_boundary("mixed", &format!("b{depth:04}-end")).unwrap();
         multipart.children_mut().push(root);
         root = multipart.into();
     }

@@ -152,7 +152,7 @@ impl<R: Read + Seek> Multipart<R> {
     /// ```
     /// use mimecraft::{Multipart, TextPart};
     ///
-    /// let mut mixed: Multipart = Multipart::new("mixed", "example-boundary")?;
+    /// let mut mixed: Multipart = Multipart::with_boundary("mixed", "example-boundary")?;
     /// mixed.children_mut().push(TextPart::new("plain", "hello")?.into());
     /// let mut output = Vec::new();
     /// mixed.write_to(&mut output)?;

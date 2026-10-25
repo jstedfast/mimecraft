@@ -10,14 +10,15 @@ use std::{
 
 use mimecraft::{
     ContentType, Header, HeaderFormatOptions, HeaderList, HeaderParser, MimeContent,
-    MimeContentStorage, MimeEntity, MimeParser, MimePart, Multipart, MultipartError,
-    ParameterComplianceMode, ParameterParseOptions, TextPart,
+    MimeContentStorage, MimeEntity, MimeParser, MimePart, MimePartWriteOptions, Multipart,
+    MultipartError, MultipartRelated, MultipartReport, ParameterComplianceMode,
+    ParameterParseOptions, TextPart,
     charsets::{Charset, CharsetError},
     encodings::{EncoderOptionsError, NewLineFormat},
 };
 
 fn multipart() -> Multipart {
-    Multipart::new("mixed", "outer-boundary").unwrap()
+    Multipart::with_boundary("mixed", "outer-boundary").unwrap()
 }
 
 fn leaf(bytes: &[u8]) -> MimeEntity {
@@ -36,7 +37,7 @@ fn headers(bytes: &[u8]) -> HeaderList {
 
 #[test]
 fn construction_creates_only_checked_content_type_and_empty_components() {
-    let part: Multipart = Multipart::new("Alternative", "one:two").unwrap();
+    let part: Multipart = Multipart::with_boundary("Alternative", "one:two").unwrap();
     assert!(
         part.content_type()
             .unwrap()
@@ -54,21 +55,213 @@ fn construction_creates_only_checked_content_type_and_empty_components() {
     assert!(part.epilogue().is_empty());
     assert_eq!(part.leaf_parts().count(), 0);
     assert!(matches!(
-        Multipart::<Cursor<Vec<u8>>>::new("", "b"),
+        Multipart::<Cursor<Vec<u8>>>::with_boundary("", "b"),
         Err(MultipartError::ContentType(_))
     ));
+}
+
+#[test]
+fn default_construction_generates_a_boundary_and_needs_no_source_traits() {
+    for subtype in [
+        "mixed",
+        "Alternative",
+        "digest",
+        "related",
+        "report",
+        "x-custom",
+        "multipart/mixed",
+    ] {
+        let part: Multipart<()> = Multipart::new(subtype).unwrap();
+        let boundary = part.boundary().unwrap().unwrap();
+        assert_eq!(boundary.len(), 26);
+        assert!(boundary.starts_with("=-"));
+        assert!(boundary.ends_with("=="));
+        assert_eq!(part.headers().len(), 1);
+        assert_eq!(
+            part.headers(),
+            Multipart::<()>::with_boundary(subtype, &boundary)
+                .unwrap()
+                .headers()
+        );
+        assert!(part.children().is_empty());
+        assert!(part.preamble().is_empty());
+        assert!(part.epilogue().is_empty());
+    }
+    for subtype in ["", "bad subtype", "bad\r\n", "\u{e9}"] {
+        assert!(
+            matches!(
+                Multipart::<()>::new(subtype),
+                Err(MultipartError::ContentType(_))
+            ),
+            "{subtype:?}"
+        );
+    }
+    assert!(matches!(
+        Multipart::<()>::new(&"x".repeat(100)),
+        Err(MultipartError::HeaderFormat(_))
+    ));
+
+    let boundary = Multipart::generate_boundary().unwrap();
+    let related: MultipartRelated<()> = MultipartRelated::with_boundary(&boundary).unwrap();
+    assert_eq!(
+        related.multipart().boundary().unwrap(),
+        Some(boundary.clone())
+    );
+    let report: MultipartReport<()> = MultipartReport::new("delivery-status", &boundary).unwrap();
+    assert_eq!(report.multipart().boundary().unwrap(), Some(boundary));
+}
+
+#[test]
+fn generated_boundaries_have_the_expected_shape_across_threads() {
+    let boundaries = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..64)
+                        .map(|_| Multipart::generate_boundary().unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let mut seen = std::collections::HashSet::new();
+    for boundary in boundaries {
+        assert_eq!(boundary.len(), 26);
+        assert!(boundary.starts_with("=-"));
+        assert!(boundary.ends_with("=="));
+        assert!(
+            boundary.as_bytes()[2..24]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+        );
+        assert!(seen.insert(boundary));
+    }
+    assert_eq!(seen.len(), 256);
+}
+
+#[test]
+fn generated_nested_boundaries_round_trip_with_both_newlines_and_storage_modes() {
+    let mut alternative: Multipart = Multipart::new("alternative").unwrap();
+    let inner_boundary = alternative.boundary().unwrap().unwrap();
+    alternative
+        .children_mut()
+        .push(TextPart::new("plain", "hello").unwrap().into());
+    alternative
+        .children_mut()
+        .push(TextPart::new("html", "<b>hello</b>").unwrap().into());
+    let mut mixed: Multipart = Multipart::new("mixed").unwrap();
+    let outer_boundary = mixed.boundary().unwrap().unwrap();
+    assert_ne!(inner_boundary, outer_boundary);
+    mixed.set_preamble_text("preamble");
+    mixed.set_epilogue_text("epilogue");
+    mixed.children_mut().push(alternative.into());
+
+    for newline in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let options = MimePartWriteOptions {
+            new_line_format: newline,
+            ..Default::default()
+        };
+        let mut wire = Vec::new();
+        mixed.write_to_with_options(&mut wire, &options).unwrap();
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser =
+                MimeParser::with_storage(Cursor::new(wire.as_slice()), storage).unwrap();
+            let mut entity = parser.parse_entity().unwrap();
+            drop(parser);
+            let MimeEntity::Multipart(outer) = &entity else {
+                panic!()
+            };
+            assert_eq!(
+                outer.boundary().unwrap().as_deref(),
+                Some(outer_boundary.as_str())
+            );
+            let MimeEntity::Multipart(inner) = &outer.children()[0] else {
+                panic!()
+            };
+            assert_eq!(
+                inner.boundary().unwrap().as_deref(),
+                Some(inner_boundary.as_str())
+            );
+            assert_eq!(entity.leaf_parts().count(), 2);
+            for _ in 0..2 {
+                let mut output = Vec::new();
+                entity.write_to_with_options(&mut output, &options).unwrap();
+                assert_eq!(output, wire);
+            }
+        }
+    }
+}
+
+#[test]
+fn generated_boundary_assignment_replaces_parsed_markers_including_truncation() {
+    for closed in [false, true] {
+        let tail = if closed {
+            "\r\n--old-- \t\r\nepilogue\r\n"
+        } else {
+            ""
+        };
+        let wire = format!(
+            "Content-Type: multipart/mixed; boundary=old\r\nX-Keep: yes\r\n\r\n\
+preamble\r\n--old \t\r\nContent-Type: text/plain\r\n\r\nbody{tail}"
+        );
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser =
+                MimeParser::with_storage(Cursor::new(wire.as_bytes()), storage).unwrap();
+            let mut entity = parser.parse_entity().unwrap();
+            drop(parser);
+            assert_eq!(text_edit_output(&mut entity), wire.as_bytes());
+            let MimeEntity::Multipart(part) = &mut entity else {
+                panic!()
+            };
+            let boundary = Multipart::generate_boundary().unwrap();
+            part.set_boundary(&boundary).unwrap();
+            // Once the boundary changes, MimeKit no longer preserves the raw
+            // parsed markers; writing generates new markers, including the end.
+            let epilogue = if closed { "epilogue\r\n" } else { "" };
+            let expected = format!(
+                "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\nX-Keep: yes\r\n\r\n\
+preamble\r\n--{boundary}\r\nContent-Type: text/plain\r\n\r\nbody\r\n--{boundary}--\r\n{epilogue}"
+            );
+            for _ in 0..2 {
+                assert_eq!(text_edit_output(&mut entity), expected.as_bytes());
+            }
+            let MimeEntity::Multipart(reparsed) =
+                MimeEntity::load(&mut Cursor::new(expected.as_bytes())).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(reparsed.boundary().unwrap(), Some(boundary));
+            assert_eq!(reparsed.preamble(), b"preamble\r\n");
+            assert_eq!(reparsed.epilogue(), epilogue.as_bytes());
+            assert_eq!(reparsed.children().len(), 1);
+            assert_eq!(
+                reparsed
+                    .leaf_parts()
+                    .next()
+                    .unwrap()
+                    .content()
+                    .get_ref()
+                    .get_ref(),
+                b"body"
+            );
+        }
+    }
 }
 
 #[test]
 fn boundary_validation_checks_the_exact_alphabet_and_length() {
     for length in 1..=70 {
         let boundary = "a".repeat(length);
-        let part: Multipart = Multipart::new("mixed", &boundary).unwrap();
+        let part: Multipart = Multipart::with_boundary("mixed", &boundary).unwrap();
         assert_eq!(part.boundary().unwrap().as_deref(), Some(boundary.as_str()));
     }
     for byte in 0u8..=127 {
         let boundary = format!("a{}z", char::from(byte));
-        let result = Multipart::<Cursor<Vec<u8>>>::new("mixed", &boundary);
+        let result = Multipart::<Cursor<Vec<u8>>>::with_boundary("mixed", &boundary);
         let valid = byte.is_ascii_alphanumeric() || b"'()+_,-./:=? ".contains(&byte);
         assert_eq!(result.is_ok(), valid, "byte {byte}");
         if !valid {
@@ -86,15 +279,15 @@ fn boundary_validation_checks_the_exact_alphabet_and_length() {
         ("a\r\nb", 1),
     ] {
         assert!(
-            matches!(Multipart::<Cursor<Vec<u8>>>::new("mixed", boundary),
+            matches!(Multipart::<Cursor<Vec<u8>>>::with_boundary("mixed", boundary),
             Err(MultipartError::InvalidBoundary { offset: actual }) if actual == offset)
         );
     }
     assert!(matches!(
-        Multipart::<Cursor<Vec<u8>>>::new("mixed", &"x".repeat(71)),
+        Multipart::<Cursor<Vec<u8>>>::with_boundary("mixed", &"x".repeat(71)),
         Err(MultipartError::InvalidBoundary { offset: 70 })
     ));
-    let leading: Multipart = Multipart::new("mixed", " leading").unwrap();
+    let leading: Multipart = Multipart::with_boundary("mixed", " leading").unwrap();
     assert_eq!(leading.boundary().unwrap().as_deref(), Some(" leading"));
 }
 
@@ -141,7 +334,7 @@ fn assert_folded_text(input: &str, expected: &str) {
             expected.to_owned()
         };
         // Text operations do not require readable or seekable child sources.
-        let mut part: Multipart<()> = Multipart::new("mixed", "b").unwrap();
+        let mut part: Multipart<()> = Multipart::with_boundary("mixed", "b").unwrap();
         let original_headers = part.headers().clone();
         part.set_preamble_text_with_new_line_format(input, newline)
             .unwrap();
@@ -154,7 +347,7 @@ fn assert_folded_text(input: &str, expected: &str) {
         assert_eq!(part.headers(), &original_headers);
         assert!(part.children().is_empty());
     }
-    let mut part: Multipart<()> = Multipart::new("mixed", "b").unwrap();
+    let mut part: Multipart<()> = Multipart::with_boundary("mixed", "b").unwrap();
     part.set_preamble_text(input);
     part.set_epilogue_text(input);
     assert_eq!(part.preamble(), expected.replace('\n', "\r\n").as_bytes());
@@ -262,7 +455,7 @@ fn text_folding_preserves_words_and_observes_exact_soft_limits() {
 
 #[test]
 fn text_getters_decode_strictly_without_losing_raw_bytes_or_initial_newlines() {
-    let mut part: Multipart<()> = Multipart::new("mixed", "b").unwrap();
+    let mut part: Multipart<()> = Multipart::with_boundary("mixed", "b").unwrap();
     assert_eq!(part.preamble_text().unwrap(), "");
     assert_eq!(part.epilogue_text().unwrap(), "");
     let preamble = b"caf\xe9\r\n";
@@ -695,7 +888,7 @@ fn ownership_and_metadata_operations_never_touch_streams() {
             panic!("unexpected seek")
         }
     }
-    let mut part = Multipart::new("mixed", "boundary").unwrap();
+    let mut part = Multipart::with_boundary("mixed", "boundary").unwrap();
     part.children_mut()
         .push(MimePart::new(MimeContent::new(NoIo)).into());
     part.set_boundary("replacement").unwrap();
@@ -704,7 +897,7 @@ fn ownership_and_metadata_operations_never_touch_streams() {
 
     let mut source = Cursor::new(b"borrowed");
     source.set_position(3);
-    let mut part = Multipart::new("mixed", "boundary").unwrap();
+    let mut part = Multipart::with_boundary("mixed", "boundary").unwrap();
     part.children_mut()
         .push(MimePart::new(MimeContent::new(&mut source)).into());
     let entity = part.children_mut().pop().unwrap();

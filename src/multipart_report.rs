@@ -48,8 +48,8 @@ impl<R> MultipartReport<R> {
     ///
     /// Returns boundary validation or Content-Type formatting errors.
     pub fn new(report_type: &str, boundary: &str) -> Result<Self, MultipartReportError> {
-        let multipart =
-            Multipart::new("report", boundary).map_err(MultipartReportError::Multipart)?;
+        let multipart = Multipart::with_boundary("report", boundary)
+            .map_err(MultipartReportError::Multipart)?;
         let mut report = Self { multipart };
         report.set_report_type(report_type)?;
         Ok(report)

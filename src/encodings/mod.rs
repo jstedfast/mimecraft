@@ -21,6 +21,7 @@ mod yenc;
 
 use std::{error::Error, fmt};
 
+pub(crate) use base64::encode_unwrapped as encode_base64_unwrapped;
 pub use base64::{Base64Decoder, Base64Encoder};
 pub use pass_through::{PassThroughDecoder, PassThroughEncoder};
 pub use quoted_printable::{QuotedPrintableDecoder, QuotedPrintableEncoder};

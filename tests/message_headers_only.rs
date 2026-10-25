@@ -558,7 +558,7 @@ fn borrowed_source_positions_remain_unchanged_and_raw_edits_are_visible() {
 
 #[test]
 fn output_matches_the_full_serialization_header_prefix_for_each_root_kind() {
-    let mut multipart: Multipart = Multipart::new("mixed", "boundary").unwrap();
+    let mut multipart: Multipart = Multipart::with_boundary("mixed", "boundary").unwrap();
     multipart
         .children_mut()
         .push(TextPart::new("plain", "child").unwrap().into());

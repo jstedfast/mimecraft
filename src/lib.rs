@@ -90,6 +90,8 @@
 //! replacement with checked type/start parameters, without generating IDs.
 //! [`MimeEntity`] and [`Multipart`] own nested MIME trees, with checked boundary
 //! edits, raw preamble/epilogue bytes, and iterative [`LeafParts`] traversal.
+//! [`Multipart::new`] generates a MimeKit-style random boundary;
+//! [`Multipart::with_boundary`] accepts an explicit value instead.
 //! Multipart text accessors add strict charset decoding; text setters store
 //! UTF-8 with word folding and explicit newline selection. Byte-identical
 //! assignments retain parsed framing, while changed text invalidates it.

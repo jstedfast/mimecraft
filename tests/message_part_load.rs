@@ -241,7 +241,7 @@ fn missing_message_and_present_empty_message_round_trip_at_eof_and_boundaries() 
             // The recovered empty message has no separator on the wire.
             // Preserve that absence rather than adding a newline on output.
             assert_eq!(write(&mut parsed, format), raw);
-            let mut multipart: Multipart = Multipart::new("mixed", "outer").unwrap();
+            let mut multipart: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
             multipart.children_mut().extend([root, binary(b"sibling")]);
             let mut root: MimeEntity = multipart.into();
             let raw = write(&mut root, format);
@@ -269,7 +269,9 @@ fn empty_message_chains_keep_separator_ownership_at_each_nesting_level() {
             for kind in 0..4 {
                 let mut part: MessagePart = MessagePart::new(match kind {
                     2 => MimeMessage::from_parts(headers(b"Subject: empty\r\n"), None),
-                    3 => MimeMessage::with_body(Multipart::new("mixed", "inside").unwrap().into()),
+                    3 => MimeMessage::with_body(
+                        Multipart::with_boundary("mixed", "inside").unwrap().into(),
+                    ),
                     _ => MimeMessage::new(),
                 });
                 if kind == 0 {
@@ -281,7 +283,7 @@ fn empty_message_chains_keep_separator_ownership_at_each_nesting_level() {
                 }
                 let raw = write(&mut entity, format);
                 assert_eq!(write(&mut load(&raw), format), raw);
-                let mut parent: Multipart = Multipart::new("mixed", "outer").unwrap();
+                let mut parent: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
                 parent.children_mut().extend([entity, binary(b"sibling")]);
                 let raw = write(&mut parent.into(), format);
                 assert_eq!(write(&mut load(&raw), format), raw);
@@ -320,13 +322,13 @@ fn existing_header_separators_can_frame_empty_embedded_bodies() {
 fn nested_multipart_and_message_trees_preserve_binary_suffixes_and_epilogues() {
     for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
         for suffix in [b"".as_slice(), b"\0\xff\r", b"\n", b"\r\n", b"\r\n\r\n"] {
-            let mut inside: Multipart = Multipart::new("mixed", "inside").unwrap();
+            let mut inside: Multipart = Multipart::with_boundary("mixed", "inside").unwrap();
             inside.set_preamble(b"pre\r\n".to_vec());
             inside
                 .children_mut()
                 .extend([wrap(wrap(binary(suffix))), binary(b"second")]);
             inside.set_epilogue(b"tail\r".to_vec());
-            let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+            let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
             outer
                 .children_mut()
                 .extend([wrap(inside.into()), wrap(binary(b"sibling"))]);
@@ -353,7 +355,7 @@ fn newline_hints_exclude_parent_framing_through_message_wrappers() {
         (b"\r\n", Some(NewLineFormat::Dos)),
         (b"a\nb\r\n", Some(NewLineFormat::Mixed)),
     ] {
-        let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+        let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
         outer.children_mut().push(wrap(wrap(binary(body))));
         let mut entity: MimeEntity = outer.into();
         let raw = write(&mut entity, NewLineFormat::Dos);
@@ -405,7 +407,7 @@ fn depth_counts_wrappers_and_bodies_without_resetting_inside_messages() {
         )
         .is_err()
     );
-    let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     outer.children_mut().push(wrap(binary(b"body")));
     let raw = write(&mut outer.into(), NewLineFormat::Dos);
     assert!(
@@ -531,9 +533,9 @@ fn ancestor_boundaries_are_checked_across_message_frames_but_siblings_can_reuse_
             Some(MimeEntity::Multipart(_))
         ));
     }
-    let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
+    let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
     for _ in 0..2 {
-        let mut inner: Multipart = Multipart::new("mixed", "same").unwrap();
+        let mut inner: Multipart = Multipart::with_boundary("mixed", "same").unwrap();
         inner.set_epilogue(b"--same\r\nignored marker\r\n".to_vec());
         outer.children_mut().push(wrap(inner.into()));
     }

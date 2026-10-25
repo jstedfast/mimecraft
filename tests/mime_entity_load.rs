@@ -385,11 +385,11 @@ fn newline_hints_describe_stored_body_not_boundary_lines() {
 fn nested_load_write_round_trips_preserve_binary_suffixes_and_epilogues() {
     for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
         for suffix in [&b""[..], b"x", b"x\r", b"x\n", b"x\r\n", b"x\r\n\r\n"] {
-            let mut inner: Multipart = Multipart::new("alternative", "inner").unwrap();
+            let mut inner: Multipart = Multipart::with_boundary("alternative", "inner").unwrap();
             inner.children_mut().push(binary(suffix));
             inner.set_preamble(b"inner preamble\r\n".to_vec());
             inner.set_epilogue(b"inner epilogue\r\n".to_vec());
-            let mut root: Multipart = Multipart::new("mixed", "outer").unwrap();
+            let mut root: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
             root.children_mut()
                 .extend([inner.into(), binary(b"\0\xff")]);
             root.set_preamble(b"outer preamble\r\n".to_vec());
@@ -452,8 +452,8 @@ fn empty_containers_and_closing_markers_at_eof_are_supported() {
         assert_eq!(multi.preamble(), b"preamble\n");
         assert_eq!(multi.epilogue(), b"");
     }
-    let mut outer: Multipart = Multipart::new("mixed", "outer").unwrap();
-    let empty: Multipart = Multipart::new("mixed", "inner").unwrap();
+    let mut outer: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
+    let empty: Multipart = Multipart::with_boundary("mixed", "inner").unwrap();
     outer.children_mut().push(empty.into());
     let raw = write(&mut outer.into(), NewLineFormat::Dos);
     let mut loaded = load(&raw);
@@ -668,7 +668,7 @@ fn depth_limit_counts_root_and_is_checked_before_descendant_headers() {
     let mut root = binary(b"deep");
     for depth in 0..63 {
         let mut parent: Multipart =
-            Multipart::new("mixed", &format!("depth-{depth:03}-end")).unwrap();
+            Multipart::with_boundary("mixed", &format!("depth-{depth:03}-end")).unwrap();
         parent.children_mut().push(root);
         root = parent.into();
     }
@@ -787,7 +787,7 @@ fn stored_transfer_encodings_can_be_read_edited_and_rewritten() {
 #[test]
 fn long_binary_lines_and_raw_text_sections_cross_reader_buffers() {
     let payload = b"\0\xffx\r".repeat(16384);
-    let mut root: Multipart = Multipart::new("mixed", "b").unwrap();
+    let mut root: Multipart = Multipart::with_boundary("mixed", "b").unwrap();
     root.set_preamble(b"preamble\r\n".repeat(1024));
     root.set_epilogue(b"epilogue\r\n".repeat(1024));
     root.children_mut().push(binary(&payload));
@@ -801,11 +801,11 @@ fn long_binary_lines_and_raw_text_sections_cross_reader_buffers() {
 #[test]
 fn every_binary_byte_and_nested_bare_cr_epilogues_round_trip_in_both_formats() {
     for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
-        let mut root: Multipart = Multipart::new("mixed", "outer").unwrap();
+        let mut root: Multipart = Multipart::with_boundary("mixed", "outer").unwrap();
         for byte in 0..=255 {
             root.children_mut().push(binary(&[byte]));
         }
-        let mut inner: Multipart = Multipart::new("mixed", "inner").unwrap();
+        let mut inner: Multipart = Multipart::with_boundary("mixed", "inner").unwrap();
         inner.set_epilogue(b"tail\r".to_vec());
         root.children_mut().push(inner.into());
         let raw = write(&mut root.into(), format);

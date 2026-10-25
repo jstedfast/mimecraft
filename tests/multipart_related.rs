@@ -62,7 +62,7 @@ fn parameter(related: &MultipartRelated, name: &str) -> Option<String> {
 
 #[test]
 fn constructors_and_accessors_do_not_require_source_traits() {
-    let mut related: MultipartRelated<()> = MultipartRelated::new("boundary").unwrap();
+    let mut related: MultipartRelated<()> = MultipartRelated::with_boundary("boundary").unwrap();
     assert_eq!(related.multipart().headers().len(), 1);
     assert_eq!(related.root_index().unwrap(), None);
     assert!(related.root().unwrap().is_none());
@@ -82,11 +82,61 @@ fn constructors_and_accessors_do_not_require_source_traits() {
     let entity: MimeEntity<()> = related.into();
     assert!(matches!(entity, MimeEntity::Multipart(_)));
     assert!(matches!(
-        MultipartRelated::<()>::new(""),
+        MultipartRelated::<()>::with_boundary(""),
         Err(MultipartRelatedError::Multipart(
             MultipartError::InvalidBoundary { .. }
         ))
     ));
+}
+
+#[test]
+fn default_constructor_generates_only_a_boundary_without_source_traits() {
+    let related: MultipartRelated<()> = MultipartRelated::new().unwrap();
+    let part = related.multipart();
+    let boundary = part.boundary().unwrap().unwrap();
+    assert_eq!(boundary.len(), 26);
+    assert!(boundary.starts_with("=-"));
+    assert!(boundary.ends_with("=="));
+    assert_eq!(part.headers().len(), 1);
+    assert!(part.children().is_empty());
+    assert!(part.preamble().is_empty());
+    assert!(part.epilogue().is_empty());
+    assert!(related.root().unwrap().is_none());
+    let content_type = part.content_type().unwrap().unwrap();
+    assert!(content_type.is_mime_type("multipart", "related"));
+    assert_eq!(content_type.parameters().get("type"), None);
+    assert_eq!(content_type.parameters().get("start"), None);
+    let explicit: MultipartRelated<()> = MultipartRelated::with_boundary(&boundary).unwrap();
+    assert_eq!(part.headers(), explicit.multipart().headers());
+}
+
+#[test]
+fn generated_boundary_survives_root_assignment_and_message_round_trip() {
+    let mut related: MultipartRelated = MultipartRelated::new().unwrap();
+    let boundary = related.multipart().boundary().unwrap().unwrap();
+    related.set_root(leaf("text/html", None, "html")).unwrap();
+    assert_eq!(
+        related.multipart().boundary().unwrap(),
+        Some(boundary.clone())
+    );
+    let mut message = MimeMessage::with_body(related.into());
+    let mut wire = Vec::new();
+    message.write_to(&mut wire).unwrap();
+    let loaded = MimeMessage::load(&mut wire.as_slice()).unwrap();
+    assert!(loaded.text_body_part(TextFormat::Html).unwrap().is_some());
+    let (_, Some(MimeEntity::Multipart(part))) = loaded.into_parts() else {
+        panic!()
+    };
+    let related = MultipartRelated::from_multipart(part).unwrap();
+    assert_eq!(related.multipart().boundary().unwrap(), Some(boundary));
+    assert_eq!(related.root_index().unwrap(), Some(0));
+    assert_eq!(parameter(&related, "type").as_deref(), Some("text/html"));
+    assert_eq!(parameter(&related, "start"), None);
+    assert_eq!(label(related.root().unwrap().unwrap()), "html");
+    let mut reloaded = MimeMessage::with_body(related.into());
+    let mut second = Vec::new();
+    reloaded.write_to(&mut second).unwrap();
+    assert_eq!(second, wire);
 }
 
 #[test]
@@ -246,7 +296,7 @@ fn visited_metadata_errors_are_explicit_and_unneeded_metadata_is_ignored() {
 
 #[test]
 fn empty_and_first_child_roots_omit_start_and_do_not_require_content_id() {
-    let mut related: MultipartRelated = MultipartRelated::new("b").unwrap();
+    let mut related: MultipartRelated = MultipartRelated::with_boundary("b").unwrap();
     let mut content_type = related.multipart().content_type().unwrap().unwrap();
     content_type.parameters_mut().set("start", "<>").unwrap();
     related
@@ -574,7 +624,7 @@ impl Seek for NoIo {
 fn borrowed_child_ownership_survives_root_replacement_without_io() {
     let mut first = NoIo;
     let mut second = NoIo;
-    let mut related = MultipartRelated::new("b").unwrap();
+    let mut related = MultipartRelated::with_boundary("b").unwrap();
     related
         .set_root(MimePart::new(MimeContent::new(&mut first)).into())
         .unwrap();
@@ -591,7 +641,7 @@ fn borrowed_child_ownership_survives_root_replacement_without_io() {
 
 #[test]
 fn nested_alternative_root_round_trips_and_reuses_body_selection() {
-    let mut alternative = Multipart::new("alternative", "alt").unwrap();
+    let mut alternative = Multipart::with_boundary("alternative", "alt").unwrap();
     alternative
         .headers_mut()
         .add(Header::parse(b"Content-Id: <alternative>").unwrap());

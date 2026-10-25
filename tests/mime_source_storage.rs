@@ -92,7 +92,7 @@ fn edited_or_relocated_parsed_overlaps_still_require_collision_free_boundaries()
                 if edit == 4 {
                     // Both overlapping nodes retain parsed framing, but their
                     // new authored ancestor makes the original context invalid.
-                    let mut outer = Multipart::new("mixed", "unrelated").unwrap();
+                    let mut outer = Multipart::with_boundary("mixed", "unrelated").unwrap();
                     outer.children_mut().push(entity);
                     entity = outer.into();
                 } else {

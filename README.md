@@ -1343,24 +1343,44 @@ text-specific APIs. All leaves in a tree share one source type, defaulting to
 ```rust
 use mimecraft::{MimeEntity, Multipart, TextPart};
 
-let mut alternatives: Multipart = Multipart::new("alternative", "alt-boundary").unwrap();
+let mut alternatives: Multipart = Multipart::with_boundary("alternative", "alt-boundary").unwrap();
 alternatives.children_mut().push(TextPart::new("plain", "hello").unwrap().into());
 alternatives.children_mut().push(TextPart::new("html", "<b>hello</b>").unwrap().into());
 
-let mut mixed: Multipart = Multipart::new("mixed", "outer-boundary").unwrap();
+let mut mixed: Multipart = Multipart::with_boundary("mixed", "outer-boundary").unwrap();
 mixed.set_preamble_text("This message has multiple parts.");
 mixed.children_mut().push(alternatives.into());
 let root: MimeEntity = mixed.into();
 assert_eq!(root.leaf_parts().count(), 2);
 ```
 
-`Multipart::new(subtype, boundary)` creates an empty container with one checked
-Content-Type. Boundaries are explicit, not randomly generated. Checked creation,
+`Multipart::new(subtype)` creates an empty container with one checked Content-Type
+and a generated boundary. `Multipart::with_boundary(subtype, boundary)` accepts
+an explicit boundary instead. Checked creation,
 Content-Type replacement, and boundary edits require the RFC 2046 boundary
 alphabet, 1..=70 bytes, and no trailing space. Input is not trimmed.
 Boundary errors report the first invalid byte. Model edits do not scan sources
 or check collisions: callers must choose values that do not collide with body
 data or ancestor/descendant delimiters. Serialization checks ancestor overlap.
+
+`Multipart::new(subtype)` uses MimeKit-style boundary generation;
+`Multipart::generate_boundary()` returns a standalone string for
+explicit constructors or `set_boundary()`, including specialized related/report
+containers. Both use the existing `getrandom` dependency to obtain 16 OS-random
+bytes, encoded as unwrapped, padded Base64 with the `=-` prefix. The resulting
+boundary is exactly 26 ASCII bytes. `MultipartError::Random` preserves entropy
+failures without a weak fallback or partial result. The generated constructor
+validates subtype syntax before requesting entropy and creates only Content-Type.
+Neither operation reads child sources or scans for collisions; uniqueness is
+probabilistic. Explicit-boundary construction, getters, loading, and serialization
+retain their existing behavior; missing boundaries are not silently repaired.
+
+```rust
+use mimecraft::Multipart;
+
+let mixed: Multipart = Multipart::new("mixed").unwrap();
+assert_eq!(mixed.boundary().unwrap().unwrap().len(), 26);
+```
 
 Headers remain authoritative. `content_type()` returns a detached parsed value,
 including a non-multipart value introduced by raw editing. `boundary()` checks
@@ -1411,7 +1431,7 @@ Editing headers does not change an enum variant or reinterpret its body.
 `MimeEntity::body_parts()` instead stops at attached-message wrappers;
 `attachments()` filters those non-multipart nodes by their own dispositions.
 
-Content collision scanning and random boundary generation remain deferred.
+Content collision scanning remains deferred.
 
 ### Multipart serialization
 
@@ -1422,7 +1442,7 @@ truncated containers, with default CRLF text output. Their options variants reus
 ```rust
 use mimecraft::{Multipart, TextPart};
 
-let mut mixed: Multipart = Multipart::new("mixed", "message-boundary").unwrap();
+let mut mixed: Multipart = Multipart::with_boundary("mixed", "message-boundary").unwrap();
 mixed.children_mut().push(TextPart::new("plain", "hello").unwrap().into());
 let mut output = Vec::new();
 mixed.write_to(&mut output).unwrap();
@@ -2527,7 +2547,7 @@ number. Zero cannot precede another component.
 use mimecraft::{MessagePart, MimeMessage, Multipart, TextPart};
 
 let inner = MimeMessage::with_body(TextPart::new("plain", "hello").unwrap().into());
-let mut mixed = Multipart::new("mixed", "example-boundary").unwrap();
+let mut mixed = Multipart::with_boundary("mixed", "example-boundary").unwrap();
 mixed.children_mut().push(MessagePart::new(inner).into());
 let message = MimeMessage::with_body(mixed.into());
 let mut iter = message.iter();
@@ -2593,7 +2613,7 @@ message/rfc822 for immediate digest children, without changing raw headers.
 ```rust
 use mimecraft::{MimeMessage, Multipart, TextFormat, TextPart};
 
-let mut alternative = Multipart::new("alternative", "alt").unwrap();
+let mut alternative = Multipart::with_boundary("alternative", "alt").unwrap();
 alternative.children_mut().push(TextPart::new("plain", "hello").unwrap().into());
 alternative.children_mut().push(TextPart::new("html", "<b>hello</b>").unwrap().into());
 let mut message = MimeMessage::with_body(alternative.into());
@@ -2619,8 +2639,11 @@ are iterative, with auxiliary storage proportional to nesting depth.
 
 ### Related multipart roots
 
-`MultipartRelated<R>` composes `Multipart<R>`, with an explicit boundary in
-`new(boundary)` and checked wrapping through `from_multipart`. Wrapping checks
+`MultipartRelated<R>` composes `Multipart<R>`, generating a boundary in `new()`
+or accepting an explicit value in `with_boundary(boundary)`. Generation uses
+`Multipart::new` and wraps entropy errors in `MultipartRelatedError::Multipart`;
+neither constructor creates children, IDs, or type/start parameters.
+Checked wrapping through `from_multipart` checks
 only the first Content-Type for multipart/related; it does not require a valid
 boundary, selectors, or children. Loading and conversion keep the ordinary
 `MimeEntity::Multipart` variant. No source traits or I/O are required.
@@ -2628,7 +2651,7 @@ boundary, selectors, or children. Loading and conversion keep the ordinary
 ```rust
 use mimecraft::{MimeEntity, MultipartRelated, TextFormat, TextPart};
 
-let mut related: MultipartRelated = MultipartRelated::new("related-boundary").unwrap();
+let mut related: MultipartRelated = MultipartRelated::new().unwrap();
 related.set_root(TextPart::new("html", "<p>Root document</p>").unwrap().into()).unwrap();
 assert_eq!(related.root_index().unwrap(), Some(0));
 let entity: MimeEntity = related.into();
@@ -4162,7 +4185,7 @@ let original = MimeMessage::with_body(
     TextPart::new("plain", "attached message").unwrap().into(),
 );
 let attachment = MessagePart::new(original);
-let mut mixed: Multipart = Multipart::new("mixed", "outer-boundary").unwrap();
+let mut mixed: Multipart = Multipart::with_boundary("mixed", "outer-boundary").unwrap();
 mixed.children_mut().push(attachment.into());
 let mut output = Vec::new();
 mixed.write_to(&mut output).unwrap();
@@ -6399,8 +6422,10 @@ validation remains stricter than MimeKit's support for `application/rtf`.
 Multipart ownership adapts `Multipart.cs` and `MimeEntity.cs` using an enum and
 owned child vectors instead of inheritance and parent/event machinery.
 Raw headers remain authoritative; checked edits implement the source's boundary
-validation TODO using RFC 2046 section 5.1.1. Caller-supplied boundaries replace
-random generation for now. Raw preamble/epilogue bytes avoid implicit string
+validation TODO using RFC 2046 section 5.1.1. The default constructor ports
+`Multipart.GenerateBoundary` using the existing OS-randomness dependency and
+shared unwrapped Base64 encoder; `with_boundary` accepts caller-supplied values.
+Raw preamble/epilogue bytes avoid implicit string
 decoding, and iterative leaf traversal avoids recursive enumeration. Private
 parser provenance preserves original delimiters and truncation until structural
 or framing-metadata edits require regeneration.
