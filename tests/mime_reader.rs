@@ -2569,10 +2569,10 @@ fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
                     &format!("{name}/{format}/{capacity}/message#{index}"),
                 );
             }
-            if !options.respect_content_length {
+            if !options.respect_content_length && name != "jwz" {
                 continue;
             }
-            // For the Content-Length corpus, the parser uses the same upstream
+            // For the Content-Length and jwz corpora, use the same upstream
             // goldens to verify recovered topology and raw bodies.
             // Envelope markers live in reader events,
             // not owned messages; compare each serialized message's wire range.
@@ -2615,8 +2615,24 @@ fn assert_mbox_offsets(name: &str, options: MimeEntityParseOptions) {
                         |stream, expected| match stream {
                             MimeContentStream::Memory(cursor) => cursor.get_ref().clone(),
                             MimeContentStream::Source(range) => {
-                                assert_eq!(range.start_boundary(), expected.headers_end_offset);
-                                assert_eq!(range.end_boundary(), Some(expected.end_offset));
+                                if expected.headers_end_offset == expected.end_offset
+                                    && range.start_boundary() != expected.headers_end_offset
+                                {
+                                    // Like MimeOffsets::finish, account only for
+                                    // MimeKit's empty-body offset clamp. Our
+                                    // empty range follows the consumed separator.
+                                    assert_eq!(range.end_boundary(), Some(range.start_boundary()));
+                                    let start = range.start_boundary() as usize;
+                                    let separator = &wire[expected.end_offset as usize..start];
+                                    assert!(separator == b"\n" || separator == b"\r\n");
+                                    assert!(
+                                        wire[start..].starts_with(b"--")
+                                            || wire[start..].starts_with(b"From ")
+                                    );
+                                } else {
+                                    assert_eq!(range.start_boundary(), expected.headers_end_offset);
+                                    assert_eq!(range.end_boundary(), Some(expected.end_offset));
+                                }
                                 let mut copy = mimecraft::io::BoundedStream::new(
                                     range.get_ref().clone(),
                                     range.start_boundary(),

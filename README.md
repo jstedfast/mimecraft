@@ -1433,9 +1433,13 @@ protects nested epilogues ending in bare CR.
 
 Authored or edited container Content-Type and boundary must be valid.
 Unchanged parsed metadata retains its recovered interpretation, including
-missing boundaries whose content stays entirely in the preamble. Equal or prefix-overlapping
-ancestor boundaries are rejected, including across attached-message wrappers,
-but siblings may reuse boundaries. Multipart
+missing boundaries whose content stays entirely in the preamble. Equal or
+prefix-overlapping ancestor boundaries are preserved only when the container
+and every active multipart ancestor retain original parsed framing, including
+across attached-message wrappers. Taking mutable children, editing framing
+headers, or moving a parsed subtree under an authored container restores strict
+overlap rejection. Unrelated header edits do not invalidate parsed framing.
+Siblings may reuse boundaries. Multipart
 Content-Transfer-Encoding must be absent, 7bit, 8bit, or binary. These metadata
 checks do not scan bodies, preambles, or epilogues for delimiter collisions;
 choosing collision-free values remains the caller's responsibility.

@@ -451,6 +451,49 @@ fn digest_defaults_and_ancestor_boundaries_survive_message_wrappers() {
 }
 
 #[test]
+fn parsed_overlaps_survive_masking_but_structural_edits_still_fail() {
+    let raw = concat!(
+        "Content-Type: multipart/mixed; boundary=b\n\n--b \t\n",
+        "Content-Type: message/rfc822\n\nSubject: private\n",
+        "Content-Type: multipart/mixed; boundary=b-long\n\n--b-long\t \n",
+        "Content-Type: text/plain\n\nHello\n--b-long--\n\n--b--\n",
+    );
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let mut entity = MimeEntity::load(&mut raw.as_bytes()).unwrap();
+        let mut options = WriteOptions::default();
+        options.part.new_line_format = format;
+        let expected = raw.replace("private", "xxxxxxx").replace("Hello", "xxxxx");
+        let expected = if format == NewLineFormat::Dos {
+            expected.replace('\n', "\r\n")
+        } else {
+            expected
+        };
+        let mut output = Vec::new();
+        anonymize::write_entity_with_options(&mut entity, &mut output, &options).unwrap();
+        assert_eq!(output, expected.as_bytes());
+        output.clear();
+        anonymize::write_entity_content_with_options(&mut entity, &mut output, &options).unwrap();
+        let separator = if format == NewLineFormat::Dos {
+            "\r\n\r\n"
+        } else {
+            "\n\n"
+        };
+        let start = expected.find(separator).unwrap() + separator.len();
+        assert_eq!(output, &expected.as_bytes()[start..]);
+        let MimeEntity::Multipart(root) = &mut entity else {
+            unreachable!()
+        };
+        let _ = root.children_mut();
+        assert_eq!(
+            anonymize::write_entity_with_options(&mut entity, &mut Vec::new(), &options)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData,
+        );
+    }
+}
+
+#[test]
 fn malformed_report_fields_fail_after_headers_without_opaque_fallback() {
     let mut entity: MimeEntity = MimePart::from_parts(
         headers(b"Content-Type: message/delivery-status\n"),

@@ -1,4 +1,4 @@
-// Adapted from MimeKit's MimeParserTests.cs storage and stream-lifetime tests.
+// Adapted from MimeKit's MimeParserTests.cs storage/lifetime tests and MimeWriter.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
@@ -10,9 +10,143 @@ use std::{
 };
 
 use mimecraft::{
-    MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimeMessage,
-    MimeParser, io::SharedStream,
+    Header, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimeMessage,
+    MimeParser, MimePartWriteOptions, Multipart, encodings::NewLineFormat, io::SharedStream,
 };
+
+#[test]
+fn parsed_overlapping_boundaries_round_trip_in_both_storage_modes() {
+    for (outer, inner) in [("b", "b"), ("b", "b-long"), ("b-long", "b"), ("b", "b--")] {
+        for (subtype, wrapper) in [
+            ("mixed", ""),
+            ("mixed", "Content-Type: message/rfc822\n\nSubject: nested\n"),
+            ("digest", "\nSubject: nested\n"),
+        ] {
+            let prefix = format!(
+                "Content-Type: multipart/{subtype}; boundary={outer}\n\n--{outer} \t\n\
+                 {wrapper}Content-Type: multipart/mixed; boundary={inner}\n\n\
+                 --{inner}\t \nContent-Type: text/plain\n\nbody"
+            );
+            for tail in [
+                String::new(),
+                format!("\n--{inner}-- \t\n\n--{outer}--\n"),
+                format!("\n--{outer}--"),
+            ] {
+                for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+                    let raw = format!("{prefix}{tail}");
+                    let raw = if format == NewLineFormat::Dos {
+                        raw.replace('\n', "\r\n")
+                    } else {
+                        raw
+                    };
+                    let options = MimePartWriteOptions {
+                        new_line_format: format,
+                        ..Default::default()
+                    };
+                    let separator = if format == NewLineFormat::Dos {
+                        "\r\n\r\n"
+                    } else {
+                        "\n\n"
+                    };
+                    let content_start = raw.find(separator).unwrap() + separator.len();
+                    let mut entity = MimeEntity::load(&mut raw.as_bytes()).unwrap();
+                    let mut output = Vec::new();
+                    entity.write_to_with_options(&mut output, &options).unwrap();
+                    assert_eq!(output, raw.as_bytes());
+                    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                        for chunk in [1, 7, 4096] {
+                            let (source, _) = Source::new(raw.as_bytes(), chunk);
+                            let mut entity =
+                                MimeEntity::load_with_storage(source, storage).unwrap();
+                            output.clear();
+                            entity.write_to_with_options(&mut output, &options).unwrap();
+                            assert_eq!(output, raw.as_bytes(), "{storage:?}/{chunk}");
+                            output.clear();
+                            entity
+                                .write_content_to_with_options(&mut output, &options)
+                                .unwrap();
+                            assert_eq!(output, &raw.as_bytes()[content_start..]);
+                            output.clear();
+                            entity.write_to_with_options(&mut output, &options).unwrap();
+                            assert_eq!(output, raw.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn edited_or_relocated_parsed_overlaps_still_require_collision_free_boundaries() {
+    for wrapper in ["", "Content-Type: message/rfc822\r\n\r\n"] {
+        let raw = format!(
+            "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+             {wrapper}Content-Type: multipart/mixed; boundary=b-long\r\n\r\n\
+             --b-long--\r\n\r\n--b--\r\n"
+        );
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            for edit in 0..5 {
+                let mut entity =
+                    MimeEntity::load_with_storage(Cursor::new(raw.as_bytes()), storage).unwrap();
+                if edit == 4 {
+                    // Both overlapping nodes retain parsed framing, but their
+                    // new authored ancestor makes the original context invalid.
+                    let mut outer = Multipart::new("mixed", "unrelated").unwrap();
+                    outer.children_mut().push(entity);
+                    entity = outer.into();
+                } else {
+                    let MimeEntity::Multipart(root) = &mut entity else {
+                        panic!("expected multipart");
+                    };
+                    match edit {
+                        0 => {
+                            let _ = root.children_mut();
+                        }
+                        1 => {
+                            root.headers_mut()
+                                .replace_all(
+                                    Header::parse(
+                                        b"Content-Type: multipart/alternative; boundary=b",
+                                    )
+                                    .unwrap(),
+                                )
+                                .unwrap();
+                        }
+                        2 => {
+                            root.headers_mut()
+                                .add(Header::parse(b"Content-Transfer-Encoding: 7bit").unwrap());
+                        }
+                        3 => root.set_boundary("b-").unwrap(),
+                        _ => unreachable!(),
+                    }
+                }
+                let mut output = Vec::new();
+                let error = entity.write_to(&mut output).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                assert!(error.to_string().contains("ancestor"));
+                output.clear();
+                assert!(entity.write_content_to(&mut output).is_err());
+                if edit != 4 {
+                    let MimeEntity::Multipart(root) = &mut entity else {
+                        unreachable!()
+                    };
+                    root.set_boundary("safe").unwrap();
+                    output.clear();
+                    entity.write_to(&mut output).unwrap();
+                    assert!(output.ends_with(b"--safe--\r\n"));
+                }
+            }
+            let mut entity =
+                MimeEntity::load_with_storage(Cursor::new(raw.as_bytes()), storage).unwrap();
+            // Unrelated metadata edits do not invalidate multipart framing.
+            entity
+                .headers_mut()
+                .add(Header::parse(b"X-Note: kept").unwrap());
+            entity.write_to(&mut Vec::new()).unwrap();
+        }
+    }
+}
 
 #[derive(Default)]
 struct Observed {

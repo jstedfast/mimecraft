@@ -30,9 +30,11 @@ use crate::{
 /// Raw edits and [`Self::from_parts`] can retain missing or invalid metadata.
 /// Typed getters observe it directly, without caches or silent repairs.
 /// Synchronous writing normalizes text newlines but preserves parsed markers
-/// byte-for-byte. Authored/edited metadata and ancestor boundary overlap are
-/// checked without changing stored values. [`MimeEntity::load`] also retains
-/// truncated containers and missing header/body separators.
+/// byte-for-byte. Authored/edited metadata is checked without changing stored
+/// values. Overlapping ancestor boundaries are preserved only while the entire
+/// active multipart ancestry retains parsed framing; otherwise they are rejected.
+/// [`MimeEntity::load`] also retains truncated containers and missing header/body
+/// separators.
 ///
 /// ```
 /// use mimecraft::{MimeEntity, Multipart, TextPart};
@@ -65,6 +67,8 @@ pub(crate) struct ParsedMultipart {
 
 impl<R> Multipart<R> {
     pub(crate) fn original_framing(&self) -> Option<&ParsedMultipart> {
+        // If the framing headers change, parsed boundary markers no longer
+        // apply; generate them from the edited metadata when writing instead.
         self.framing.as_ref().filter(|framing| {
             self.headers
                 .get("Content-Type")

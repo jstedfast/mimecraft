@@ -120,7 +120,10 @@ impl<R: Read + Seek> Multipart<R> {
     /// Authored or edited containers require a valid multipart type and boundary.
     /// Unchanged parsed metadata retains the reader's recovery interpretation,
     /// including missing boundaries whose content remains entirely preamble.
-    /// Equal or prefix-overlapping ancestor boundaries are rejected; siblings
+    /// Equal or prefix-overlapping ancestor boundaries are preserved only when
+    /// this container and every active multipart ancestor retain original parsed
+    /// framing. Otherwise they are rejected, including after taking mutable
+    /// children or moving a parsed subtree under an authored container. Siblings
     /// may reuse a boundary. Ancestors remain active across message wrappers.
     /// Multipart transfer encoding must be absent, 7bit,
     /// 8bit, or binary. No body or preamble/epilogue collision scanning, random
@@ -491,16 +494,24 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                         })?
                         .is_some_and(|value| value.is_mime_type("multipart", "digest"))
                 };
+                // MimeKit writes raw boundary markers byte-for-byte as parsed.
+                // Preserve recovered overlaps only while the entire multipart
+                // ancestry retains its original framing. Editing an intervening
+                // container can move a parsed subtree into a conflicting context.
+                let mut parsed_ancestry = original_framing.is_some();
+                let mut overlaps = false;
                 for ancestor in &stack {
-                    if let Task::Children(frame) = ancestor
-                        && (boundary.starts_with(&frame.boundary)
-                            || frame.boundary.starts_with(&boundary))
-                    {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "multipart boundary overlaps an ancestor boundary",
-                        ));
+                    if let Task::Children(frame) = ancestor {
+                        parsed_ancestry &= frame.framing.is_some();
+                        overlaps |= boundary.starts_with(&frame.boundary)
+                            || frame.boundary.starts_with(&boundary);
                     }
+                }
+                if overlaps && !parsed_ancestry {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "multipart boundary overlaps an ancestor boundary",
+                    ));
                 }
                 if !content_only {
                     crate::mime_entity::write_entity_headers(
