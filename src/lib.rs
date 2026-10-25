@@ -111,6 +111,8 @@
 //! [`MimeParser::with_storage`], with independent cursors and shared source ownership.
 //! [`MimeEntity::load_with_storage`] and [`MimeMessage::load_with_storage`]
 //! provide the same choice for loading complete models without keeping a parser.
+//! [`MimeEntity::load_file`] and [`MimeMessage::load_file`] load copied models
+//! from file paths, closing their files before returning on success or failure.
 //! [`MimeReader::read_headers`] and [`MimeParser::parse_headers`] read standalone
 //! raw header blocks with limits and offsets, leaving buffered body bytes unread.
 //! Reader/parser source replacement preserves limits and returns the old buffered

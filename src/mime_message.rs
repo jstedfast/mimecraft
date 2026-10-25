@@ -1,7 +1,9 @@
 // Adapted from MimeKit's MimeMessage.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead, Cursor, Read, Seek, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, Write};
+use std::path::Path;
 
 use crate::{
     AddressHeaderFormatError, AddressHeaderFormatOptions, AddressList, AddressParseError,
@@ -1649,6 +1651,53 @@ impl<R> Default for MimeMessage<R> {
 }
 
 impl MimeMessage {
+    /// Loads one complete message from a file into owned in-memory body streams.
+    ///
+    /// Uses default [`MimeEntityParseOptions`]. The file is opened read-only and
+    /// closed before returning, including on failure. See
+    /// [`Self::load_file_with_options`] for parsing and error behavior.
+    ///
+    /// # Errors
+    ///
+    /// Propagates file-open, read, and parsing errors without a partial message.
+    ///
+    /// ```no_run
+    /// use mimecraft::{MimeMessage, TextFormat};
+    ///
+    /// let mut message = MimeMessage::load_file("message.eml")?;
+    /// let text = message.text_body(TextFormat::Plain)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn load_file<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::load_file_with_options(path, &MimeEntityParseOptions::default())
+    }
+
+    /// Loads a message from a file with explicit parsing options.
+    ///
+    /// Opens the file read-only and parses through EOF with
+    /// [`Self::load_with_options`], including its message/body header partition,
+    /// recovery, and limits. Encoded bodies are copied into memory. Header
+    /// offsets are relative to the beginning of the file, and no file handle
+    /// remains in the returned message or its attached messages.
+    ///
+    /// For source-backed content instead, open a [`File`] and pass ownership to
+    /// [`Self::load_with_storage`] with [`MimeContentStorage::Source`].
+    /// Use [`crate::MimeParser`] to iterate through an mbox file.
+    ///
+    /// # Errors
+    ///
+    /// Validates options before opening the file. Platform path and access
+    /// errors, read errors, and parsing errors propagate unchanged. The file is
+    /// closed on success or failure; no partial message is returned.
+    pub fn load_file_with_options<P: AsRef<Path>>(
+        path: P,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<Self> {
+        options.validate()?;
+        let mut reader = BufReader::new(File::open(path)?);
+        Self::load_with_options(&mut reader, options)
+    }
+
     /// Loads one complete message through EOF into owned in-memory body streams.
     ///
     /// Uses default [`MimeEntityParseOptions`]. See [`Self::load_with_options`]

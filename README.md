@@ -1614,6 +1614,14 @@ stored encoded bodies in `Cursor<Vec<u8>>` at position zero by default. Message 
 partitions root Content-* fields onto the body without losing header offsets.
 `MimeEntity::load` and `MimeMessage::load` now delegate to this parser.
 
+`MimeEntity::load_file(path)` and `MimeMessage::load_file(path)` open a file
+read-only and use the same copying parser. Their `load_file_with_options(path,
+&options)` variants validate limits before opening the file. All four close
+the file before returning, even on parsing failure; returned models retain no
+file handles. Paths accept `AsRef<Path>`, and platform open/read errors propagate
+unchanged. For source-backed file content instead, pass an owned `std::fs::File`
+to `load_with_storage` with `MimeContentStorage::Source`.
+
 `MimeParser::with_storage(source, storage)` selects body storage explicitly
 on the same parser. `MimeContentStorage::Memory` copies encoded bodies;
 `MimeContentStorage::Source` retains bounded ranges in the original seekable input, implementing

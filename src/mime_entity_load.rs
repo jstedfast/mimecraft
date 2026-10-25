@@ -1,7 +1,9 @@
 // Adapted from MimeKit's MimeEntity.cs, MimeReader.cs and MimeParser.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead, Cursor, Read, Seek};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
+use std::path::Path;
 
 use crate::{
     ContentType, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions,
@@ -9,6 +11,55 @@ use crate::{
 };
 
 impl MimeEntity {
+    /// Loads one complete entity from a file into owned in-memory body streams.
+    ///
+    /// Uses default [`MimeEntityParseOptions`]. The file is opened read-only and
+    /// closed before returning, including on failure. See
+    /// [`Self::load_file_with_options`] for parsing and error behavior.
+    ///
+    /// # Errors
+    ///
+    /// Propagates file-open, read, and parsing errors without a partial entity.
+    pub fn load_file<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::load_file_with_options(path, &MimeEntityParseOptions::default())
+    }
+
+    /// Loads an entity from a file with explicit parsing options.
+    ///
+    /// Opens the file read-only and parses through EOF with
+    /// [`Self::load_with_options`]. Encoded bodies are copied into memory;
+    /// neither the entity nor its children retain a file handle. Header offsets
+    /// are relative to the beginning of the file. Recovery and limits are the
+    /// same as for buffered-stream loading.
+    ///
+    /// For source-backed content instead, open a [`File`] and pass ownership to
+    /// [`Self::load_with_storage`] with [`MimeContentStorage::Source`].
+    ///
+    /// # Errors
+    ///
+    /// Validates options before opening the file. Platform path and access
+    /// errors, read errors, and parsing errors propagate unchanged. The file is
+    /// closed on success or failure; no partial entity is returned.
+    ///
+    /// ```no_run
+    /// use mimecraft::{MimeEntity, MimeEntityParseOptions};
+    ///
+    /// let options = MimeEntityParseOptions {
+    ///     max_input_bytes: 1024 * 1024,
+    ///     ..Default::default()
+    /// };
+    /// let entity = MimeEntity::load_file_with_options("entity.mime", &options)?;
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn load_file_with_options<P: AsRef<Path>>(
+        path: P,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<Self> {
+        options.validate()?;
+        let mut reader = BufReader::new(File::open(path)?);
+        Self::load_with_options(&mut reader, options)
+    }
+
     /// Loads a body whose Content-Type was parsed separately from its bytes.
     ///
     /// Intended for APIs such as HTTP clients that expose headers separately
