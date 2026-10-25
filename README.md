@@ -757,7 +757,8 @@ configured preserved fields in their entirety.
 Output can retain controls, non-ASCII bytes, or invalid UTF-8;
 it is not necessarily valid MIME or safe display text. Review it before sharing.
 Use `AnonymizeFilter` when only MIME whitespace should survive masking.
-Value reformatting and preserved raw delimiters remain deferred.
+Value reformatting remains deferred. Parsed delimiters retain their spelling
+and padding, but the anonymizer normalizes their line endings.
 
 ### Incremental charset conversion
 
@@ -1221,9 +1222,10 @@ pass-through.
 `max_line_length` defaults to 78 and must be 60..=998. It controls newly
 encoded Base64/QP only, capped at 76; existing encoded bodies, UU's fixed width,
 and raw header lines are not rewrapped. `ensure_new_line` defaults to false:
-when enabled, nonbinary output ends with the selected newline, including empty
-Base64/QP bodies. New encoders already terminate nonempty output, and UU always
-emits a zero-length line.
+when enabled, nonbinary output ends with the selected newline, including authored
+empty Base64/QP bodies. New encoders terminate nonempty output, and UU emits a
+zero-length line. Parsed absent content stays absent rather than gaining encoder
+output or an extra body newline.
 
 New UU output includes `begin 0644 filename` and `end` lines. The filename uses
 Content-Disposition, then Content-Type's `name`, then `unknown`, with surrounding
@@ -1232,13 +1234,16 @@ extra wrapper lines. Already UU-encoded content retains its existing wrapper.
 
 Header normalization preserves field spelling, folding, duplicates, malformed
 records, and value bytes using `HeaderList`'s rules. Unlike standalone list
-writing, part writing terminates truncated records in output before writing
-the separator, without changing the stored records. No automatic MIME-Version
+writing, authored part output terminates records before writing the separator.
+Loaded EOF-truncated records and absent separators are preserved unless edits
+require a following record or body separator. No automatic MIME-Version
 header, content-type fallback, duplicate removal, or transport validation occurs.
 
 Options and required metadata are checked before source I/O or destination
 writes/flushes. Invalid options return `io::ErrorKind::InvalidInput`; an unknown
 transfer encoding or invalid required UU filename metadata returns `InvalidData`.
+An unchanged unknown transfer encoding accepted by reader recovery can still
+be serialized; changing that invalid header reinstates normal validation.
 Unneeded content metadata is not parsed. I/O errors propagate and can leave
 partial output. Successful body copies rewind the source before filter
 finalization; subsequent write or flush failures may therefore leave it at zero.
@@ -1371,8 +1376,12 @@ reordering. Removed children retain their source ownership; clearing drops them.
 Preamble and epilogue setters take raw byte vectors and return the previous
 bytes, without decoding, folding, or newline conversion. These vectors exclude
 delimiter lines; epilogue begins after the closing delimiter's line ending.
+Taking `children_mut()` or replacing the preamble/epilogue discards this container's
+parsed framing, even without subsequent vector edits; writing then generates
+complete delimiters with a header/body separator.
 `from_parts`/`into_parts` transfer all four components without validation,
-default insertion, source I/O, or copying. Empty vectors represent absent text.
+default insertion, source I/O, or copying; private parsed-framing provenance is
+not transferred. Empty vectors represent absent text.
 
 `leaf_parts()` visits leaves depth-first using an explicit stack, descending
 through attached messages as well as multiparts. Empty containers and absent
@@ -1383,13 +1392,12 @@ Editing headers does not change an enum variant or reinterpret its body.
 `MimeEntity::body_parts()` instead stops at attached-message wrappers;
 `attachments()` filters those non-multipart nodes by their own dispositions.
 
-Content collision scanning, random boundary generation, and
-preservation of parsed/truncated delimiter spellings remain deferred.
+Content collision scanning and random boundary generation remain deferred.
 
 ### Multipart serialization
 
-`Multipart::write_to` and `MimeEntity::write_to` serialize complete trees with
-default CRLF output. Their `write_to_with_options` variants reuse
+`Multipart::write_to` and `MimeEntity::write_to` serialize trees, including parsed
+truncated containers, with default CRLF text output. Their options variants reuse
 `MimePartWriteOptions`; a leaf entity root behaves exactly like `MimePart`.
 
 ```rust
@@ -1404,22 +1412,28 @@ assert!(output.ends_with(b"\r\n\r\nhello\r\n--message-boundary--\r\n"));
 
 Writing uses an explicit stack proportional to nesting depth, not recursive
 calls or whole-body buffering. Headers use the leaf writer's normalization and
-truncated-record repair. Preamble and epilogue newlines are normalized without
+parsed-separator rules. Preamble and epilogue newlines are normalized without
 charset decoding or folding; nonempty preambles are terminated before the
-first delimiter. Empty containers still emit a closing delimiter. The closing
-delimiter always has its own line ending, followed by the stored epilogue.
+first emitted delimiter. Authored empty containers emit a terminated closing
+delimiter. Unchanged parsed containers instead preserve raw marker bytes,
+including padding and original line endings, missing closing markers, trailing
+opening markers, and absent final terminators. Selecting another output newline
+does not rewrite parsed markers; the anonymizer retains its normalization policy.
 
-Every complete child is followed by a **separate delimiter-owned newline**,
-even when its body is empty or already ends in a newline. No binary body suffix
-is consumed or rewritten to provide framing. Children reuse the leaf writer's
-transfer conversion with `ensure_new_line` disabled; the root option affects
-only its epilogue. Encoder-generated endings are retained.
+A **separate delimiter-owned newline** precedes the next marker unless the
+child's parsed empty-body or truncated framing already owns that newline.
+No binary body suffix is consumed or rewritten to provide framing. Children
+normally disable `ensure_new_line`; truncated containers pass it to their
+final child or trailing marker instead of an absent epilogue. Binary tails
+remain unchanged. Encoder-generated endings are retained.
 With LF output, a child ending in bare CR receives a CRLF delimiter prefix:
 otherwise its CR and the delimiter's LF would look like one CRLF, losing the
-body byte when parsed. The boundary marker line still uses LF. This also
+body byte when parsed. Generated boundary marker lines still use LF. This also
 protects nested epilogues ending in bare CR.
 
-Container Content-Type and boundary must be valid. Equal or prefix-overlapping
+Authored or edited container Content-Type and boundary must be valid.
+Unchanged parsed metadata retains its recovered interpretation, including
+missing boundaries whose content stays entirely in the preamble. Equal or prefix-overlapping
 ancestor boundaries are rejected, including across attached-message wrappers,
 but siblings may reuse boundaries. Multipart
 Content-Transfer-Encoding must be absent, 7bit, 8bit, or binary. These metadata
@@ -1508,10 +1522,14 @@ remain without an attached message. `allow_header_only` defaults to true; its
 existing false value rejects missing separators, not all malformed input.
 Use a fallible compliance logger for selective rejection instead.
 Empty top-level input, invalid first headers, exceeded limits, source errors,
-and logger/callback errors remain fatal. Writer metadata and boundary checks
-remain unchanged. Raw delimiter spelling,
-absent-versus-empty body distinctions, and separator spelling are not retained:
-load/write may normalize framing, so it is not a lossless raw-wire API.
+and logger/callback errors remain fatal. Parsed marker spelling, truncation,
+separator presence, and no-content newline ownership are retained. Authored or
+edited invalid metadata still fails writer validation. Taking `content_mut()`
+conservatively invalidates a leaf's no-content/separator absence even when only
+decoding; replacing content also requires a separator. Replacing an attached
+message, or taking `message_mut()` when present, resets wrapper framing.
+Header and nonbinary content newline conversion
+still applies, so load/write is not an unconditional lossless raw-wire API.
 Recognized transparent message wrappers become structured attached messages;
 encoded wrappers and other non-multipart types remain opaque leaves.
 Zero-copy source ranges and async loading remain deferred.
@@ -1871,8 +1889,9 @@ remaining body headers. Authored replacements have no offset; lists are not
 sorted or repartitioned. Independently authored lists without loaded positions
 use message-first order.
 
-Headers-only output uses the same newline conversion and missing-terminator
-repair without decoding or refolding values. It does not validate body metadata,
+Headers-only output uses the same newline conversion, authored-record termination,
+and preservation of parsed EOF terminators/separator absence, without decoding
+or refolding values. It does not validate body metadata,
 so an invalid boundary or transfer encoding does not prevent header output.
 All `MimePartWriteOptions` are validated before destination I/O; valid encoder
 widths and `ensure_new_line` have no additional effect without a body. Write
@@ -6004,8 +6023,15 @@ parent or mbox delimiter are excluded from entity-end positions; EOF retains the
 Tests retain MimeKit's names in
 snake_case and applicable inline comments; synchronous cases also cover the
 input-fragmentation scenarios from its asynchronous variants.
-This is not yet the full upstream MimeReader/MimeParser test port; remaining
-cases include parser round-trip fixtures and additional reader lifecycle tests.
+Parser round-trip coverage now includes all 21 upstream delimiter-newline cases
+in LF and CRLF, with repeated `ensure_new_line` serialization, and the 69-file
+synchronous nonpersistent fixture corpus across one-byte, short, and full refills.
+The corpus includes opaque signed MIME from the OpenPGP, DKIM, and S/MIME test
+directories, without implementing cryptographic operations. Additional cases
+exercise raw padded/mixed-newline markers, mutation invalidation, binary tails,
+logged parsing, and output-failure retries.
+This is not yet the full upstream MimeReader/MimeParser test port; additional
+reader lifecycle tests and persistent-source round trips remain deferred.
 Content-Length-aware mbox parsing and its golden comparisons remain unsupported.
 No LegacyMimeParser tests are included.
 
@@ -6122,8 +6148,9 @@ Single-part writing follows `MimePart.WriteContent` and `MimeWriter.cs`, reusing
 the existing transfer codecs, newline filters, and normalized header writer.
 Stored/requested encoding comparisons, binary pass-through, UU wrappers, and
 empty-body newline handling are retained. Options and required metadata errors
-are explicit, UU filename controls are rejected, and truncated header records
-are terminated in output to keep the separator distinct. Signature verification
+are explicit and UU filename controls are rejected. Authored records are
+terminated; parsed EOF records, separator absence, and no-content delimiter
+ownership are retained until edits require new framing. Signature verification
 and configurable message-level formatting are not implemented. Writing does not
 prepare implicitly. Explicit tree preparation adapts `Multipart.Prepare`,
 `MessagePart.Prepare`, and `MimeMessage.Prepare` using a depth-proportional
@@ -6149,17 +6176,18 @@ owned child vectors instead of inheritance and parent/event machinery.
 Raw headers remain authoritative; checked edits implement the source's boundary
 validation TODO using RFC 2046 section 5.1.1. Caller-supplied boundaries replace
 random generation for now. Raw preamble/epilogue bytes avoid implicit string
-decoding, and iterative leaf traversal avoids recursive enumeration. Parsed
-delimiter preservation is not ported.
+decoding, and iterative leaf traversal avoids recursive enumeration. Private
+parser provenance preserves original delimiters and truncation until structural
+or framing-metadata edits require regeneration.
 Multipart writing follows `MimeWriter.cs`'s explicit frames and
-`MimeEntity.EndsWithDelimiterNewLine` ownership rules for complete children.
-Mandatory leaf content and the absence of truncated containers mean every
-child receives an independent delimiter newline. Rust epilogues exclude the
-closing delimiter's line ending, so that ending is always emitted explicitly.
-Nonempty preambles are terminated even for empty containers; invalid container
-encodings and overlapping ancestor boundaries produce explicit errors instead
-of ambiguous output. Existing leaf serializers and newline filters are reused;
-body collision scanning and signed/truncated-container special cases are deferred.
+`MimeEntity.EndsWithDelimiterNewLine` ownership rules, including truncated and
+empty-body cases. Rust retains an empty stream plus private no-content metadata
+instead of nullable content. Epilogues exclude the closing marker's line ending,
+which is stored with that marker unless owned by the enclosing delimiter.
+Authored invalid container encodings and overlapping ancestor boundaries
+produce explicit errors. Unchanged recovered metadata follows reader semantics.
+Existing leaf serializers and newline filters are reused; body collision
+scanning and signature-specific canonicalization remain deferred.
 Entity loading uses a shared event reader and owned-model parser, adapting
 `MimeReader.cs`'s iterative traversal, line-anchored boundary recognition,
 content callbacks, and withheld delimiter-newline semantics, plus
@@ -6176,8 +6204,8 @@ In-memory cursors replace the source's memory-block/persistent-stream choice.
 Preamble endings are retained; nested epilogues exclude parent framing and
 start after their own closing marker's newline. Recovery preserves malformed
 metadata and truncated containers while resource/source failures remain fatal.
-Empty content always has a stream; absent-content and raw-delimiter metadata
-are not modeled. LF serialization adds an independent CRLF delimiter prefix
+Empty content always has a stream; private framing metadata distinguishes its
+delimiter-newline ownership and retains raw markers. LF serialization adds a CRLF delimiter prefix
 after a bare body/epilogue CR to avoid losing that byte on reload.
 Message ownership and I/O adapt `MimeMessage.cs`'s separate message/body header
 lists, optional body, and combined header output, plus `Header.cs`'s

@@ -68,14 +68,15 @@ impl MimeEntity {
     /// By default, headers interrupted by EOF or an enclosing delimiter complete
     /// without a separator. Missing closing markers unwind truncated containers;
     /// missing boundary parameters leave all content in the preamble. Invalid
-    /// boundaries are matched literally, nearest ancestor first. Writer-side
-    /// metadata and boundary checks remain unchanged.
+    /// boundaries are matched literally, nearest ancestor first. Unchanged parsed
+    /// metadata retains this recovery interpretation when writing; authored or
+    /// edited metadata must pass writer validation.
     /// A message wrapper immediately followed by an enclosing marker has no
     /// attached message; standalone EOF constructs an empty embedded message.
     /// Empty top-level input and an invalid first header are still errors.
-    /// Delimiter spelling and absent-versus-empty body distinctions are not stored.
-    /// Writing may normalize headers/framing and distinguish empty bodies
-    /// differently; raw-wire byte-for-byte round trips are not promised.
+    /// Parsed markers, truncation, separator presence, and no-content newline
+    /// ownership are retained for serialization. Headers and nonbinary content
+    /// still follow output-newline options, so this is not a raw-wire API.
     ///
     /// # Errors
     ///

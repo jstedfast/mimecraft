@@ -93,9 +93,8 @@ fn header_only_messages_partition_and_interleave_headers_without_synthesizing_me
     assert!(!message.headers().contains("MIME-Version"));
     let mut output = Vec::new();
     message.write_to(&mut output).unwrap();
-    // Reading does not invent a separator, but the model's writer emits normal
-    // framing so the serialized result can be loaded by the strict parser.
-    assert_eq!(output, [wire.as_slice(), b"\r\n\r\n"].concat());
+    // Retain the missing terminator and separator from the loaded message.
+    assert_eq!(output, wire);
     MimeMessage::load(&mut output.as_slice()).unwrap();
 }
 

@@ -221,11 +221,38 @@ impl HeaderList {
         terminate_records: bool,
     ) -> io::Result<()> {
         match format {
+            NewLineFormat::Dos => Self::write_filtered(
+                headers,
+                output,
+                Unix2DosFilter::new(),
+                terminate_records,
+                false,
+            ),
+            NewLineFormat::Unix => Self::write_filtered(
+                headers,
+                output,
+                Dos2UnixFilter::new(),
+                terminate_records,
+                false,
+            ),
+            NewLineFormat::Mixed => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "header new-line format must be Dos or Unix",
+            )),
+        }
+    }
+
+    pub(crate) fn write_loaded_headers<'a, W: Write + ?Sized>(
+        headers: impl IntoIterator<Item = &'a Header>,
+        output: &mut W,
+        format: NewLineFormat,
+    ) -> io::Result<()> {
+        match format {
             NewLineFormat::Dos => {
-                Self::write_filtered(headers, output, Unix2DosFilter::new(), terminate_records)
+                Self::write_filtered(headers, output, Unix2DosFilter::new(), false, true)
             }
             NewLineFormat::Unix => {
-                Self::write_filtered(headers, output, Dos2UnixFilter::new(), terminate_records)
+                Self::write_filtered(headers, output, Dos2UnixFilter::new(), false, true)
             }
             NewLineFormat::Mixed => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -239,9 +266,11 @@ impl HeaderList {
         output: &mut W,
         filter: F,
         terminate_records: bool,
+        terminate_authored: bool,
     ) -> io::Result<()> {
         let mut filtered = FilteredWriter::new(output, filter);
-        for header in headers {
+        let mut headers = headers.into_iter().peekable();
+        while let Some(header) = headers.next() {
             let raw = header.raw();
             let mut prefix = 0;
             if header.is_invalid() {
@@ -261,9 +290,12 @@ impl HeaderList {
                 filtered = FilteredWriter::new(output, filter);
             }
             filtered.write_all(&raw[prefix..])?;
-            if terminate_records && !raw.ends_with(b"\n") {
-                // Entity output needs distinct records and a separate blank
-                // separator, even when a record came from truncated input.
+            if (terminate_records
+                || (terminate_authored && (header.offset().is_none() || headers.peek().is_some())))
+                && !raw.ends_with(b"\n")
+            {
+                // Retain an original EOF-truncated record only while it is
+                // still last; added records must start on their own line.
                 // Passing LF through the filter also completes a trailing CR.
                 filtered.write_all(b"\n")?;
             }

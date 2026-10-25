@@ -199,20 +199,8 @@ fn absent_and_present_empty_messages_round_trip_at_eof_and_report_boundaries() {
                 panic!()
             };
             assert!(part.message().is_some());
-            let expected = if present {
-                wire.clone()
-            } else {
-                [
-                    wire.as_slice(),
-                    if format == NewLineFormat::Dos {
-                        b"\r\n"
-                    } else {
-                        b"\n"
-                    },
-                ]
-                .concat()
-            };
-            assert_eq!(write(&mut parsed, format), expected);
+            // Recovery can create a message without inventing its wire separator.
+            assert_eq!(write(&mut parsed, format), wire);
 
             let mut report: Multipart = Multipart::new("report", "b").unwrap();
             report.children_mut().push(entity);

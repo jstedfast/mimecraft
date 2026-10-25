@@ -61,7 +61,8 @@ use crate::{
 #[derive(Debug)]
 pub struct MessagePart<R = Cursor<Vec<u8>>> {
     headers: HeaderList,
-    message: Option<Box<MimeMessage<R>>>,
+    pub(crate) message: Option<Box<MimeMessage<R>>>,
+    pub(crate) parsed: Option<crate::mime_entity::ParsedEntity>,
 }
 
 impl<R> MessagePart<R> {
@@ -97,6 +98,7 @@ impl<R> MessagePart<R> {
         Self {
             headers,
             message: message.map(Box::new),
+            parsed: None,
         }
     }
 
@@ -181,12 +183,22 @@ impl<R> MessagePart<R> {
     }
 
     /// Allows edits to the attached message without changing wrapper headers.
+    ///
+    /// When a message is present, taking this borrow discards parsed wrapper
+    /// framing even without edits; subsequent output uses a body separator.
     pub fn message_mut(&mut self) -> Option<&mut MimeMessage<R>> {
+        if self.message.is_some() {
+            self.parsed = None;
+        }
         self.message.as_deref_mut()
     }
 
     /// Replaces or removes the message, returning the old value without source I/O.
+    ///
+    /// Discards parsed wrapper framing; subsequent output uses an authored
+    /// header/body separator, without altering the replacement message's framing.
     pub fn set_message(&mut self, message: Option<MimeMessage<R>>) -> Option<MimeMessage<R>> {
+        self.parsed = None;
         std::mem::replace(&mut self.message, message.map(Box::new)).map(|message| *message)
     }
 

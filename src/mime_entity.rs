@@ -27,8 +27,8 @@ use crate::{
 /// children, change events, or automatically inferred container variants:
 /// editing a Content-Type header does not change an enum variant.
 ///
-/// Synchronous writing supports complete trees; [`Self::load`] reads complete
-/// entities into owned in-memory sources with explicit resource limits.
+/// Synchronous writing preserves parsed framing, including truncated trees.
+/// [`Self::load`] reads entities into owned sources with explicit resource limits.
 /// Attached messages can be constructed explicitly using [`MessagePart`].
 /// Loading recognizes transparent message wrappers by default; encoded wrappers
 /// and unrecognized message subtypes remain opaque leaves.
@@ -43,6 +43,29 @@ pub enum MimeEntity<R = Cursor<Vec<u8>>> {
     Multipart(Multipart<R>),
     /// A wrapper around an optional structured message.
     Message(MessagePart<R>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ParsedEntity {
+    pub body_separator: bool,
+    pub no_content: bool,
+}
+
+pub(crate) fn write_entity_headers<'a, W: std::io::Write + ?Sized>(
+    headers: impl IntoIterator<Item = &'a Header>,
+    parsed: Option<ParsedEntity>,
+    output: &mut W,
+    options: &crate::MimePartWriteOptions,
+) -> std::io::Result<()> {
+    if parsed.is_some_and(|parsed| !parsed.body_separator) {
+        HeaderList::write_loaded_headers(headers, output, options.new_line_format)?;
+    } else {
+        HeaderList::write_terminated_headers(headers, output, options.new_line_format)?;
+    }
+    if parsed.is_none_or(|parsed| parsed.body_separator) {
+        output.write_all(options.validate()?)?;
+    }
+    Ok(())
 }
 
 /// An attachment flag could not be changed without losing existing metadata.
@@ -75,6 +98,56 @@ impl Error for AttachmentEditError {
 }
 
 impl<R> MimeEntity<R> {
+    pub(crate) fn parsed(&self) -> Option<ParsedEntity> {
+        match self {
+            Self::Part(part) => part.parsed,
+            Self::Multipart(part) => part.original_framing().and(part.parsed),
+            Self::Message(part) => part.parsed,
+        }
+    }
+
+    pub(crate) fn set_parsed(&mut self, parsed: ParsedEntity) {
+        match self {
+            Self::Part(part) => part.parsed = Some(parsed),
+            Self::Multipart(part) => part.parsed = Some(parsed),
+            Self::Message(part) => part.parsed = Some(parsed),
+        }
+    }
+
+    pub(crate) fn ends_with_delimiter_newline(&self) -> bool {
+        let mut entity = self;
+        loop {
+            match entity {
+                Self::Part(part) => return part.parsed.is_some_and(|parsed| parsed.no_content),
+                Self::Message(part) => {
+                    if let Some(body) = part.message().and_then(|message| message.body()) {
+                        entity = body;
+                    } else {
+                        return part.parsed.is_some_and(|parsed| parsed.no_content);
+                    }
+                }
+                Self::Multipart(part) => {
+                    let Some(framing) = part.original_framing() else {
+                        return false;
+                    };
+                    if framing.end.is_some() {
+                        return false;
+                    }
+                    // A truncated multipart ends with its trailing marker, last
+                    // child, or preamble, which retains the parent's newline.
+                    if let Some(trailing) = framing.boundaries.get(part.children().len()) {
+                        return trailing.ends_with(b"\n");
+                    }
+                    if let Some(child) = part.children().last() {
+                        entity = child;
+                    } else {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     /// Returns this node's raw headers, without descending into children.
     pub fn headers(&self) -> &HeaderList {
         match self {

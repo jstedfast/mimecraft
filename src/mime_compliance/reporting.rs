@@ -80,12 +80,12 @@ impl<'a> Reporting<'a> {
     #[inline]
     pub(crate) fn emit<F>(&mut self, callback: &mut F, event: MimeEvent<'_>) -> io::Result<()>
     where
-        F: FnMut(MimeEvent<'_>) -> io::Result<()>,
+        F: crate::mime_reader::EventSink,
     {
         if let Some(active) = self.0.as_mut() {
             active.event(&event)?;
         }
-        callback(event)
+        callback.event(event)
     }
 
     #[inline]

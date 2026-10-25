@@ -204,6 +204,24 @@ pub struct MimeReader<R> {
     buffer: engine::ScanBuffer,
 }
 
+// Parser-only framing hooks leave the public content/event contract unchanged.
+// Closure readers do not retain delimiters or allocate a second input buffer.
+pub(crate) trait EventSink {
+    fn event(&mut self, event: MimeEvent<'_>) -> io::Result<()>;
+
+    fn body_separator(&mut self, _present: bool) {}
+
+    fn boundary(&mut self, _bytes: &[u8], _closing: bool, _end: MimePosition) {}
+
+    fn end_boundary(&mut self, _position: Option<MimePosition>) {}
+}
+
+impl<F: FnMut(MimeEvent<'_>) -> io::Result<()>> EventSink for F {
+    fn event(&mut self, event: MimeEvent<'_>) -> io::Result<()> {
+        self(event)
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ReadState {
     Ready,
@@ -696,13 +714,13 @@ impl<R: BufRead> MimeReader<R> {
         self.read_mbox_message_impl(&mut callback, Some(logger))
     }
 
-    fn read_mbox_message_impl<F>(
+    pub(crate) fn read_mbox_message_impl<F>(
         &mut self,
         callback: &mut F,
         logger: Option<&mut dyn MimeComplianceLogger>,
     ) -> io::Result<bool>
     where
-        F: FnMut(MimeEvent<'_>) -> io::Result<()>,
+        F: EventSink,
     {
         if self.state == ReadState::MboxEndOfStream {
             return Ok(false);
@@ -719,7 +737,7 @@ impl<R: BufRead> MimeReader<R> {
             self.state = ReadState::MboxEndOfStream;
             return Ok(false);
         };
-        callback(MimeEvent::MessageBegin {
+        callback.event(MimeEvent::MessageBegin {
             position: self.position,
         })?;
         let mut context = ReadContext {
@@ -736,7 +754,7 @@ impl<R: BufRead> MimeReader<R> {
             remaining,
             callback,
         )?;
-        callback(MimeEvent::MessageEnd {
+        callback.event(MimeEvent::MessageEnd {
             position: end.position,
         })?;
         self.state = if end.eof {
@@ -758,18 +776,18 @@ impl<R: BufRead> MimeReader<R> {
         Ok(())
     }
 
-    fn read<F>(
+    pub(crate) fn read<F>(
         &mut self,
         message: bool,
         callback: &mut F,
         logger: Option<&mut dyn MimeComplianceLogger>,
     ) -> io::Result<()>
     where
-        F: FnMut(MimeEvent<'_>) -> io::Result<()>,
+        F: EventSink,
     {
         self.begin_read(ReadState::Ready)?;
         if message {
-            callback(MimeEvent::MessageBegin {
+            callback.event(MimeEvent::MessageBegin {
                 position: self.position,
             })?;
         }
@@ -788,7 +806,7 @@ impl<R: BufRead> MimeReader<R> {
             callback,
         )?;
         if message {
-            callback(MimeEvent::MessageEnd {
+            callback.event(MimeEvent::MessageEnd {
                 position: self.position,
             })?;
         }

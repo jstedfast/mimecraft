@@ -174,7 +174,7 @@ fn separators_can_double_as_framing_for_empty_external_children() {
     assert_eq!(bytes(&children[0]), b"");
     assert_eq!(bytes(&children[1]), b"");
     let normalized = write(&mut entity, NewLineFormat::Dos);
-    assert_ne!(normalized, raw);
+    assert_eq!(normalized, raw);
     assert_eq!(load(&normalized).leaf_parts().count(), 2);
     assert!(
         load(&normalized)

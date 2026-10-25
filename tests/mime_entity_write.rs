@@ -517,6 +517,28 @@ fn deep_trees_stream_without_recursive_serialization() {
 }
 
 #[test]
+fn parsed_raw_marker_write_failures_preserve_prefix_and_allow_retry() {
+    let expected = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b \t\nContent-Type: text/plain\r\n\r\nbody\r\n--b-- \t";
+    let mut entity = MimeEntity::load(&mut expected.as_slice()).unwrap();
+    for limit in 0..expected.len() {
+        let mut sink = Sink {
+            fail_after: Some(limit),
+            chunk: 1,
+            interrupt: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            entity.write_to(&mut sink).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(sink.bytes, expected[..limit]);
+        let mut output = Vec::new();
+        entity.write_to(&mut output).unwrap();
+        assert_eq!(output, expected);
+    }
+}
+
+#[test]
 fn write_zero_short_interrupted_and_flush_failures_propagate_without_continuing() {
     let expected = wire(&mut nested(), &MimePartWriteOptions::default());
     for limit in 0..expected.len() {

@@ -7,6 +7,473 @@ use mimecraft::{
 };
 use std::io::{self, BufReader, Read};
 
+const DELIMITER_NEW_LINE_HEADERS: &str = "From: mimekit@example.com\nTo: mimekit@example.com\nSubject: delimiter new-line test\nMIME-Version: 1.0\n";
+
+const DELIMITER_NEW_LINE_MESSAGES: &[&str] = &[
+    // A nested multipart that is truncated by the outer boundary.
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n\n--inner\nContent-Type: text/plain\n\ninner\n--outer\nContent-Type: text/plain\n\nlast\n--outer--\n",
+    // A nested multipart that is truncated by the outer boundary and whose last child has no body.
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n\n--inner\nContent-Type: text/plain\n--outer\nContent-Type: text/plain\n\nlast\n--outer--\n",
+    // A nested multipart that is truncated by the outer boundary right after a boundary marker.
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n\n--inner\nContent-Type: text/plain\n\ninner\n--inner\n--outer\nContent-Type: text/plain\n\nlast\n--outer--\n",
+    // A nested multipart with only a preamble that is truncated by the outer boundary.
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n\npreamble\n--outer\nContent-Type: text/plain\n\nlast\n--outer--\n",
+    // A nested multipart with neither a preamble nor any children that is truncated by the outer boundary.
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n--outer\nContent-Type: text/plain\n\nlast\n--outer--\n",
+    // A nested message/rfc822 whose multipart body is truncated by the outer boundary.
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: message/rfc822\n\nSubject: embedded\nContent-Type: multipart/alternative; boundary=\"inner\"\n\n--inner\nContent-Type: text/plain\n\ninner\n--outer--\n",
+    // Children without a body (with and without a blank line after the headers).
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n--b\nContent-Type: text/plain\n\n--b\nContent-Type: message/rfc822\n\n--b--\n",
+    // A double boundary.
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\n--b\nContent-Type: text/plain\n\nbody\n--b--\n",
+    // A multipart truncated by the end of the stream.
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody",
+    // A multipart truncated by the end of the stream right after a boundary marker.
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b",
+    // A multipart truncated by the end of the stream whose last child has no body.
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b\nContent-Type: text/plain\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b\nContent-Type: text/plain\n\n",
+    // A multipart truncated by the end of the stream with only a preamble.
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\npreamble\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\npreamble",
+    // A close delimiter at EOF, with and without an epilogue or a trailing newline.
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b--",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b--\n\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/plain\n\nbody\n--b--\nepilogue",
+    "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n\n--inner\nContent-Type: text/plain\n\ninner\n--inner--\n--outer--",
+];
+
+fn assert_round_trip(name: &str, expected: &[u8], actual: &[u8]) {
+    let offset = expected
+        .iter()
+        .zip(actual)
+        .position(|(a, b)| a != b)
+        .unwrap_or(expected.len().min(actual.len()));
+    if offset == expected.len() && offset == actual.len() {
+        return;
+    }
+    let start = offset.saturating_sub(64);
+    panic!(
+        "{name}: serialization differs at offset {offset} (expected length {}, actual length {})\nexpected: {:?}\nactual: {:?}",
+        expected.len(),
+        actual.len(),
+        String::from_utf8_lossy(&expected[start..expected.len().min(start + 128)]),
+        String::from_utf8_lossy(&actual[start..actual.len().min(start + 128)]),
+    );
+}
+
+#[test]
+fn delimiter_new_line_round_trip() {
+    for (index, body) in DELIMITER_NEW_LINE_MESSAGES.iter().enumerate() {
+        for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+            let text = format!("{DELIMITER_NEW_LINE_HEADERS}{body}").replace('\n', newline);
+            let ensured = if text.ends_with('\n') {
+                text.clone()
+            } else {
+                format!("{text}{newline}")
+            };
+            for capacity in [1, 7, 4096] {
+                let mut parser =
+                    MimeParser::new(BufReader::with_capacity(capacity, text.as_bytes()));
+                let mut message = parser.parse_message().unwrap();
+                assert!(parser.is_end_of_stream());
+                assert_eq!(parser.position().offset, text.len() as u64);
+                // Make sure that EnsureNewLine did not leave any state behind.
+                for ensure_new_line in [false, true, false] {
+                    let mut output = Vec::new();
+                    message
+                        .write_to_with_options(
+                            &mut output,
+                            &MimePartWriteOptions {
+                                new_line_format: format,
+                                ensure_new_line,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    let name = format!(
+                        "delimiter case {index}, {format:?}, capacity {capacity}, ensure {ensure_new_line}"
+                    );
+                    assert_round_trip(
+                        &name,
+                        if ensure_new_line {
+                            ensured.as_bytes()
+                        } else {
+                            text.as_bytes()
+                        },
+                        &output,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn round_trip_test_data_messages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data");
+    let mut failures = Vec::new();
+    for (directory, extensions, count) in [
+        ("messages", &["eml", "txt"][..], 33),
+        ("compliance", &["eml"][..], 23),
+        ("partial", &["eml"][..], 7),
+        ("openpgp", &["eml"][..], 1),
+        ("dkim", &["msg"][..], 4),
+        ("smime", &["txt"][..], 1),
+    ] {
+        let mut files: Vec<_> = std::fs::read_dir(root.join(directory))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| extensions.contains(&ext))
+                    && (directory != "smime"
+                        || path
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .ends_with("-signed.txt"))
+            })
+            .collect();
+        files.sort();
+        assert_eq!(
+            files.len(),
+            count,
+            "complete upstream {directory} round-trip corpus"
+        );
+        for path in files {
+            let data = std::fs::read(&path).unwrap();
+            let format = data
+                .iter()
+                .take(1024)
+                .position(|&byte| byte == b'\n')
+                .map_or(NewLineFormat::Dos, |index| {
+                    if index > 0 && data[index - 1] == b'\r' {
+                        NewLineFormat::Dos
+                    } else {
+                        NewLineFormat::Unix
+                    }
+                });
+            // The parser skips a leading UTF-8 BOM; it is not reserialized.
+            let expected = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&data);
+            // Files starting with an mbox From-line must use mbox parsing to
+            // retain their envelope marker. Rust exposes that marker via reader
+            // events rather than storing it on the message model.
+            let mbox = expected.starts_with(b"From ");
+            for capacity in [4096, 7, 1] {
+                let mut parser = MimeParser::with_options(
+                    BufReader::with_capacity(capacity, expected),
+                    MimeEntityParseOptions {
+                        max_header_length: 16 * 1024 * 1024,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let parsed = if mbox {
+                    parser
+                        .parse_mbox_message()
+                        .map(|message| message.expect("one mbox message"))
+                } else {
+                    parser.parse_message()
+                };
+                let label = format!("{} / {capacity}", path.display());
+                let mut message = match parsed {
+                    Ok(message) => message,
+                    Err(error) => {
+                        failures.push(format!("{label}: parse: {error}"));
+                        break;
+                    }
+                };
+                assert!(
+                    parser.is_end_of_stream(),
+                    "{label}: expected exactly one message"
+                );
+                assert_eq!(parser.position().offset, expected.len() as u64, "{label}");
+                let mut output = Vec::new();
+                if mbox {
+                    let mut reader = MimeReader::new(expected);
+                    reader
+                        .read_mbox_message(|event| {
+                            if let MimeEvent::MboxMarker { bytes, .. } = event {
+                                output.extend_from_slice(bytes);
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+                if let Err(error) = message.write_to_with_options(
+                    &mut output,
+                    &MimePartWriteOptions {
+                        new_line_format: format,
+                        ..Default::default()
+                    },
+                ) {
+                    failures.push(format!("{label}: write: {error}"));
+                    break;
+                }
+                if output != expected {
+                    let offset = expected
+                        .iter()
+                        .zip(&output)
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(expected.len().min(output.len()));
+                    let start = offset.saturating_sub(32);
+                    failures.push(format!(
+                        "{label}: offset {offset}, lengths {}/{}\nexpected {:?}\nactual {:?}",
+                        expected.len(),
+                        output.len(),
+                        String::from_utf8_lossy(&expected[start..expected.len().min(offset + 64)]),
+                        String::from_utf8_lossy(&output[start..output.len().min(offset + 64)])
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn parsed_markers_retain_padding_and_original_newlines_with_or_without_logging() {
+    let input = b"Content-Type: multipart/mixed; boundary=b\n\n--b \t\nContent-Type: text/plain\n\nbody\n--b--\t \r\n";
+    for capacity in [1, 7, 4096] {
+        for logged in [false, true] {
+            let mut parser = MimeParser::new(BufReader::with_capacity(capacity, input.as_slice()));
+            let mut entity = if logged {
+                parser.parse_entity_with_logger(&mut |_| Ok(())).unwrap()
+            } else {
+                parser.parse_entity().unwrap()
+            };
+            for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+                let expected = format!(
+                    "Content-Type: multipart/mixed; boundary=b{newline}{newline}--b \t\nContent-Type: text/plain{newline}{newline}body{newline}--b--\t \r\n"
+                );
+                for ensure_new_line in [false, true, false] {
+                    let mut output = Vec::new();
+                    entity
+                        .write_to_with_options(
+                            &mut output,
+                            &MimePartWriteOptions {
+                                new_line_format: format,
+                                ensure_new_line,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    assert_round_trip("raw marker endings", expected.as_bytes(), &output);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn truncated_multipart_does_not_append_newlines_to_binary_content() {
+    for body in [b"binary\0".as_slice(), b"binary\r", b"binary\n"] {
+        let input = [
+            b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Transfer-Encoding: binary\r\n\r\n".as_slice(),
+            body,
+        ].concat();
+        let mut entity = MimeParser::new(input.as_slice()).parse_entity().unwrap();
+        for ensure_new_line in [false, true, false] {
+            let mut output = Vec::new();
+            entity
+                .write_to_with_options(
+                    &mut output,
+                    &MimePartWriteOptions {
+                        ensure_new_line,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_round_trip("truncated binary tail", &input, &output);
+        }
+    }
+}
+
+#[test]
+fn recovered_metadata_is_only_reused_while_unchanged() {
+    use mimecraft::Header;
+
+    for (input, replacement) in [
+        (
+            "Content-Transfer-Encoding: broken\r\n\r\nbody",
+            "Content-Transfer-Encoding: different",
+        ),
+        (
+            "Content-Type: multipart/mixed\r\n\r\npreamble",
+            "Content-Type: multipart/alternative",
+        ),
+        (
+            "Content-Type: multipart/mixed; boundary=b\r\nContent-Transfer-Encoding: broken\r\n\r\n--b--\r\n",
+            "Content-Transfer-Encoding: different",
+        ),
+    ] {
+        let mut entity = MimeParser::new(input.as_bytes()).parse_entity().unwrap();
+        let mut output = Vec::new();
+        entity.write_to(&mut output).unwrap();
+        assert_round_trip("recovered metadata", input.as_bytes(), &output);
+        entity
+            .headers_mut()
+            .replace_all(Header::parse(replacement.as_bytes()).unwrap())
+            .unwrap();
+        assert_eq!(
+            entity.write_to(&mut Vec::new()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+}
+
+#[test]
+fn editing_loaded_bodies_and_eof_headers_produces_distinct_records_and_separator() {
+    use mimecraft::{Header, MimeContent};
+    use std::io::Cursor;
+
+    let mut entity = MimeParser::new(b"Content-Type: text/plain".as_slice())
+        .parse_entity()
+        .unwrap();
+    let MimeEntity::Part(part) = &mut entity else {
+        panic!()
+    };
+    part.set_content(MimeContent::new(Cursor::new(b"new body".to_vec())));
+    let mut output = Vec::new();
+    entity.write_to(&mut output).unwrap();
+    assert_eq!(output, b"Content-Type: text/plain\r\n\r\nnew body");
+
+    let mut entity = MimeParser::new(b"Content-Type: text/plain".as_slice())
+        .parse_entity()
+        .unwrap();
+    entity
+        .headers_mut()
+        .add(Header::parse(b"X-Added: value").unwrap());
+    let mut output = Vec::new();
+    entity.write_to(&mut output).unwrap();
+    assert_eq!(output, b"Content-Type: text/plain\r\nX-Added: value\r\n");
+}
+
+#[test]
+fn editing_loaded_multipart_structure_discards_stale_markers() {
+    use mimecraft::TextPart;
+
+    for edit_boundary in [false, true] {
+        let input = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b \t\r\nContent-Type: text/plain\r\n\r\nbody";
+        let mut entity = MimeParser::new(input.as_slice()).parse_entity().unwrap();
+        let MimeEntity::Multipart(part) = &mut entity else {
+            panic!()
+        };
+        let boundary = if edit_boundary {
+            part.set_boundary("changed").unwrap();
+            "changed"
+        } else {
+            part.children_mut()
+                .push(TextPart::new("plain", "added").unwrap().into());
+            "b"
+        };
+        let mut output = Vec::new();
+        entity.write_to(&mut output).unwrap();
+        assert!(
+            !output
+                .windows(b"--b \t".len())
+                .any(|bytes| bytes == b"--b \t")
+        );
+        assert!(output.ends_with(format!("\r\n--{boundary}--\r\n").as_bytes()));
+        let MimeEntity::Multipart(reparsed) =
+            MimeParser::new(output.as_slice()).parse_entity().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(reparsed.children().len(), if edit_boundary { 1 } else { 2 });
+    }
+    let mut entity = MimeParser::new(b"Content-Type: multipart/mixed; boundary=b".as_slice())
+        .parse_entity()
+        .unwrap();
+    let MimeEntity::Multipart(part) = &mut entity else {
+        panic!()
+    };
+    part.set_preamble(b"new preamble".to_vec());
+    let mut output = Vec::new();
+    entity.write_to(&mut output).unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: multipart/mixed; boundary=b\r\n\r\nnew preamble\r\n--b--\r\n"
+    );
+    let MimeEntity::Multipart(part) = &mut entity else {
+        panic!()
+    };
+    part.set_epilogue(b"new epilogue".to_vec());
+    let mut output = Vec::new();
+    entity.write_to(&mut output).unwrap();
+    assert!(output.ends_with(b"new preamble\r\n--b--\r\nnew epilogue"));
+}
+
+#[test]
+fn editing_recovered_message_requires_a_wrapper_separator() {
+    let mut entity = MimeParser::new(b"Content-Type: message/rfc822".as_slice())
+        .parse_entity()
+        .unwrap();
+    let MimeEntity::Message(part) = &mut entity else {
+        panic!()
+    };
+    part.message_mut().unwrap().set_subject("added").unwrap();
+    let mut output = Vec::new();
+    entity.write_to(&mut output).unwrap();
+    assert_eq!(
+        output,
+        b"Content-Type: message/rfc822\r\n\r\nSubject: added\r\n"
+    );
+    let MimeEntity::Message(part) = MimeParser::new(output.as_slice()).parse_entity().unwrap()
+    else {
+        panic!()
+    };
+    assert!(part.message().unwrap().headers().contains("Subject"));
+}
+
+#[test]
+fn absent_parsed_content_does_not_gain_encoder_output() {
+    use mimecraft::ContentEncoding;
+
+    for encoding in [
+        ContentEncoding::Base64,
+        ContentEncoding::QuotedPrintable,
+        ContentEncoding::UuEncode,
+    ] {
+        let mut entity = MimeParser::new(b"Content-Type: text/plain\r\n\r\n".as_slice())
+            .parse_entity()
+            .unwrap();
+        let MimeEntity::Part(part) = &mut entity else {
+            panic!()
+        };
+        part.set_content_transfer_encoding(encoding);
+        for ensure_new_line in [false, true, false] {
+            let options = MimePartWriteOptions {
+                ensure_new_line,
+                ..Default::default()
+            };
+            let mut output = Vec::new();
+            entity.write_to_with_options(&mut output, &options).unwrap();
+            assert!(output.ends_with(b"\r\n\r\n"));
+            assert_eq!(
+                output.windows(4).position(|bytes| bytes == b"\r\n\r\n"),
+                Some(output.len() - 4)
+            );
+            let mut content = Vec::new();
+            entity
+                .write_content_to_with_options(&mut content, &options)
+                .unwrap();
+            assert!(content.is_empty());
+        }
+    }
+}
+
 #[test]
 fn header_parser() {
     let data = b"Header-1: value 1\r\nHeader-2: value 2\r\nHeader-3: value 3\r\n\r\n";

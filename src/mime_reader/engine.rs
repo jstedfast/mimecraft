@@ -12,7 +12,7 @@ use crate::{
     mime_part::transfer_encoding,
 };
 
-use super::scan;
+use super::{EventSink, scan};
 
 pub(crate) struct ReadContext<'a> {
     pub(crate) limits: MimeEntityParseOptions,
@@ -66,7 +66,7 @@ pub(crate) fn read_mbox_marker<R, F>(
 ) -> io::Result<Option<usize>>
 where
     R: BufRead + ?Sized,
-    F: FnMut(MimeEvent<'_>) -> io::Result<()>,
+    F: EventSink,
 {
     let origin = buffer.mbox_prefix.unwrap_or(*position);
     if buffer.mbox_prefix.is_none() {
@@ -143,7 +143,7 @@ where
         reader.consume(count);
         remaining -= count;
         if complete {
-            callback(MimeEvent::MboxMarker {
+            callback.event(MimeEvent::MboxMarker {
                 bytes: &buffer.line,
                 position: marker_position,
                 end: *position,
@@ -164,7 +164,7 @@ pub(crate) fn read_tree<R, F>(
 ) -> io::Result<TreeEnd>
 where
     R: BufRead + ?Sized,
-    F: FnMut(MimeEvent<'_>) -> io::Result<()>,
+    F: EventSink,
 {
     let header_limit = NonZeroUsize::new(options.max_header_length).expect("validated limit");
     let mut input = Lines {
@@ -272,6 +272,7 @@ where
     }
 
     *mbox_prefix = input.mbox_prefix;
+    callback.end_boundary(*mbox_prefix);
     let eof = mbox_prefix.is_none();
     let had_pending = !pending.is_empty();
     let framing = if !eof
@@ -325,7 +326,7 @@ where
         if let Some(Frame::Message { begun }) = stack.last_mut() {
             *begun = true;
         }
-        callback(MimeEvent::MessageBegin { position: end })?;
+        callback.event(MimeEvent::MessageBegin { position: end })?;
         complete_headers(
             &mut state,
             &mut stack,
@@ -404,7 +405,7 @@ fn find_boundary(stack: &[Frame], line: &[u8]) -> Option<(usize, bool)> {
     })
 }
 
-fn complete_headers<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn complete_headers<F: EventSink>(
     state: &mut State,
     stack: &mut Vec<Frame>,
     options: &mut ReadContext<'_>,
@@ -479,6 +480,7 @@ fn complete_headers<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
         ));
     }
     check_depth(stack.len(), options, *start)?;
+    callback.body_separator(parser.body_separator().is_some());
     *state = start_entity(
         HeaderList::from(std::mem::take(headers)),
         *start,
@@ -491,7 +493,7 @@ fn complete_headers<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     Ok(())
 }
 
-fn consume_line<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn consume_line<F: EventSink>(
     line: &[u8],
     position: MimePosition,
     state: &mut State,
@@ -518,7 +520,7 @@ fn consume_line<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
                 *start = position;
                 if let Some(Frame::Message { begun }) = stack.last_mut() {
                     *begun = true;
-                    callback(MimeEvent::MessageBegin { position })?;
+                    callback.event(MimeEvent::MessageBegin { position })?;
                 }
             }
             *started = true;
@@ -536,6 +538,7 @@ fn consume_line<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
                     message,
                     stack.is_empty(),
                 )?;
+                callback.body_separator(parser.body_separator().is_some());
                 *state = start_entity(
                     HeaderList::from(std::mem::take(headers)),
                     *start,
@@ -559,7 +562,7 @@ fn consume_line<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     Ok(())
 }
 
-fn emit_content<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn emit_content<F: EventSink>(
     state: &mut State,
     bytes: &[u8],
     mut position: MimePosition,
@@ -585,7 +588,7 @@ fn emit_content<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
         // Inspect bytes separately so the disabled path need not materialize
         // the entire event for a dynamically dispatched diagnostic sink.
         reporting.content(bytes, position)?;
-        callback(MimeEvent::Content {
+        callback.event(MimeEvent::Content {
             kind,
             bytes,
             position,
@@ -597,7 +600,7 @@ fn emit_content<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     Ok(())
 }
 
-fn start_entity<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn start_entity<F: EventSink>(
     headers: HeaderList,
     position: MimePosition,
     headers_end: MimePosition,
@@ -729,7 +732,7 @@ fn check_depth(
     }
 }
 
-fn at_boundary<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn at_boundary<F: EventSink>(
     mut state: State,
     stack: &mut Vec<Frame>,
     line: &[u8],
@@ -738,6 +741,7 @@ fn at_boundary<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     marker: (MimePosition, MimePosition),
     callback: &mut F,
 ) -> io::Result<State> {
+    callback.end_boundary(Some(marker.0));
     let header_limit = NonZeroUsize::new(options.max_header_length).expect("validated limit");
     complete_headers(
         &mut state,
@@ -780,6 +784,7 @@ fn at_boundary<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     let Some(Frame::Multipart { closed, .. }) = stack.last_mut() else {
         unreachable!("a matched boundary belongs to a multipart")
     };
+    callback.boundary(line, close, marker.1);
     if close {
         *closed = true;
         let marker_line = line.strip_suffix(b"\n").unwrap_or(line);
@@ -802,7 +807,7 @@ fn at_boundary<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     }
 }
 
-fn finish_entity<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn finish_entity<F: EventSink>(
     state: State,
     stack: &mut Vec<Frame>,
     incomplete: io::ErrorKind,
@@ -874,7 +879,7 @@ fn finish_entity<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
     }
 }
 
-fn wrap_messages<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+fn wrap_messages<F: EventSink>(
     stack: &mut Vec<Frame>,
     position: MimePosition,
     reporting: &mut crate::mime_compliance::Reporting<'_>,
@@ -882,7 +887,7 @@ fn wrap_messages<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
 ) -> io::Result<()> {
     while matches!(stack.last(), Some(Frame::Message { begun: true })) {
         stack.pop();
-        callback(MimeEvent::MessageEnd { position })?;
+        callback.event(MimeEvent::MessageEnd { position })?;
         reporting.emit(
             callback,
             MimeEvent::EntityEnd {
@@ -958,7 +963,7 @@ fn input_limit_error() -> io::Error {
 }
 
 impl<R: BufRead + ?Sized> Lines<'_, R> {
-    fn forward_content<F: FnMut(MimeEvent<'_>) -> io::Result<()>>(
+    fn forward_content<F: EventSink>(
         &mut self,
         state: &mut State,
         pending: &mut Vec<u8>,

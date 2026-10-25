@@ -21,17 +21,18 @@ use crate::{
 ///
 /// Preamble and epilogue are raw bytes, not decoded strings or delimiter lines.
 /// They are stored without newline conversion or folding. An empty vector
-/// represents absence; parsed delimiter spelling/truncation is not modeled.
+/// represents absence. Parsed delimiter spelling and truncation are retained
+/// separately while framing metadata and child structure remain unchanged.
 /// Children share one source type but may be nested containers, attached
 /// messages, or leaf parts.
 ///
 /// There is no source I/O during construction, metadata editing, or traversal.
 /// Raw edits and [`Self::from_parts`] can retain missing or invalid metadata.
 /// Typed getters observe it directly, without caches or silent repairs.
-/// Synchronous writing normalizes output newlines and checks container metadata
-/// and ancestor boundary overlap without changing stored values.
-/// [`MimeEntity::load`] builds complete trees from buffered input; truncated
-/// containers and original delimiter spelling are not represented.
+/// Synchronous writing normalizes text newlines but preserves parsed markers
+/// byte-for-byte. Authored/edited metadata and ancestor boundary overlap are
+/// checked without changing stored values. [`MimeEntity::load`] also retains
+/// truncated containers and missing header/body separators.
 ///
 /// ```
 /// use mimecraft::{MimeEntity, Multipart, TextPart};
@@ -49,9 +50,33 @@ pub struct Multipart<R = Cursor<Vec<u8>>> {
     children: Vec<MimeEntity<R>>,
     preamble: Vec<u8>,
     epilogue: Vec<u8>,
+    pub(crate) parsed: Option<crate::mime_entity::ParsedEntity>,
+    pub(crate) framing: Option<ParsedMultipart>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ParsedMultipart {
+    pub content_type: Vec<u8>,
+    pub transfer_encoding: Option<Vec<u8>>,
+    pub boundary: Option<String>,
+    pub boundaries: Vec<Vec<u8>>,
+    pub end: Option<Vec<u8>>,
 }
 
 impl<R> Multipart<R> {
+    pub(crate) fn original_framing(&self) -> Option<&ParsedMultipart> {
+        self.framing.as_ref().filter(|framing| {
+            self.headers
+                .get("Content-Type")
+                .is_some_and(|header| header.raw_value() == framing.content_type)
+                && self
+                    .headers
+                    .get("Content-Transfer-Encoding")
+                    .map(|header| header.raw_value())
+                    == framing.transfer_encoding.as_deref()
+        })
+    }
+
     /// Creates an empty `multipart/subtype` with a checked explicit boundary.
     ///
     /// Uses default header formatting. Does not choose a transfer encoding,
@@ -84,6 +109,8 @@ impl<R> Multipart<R> {
             children,
             preamble,
             epilogue,
+            parsed: None,
+            framing: None,
         }
     }
 
@@ -174,12 +201,18 @@ impl<R> Multipart<R> {
     /// Insertion, removal, and reordering do not edit any headers or streams.
     /// Removed children retain ownership of their sources; clearing drops them.
     /// No nesting limit or subtype-specific child constraints are imposed.
+    /// Taking this mutable borrow discards this container's parsed framing,
+    /// even without edits; subsequent writing generates complete delimiters.
     pub fn children_mut(&mut self) -> &mut Vec<MimeEntity<R>> {
+        self.parsed = None;
+        self.framing = None;
         &mut self.children
     }
 
-    pub(crate) fn children_and_epilogue(&mut self) -> (&mut [MimeEntity<R>], &[u8]) {
-        (&mut self.children, &self.epilogue)
+    pub(crate) fn children_and_epilogue(
+        &mut self,
+    ) -> (&mut [MimeEntity<R>], &[u8], Option<&ParsedMultipart>) {
+        (&mut self.children, &self.epilogue, self.framing.as_ref())
     }
 
     /// Returns raw bytes preceding the first delimiter, excluding that delimiter.
@@ -188,7 +221,12 @@ impl<R> Multipart<R> {
     }
 
     /// Replaces the raw preamble without conversion and returns the old bytes.
+    ///
+    /// Discards parsed framing so replacement text cannot consume a delimiter
+    /// newline previously shared with an enclosing multipart.
     pub fn set_preamble(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+        self.parsed = None;
+        self.framing = None;
         std::mem::replace(&mut self.preamble, bytes)
     }
 
@@ -198,7 +236,11 @@ impl<R> Multipart<R> {
     }
 
     /// Replaces the raw epilogue without conversion and returns the old bytes.
+    ///
+    /// Discards parsed framing so a closing delimiter precedes the new epilogue.
     pub fn set_epilogue(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+        self.parsed = None;
+        self.framing = None;
         std::mem::replace(&mut self.epilogue, bytes)
     }
 

@@ -56,7 +56,9 @@ use crate::{
 #[derive(Debug)]
 pub struct MimePart<R> {
     headers: HeaderList,
-    content: MimeContent<R>,
+    pub(crate) content: MimeContent<R>,
+    pub(crate) parsed: Option<crate::mime_entity::ParsedEntity>,
+    pub(crate) recovered_encoding: Option<Vec<u8>>,
 }
 
 /// A Content-Duration value is not a nonnegative integer fitting in `i32`.
@@ -213,7 +215,12 @@ impl<R: Read + Seek> MimePart<R> {
     /// encoding from its headers. The caller supplies the correct
     /// [`MimeContent::encoding`]. This is not an entity parser.
     pub fn from_parts(headers: HeaderList, content: MimeContent<R>) -> Self {
-        Self { headers, content }
+        Self {
+            headers,
+            content,
+            parsed: None,
+            recovered_encoding: None,
+        }
     }
 }
 
@@ -551,14 +558,25 @@ impl<R: Read + Seek> MimePart<R> {
     /// Allows body access, decoding, or source edits without changing headers.
     ///
     /// Any byte edits must continue to match the stored content's encoding.
+    /// Taking this borrow conservatively discards parsed no-content/separator
+    /// absence, even when only decoding. Subsequent output uses a body separator.
     pub fn content_mut(&mut self) -> &mut MimeContent<R> {
+        if let Some(parsed) = &mut self.parsed {
+            parsed.no_content = false;
+            parsed.body_separator = true;
+        }
         &mut self.content
     }
 
     /// Replaces the body without I/O or header edits and returns the old content.
     ///
     /// Both streams retain their current positions and encoding metadata.
+    /// Subsequent output uses a body separator rather than parsed absence.
     pub fn set_content(&mut self, content: MimeContent<R>) -> MimeContent<R> {
+        if let Some(parsed) = &mut self.parsed {
+            parsed.no_content = false;
+            parsed.body_separator = true;
+        }
         std::mem::replace(&mut self.content, content)
     }
 

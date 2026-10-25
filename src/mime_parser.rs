@@ -117,8 +117,7 @@ impl<R: BufRead> MimeParser<R> {
         logger: &mut dyn crate::MimeComplianceLogger,
     ) -> io::Result<MimeEntity> {
         let mut builder = Builder::default();
-        self.reader
-            .read_entity_with_logger(logger, |event| builder.accept(event))?;
+        self.reader.read(false, &mut builder, Some(logger))?;
         Ok(builder
             .entity
             .expect("successful entity events produce a root"))
@@ -134,8 +133,7 @@ impl<R: BufRead> MimeParser<R> {
         logger: &mut dyn crate::MimeComplianceLogger,
     ) -> io::Result<MimeMessage> {
         let mut builder = Builder::default();
-        self.reader
-            .read_message_with_logger(logger, |event| builder.accept(event))?;
+        self.reader.read(true, &mut builder, Some(logger))?;
         Ok(builder
             .message
             .expect("successful message events produce a root"))
@@ -152,7 +150,7 @@ impl<R: BufRead> MimeParser<R> {
         let mut builder = Builder::default();
         if self
             .reader
-            .read_mbox_message_with_logger(logger, |event| builder.accept(event))?
+            .read_mbox_message_impl(&mut builder, Some(logger))?
         {
             Ok(Some(
                 builder
@@ -305,7 +303,7 @@ impl<R: BufRead> MimeParser<R> {
     /// attempt returns `InvalidInput`, even if the first attempt failed.
     pub fn parse_entity(&mut self) -> io::Result<MimeEntity> {
         let mut builder = Builder::default();
-        self.reader.read_entity(|event| builder.accept(event))?;
+        self.reader.read(false, &mut builder, None)?;
         Ok(builder
             .entity
             .expect("successful entity events produce a root"))
@@ -316,7 +314,7 @@ impl<R: BufRead> MimeParser<R> {
     /// Follows [`Self::parse_entity`]'s ownership, limits, and error behavior.
     pub fn parse_message(&mut self) -> io::Result<MimeMessage> {
         let mut builder = Builder::default();
-        self.reader.read_message(|event| builder.accept(event))?;
+        self.reader.read(true, &mut builder, None)?;
         Ok(builder
             .message
             .expect("successful message events produce a root"))
@@ -342,10 +340,7 @@ impl<R: BufRead> MimeParser<R> {
     /// ```
     pub fn parse_mbox_message(&mut self) -> io::Result<Option<MimeMessage>> {
         let mut builder = Builder::default();
-        if self
-            .reader
-            .read_mbox_message(|event| builder.accept(event))?
-        {
+        if self.reader.read_mbox_message_impl(&mut builder, None)? {
             Ok(Some(
                 builder
                     .message
@@ -372,12 +367,16 @@ struct Builder {
     stack: Vec<Frame>,
     entity: Option<MimeEntity>,
     message: Option<MimeMessage>,
+    body_separator: bool,
+    end_boundary: Option<MimePosition>,
 }
 
 enum Frame {
     Entity {
         headers: HeaderList,
         content: Content,
+        parsed: crate::mime_entity::ParsedEntity,
+        headers_end: MimePosition,
     },
     Message(Option<MimeEntity>),
 }
@@ -391,12 +390,43 @@ enum Content {
         children: Vec<MimeEntity>,
         preamble: Vec<u8>,
         epilogue: Vec<u8>,
+        framing: crate::multipart::ParsedMultipart,
+        boundary_end: u64,
     },
     MessagePart(Option<MimeMessage>),
 }
 
-impl Builder {
-    fn accept(&mut self, event: MimeEvent<'_>) -> io::Result<()> {
+impl crate::mime_reader::EventSink for Builder {
+    fn end_boundary(&mut self, position: Option<MimePosition>) {
+        self.end_boundary = position;
+    }
+
+    fn body_separator(&mut self, present: bool) {
+        self.body_separator = present;
+    }
+
+    fn boundary(&mut self, bytes: &[u8], closing: bool, end: MimePosition) {
+        let Some(Frame::Entity {
+            content:
+                Content::Multipart {
+                    framing,
+                    boundary_end,
+                    ..
+                },
+            ..
+        }) = self.stack.last_mut()
+        else {
+            unreachable!("boundary belongs to the current multipart")
+        };
+        if closing {
+            framing.end = Some(bytes.to_vec());
+            *boundary_end = end.offset;
+        } else {
+            framing.boundaries.push(bytes.to_vec());
+        }
+    }
+
+    fn event(&mut self, event: MimeEvent<'_>) -> io::Result<()> {
         match event {
             MimeEvent::MboxMarker { .. } => {}
             MimeEvent::Headers { .. } => {
@@ -407,10 +437,16 @@ impl Builder {
                 headers,
                 kind,
                 encoding,
+                headers_end,
                 ..
             } => {
                 self.stack.push(Frame::Entity {
                     headers,
+                    headers_end,
+                    parsed: crate::mime_entity::ParsedEntity {
+                        body_separator: self.body_separator,
+                        no_content: false,
+                    },
                     content: match kind {
                         MimeEntityKind::Part => Content::Part {
                             encoding,
@@ -420,6 +456,8 @@ impl Builder {
                             children: Vec::new(),
                             preamble: Vec::new(),
                             epilogue: Vec::new(),
+                            framing: Default::default(),
+                            boundary_end: 0,
                         },
                         MimeEntityKind::MessagePart => Content::MessagePart(None),
                     },
@@ -447,16 +485,42 @@ impl Builder {
             MimeEvent::EntityEnd {
                 kind,
                 new_line_format,
+                position,
                 ..
             } => {
-                let Some(Frame::Entity { headers, content }) = self.stack.pop() else {
+                let Some(Frame::Entity {
+                    headers,
+                    content,
+                    mut parsed,
+                    headers_end,
+                }) = self.stack.pop()
+                else {
                     unreachable!("entity end matches an entity frame");
                 };
-                let entity = match (kind, content) {
+                let mut entity: MimeEntity = match (kind, content) {
                     (MimeEntityKind::Part, Content::Part { bytes, encoding }) => {
+                        // With no body, the header block's final newline also
+                        // precedes the next boundary. Rust retains an empty
+                        // stream rather than MimeKit's null Content.
+                        parsed.no_content = bytes.is_empty()
+                            && new_line_format.is_none()
+                            && self
+                                .end_boundary
+                                .is_none_or(|boundary| boundary.offset <= headers_end.offset);
                         let mut body = MimeContent::with_encoding(Cursor::new(bytes), encoding);
                         body.set_new_line_format(new_line_format);
-                        MimePart::from_parts(headers, body).into()
+                        let recovered_encoding = crate::mime_part::transfer_encoding(&headers)
+                            .is_err()
+                            .then(|| {
+                                headers
+                                    .get("Content-Transfer-Encoding")
+                                    .expect("invalid encoding header")
+                                    .raw_value()
+                                    .to_vec()
+                            });
+                        let mut part = MimePart::from_parts(headers, body);
+                        part.recovered_encoding = recovered_encoding;
+                        part.into()
                     }
                     (
                         MimeEntityKind::Multipart,
@@ -464,13 +528,52 @@ impl Builder {
                             children,
                             preamble,
                             epilogue,
+                            mut framing,
+                            boundary_end,
                         },
-                    ) => Multipart::from_parts(headers, children, preamble, epilogue).into(),
+                    ) => {
+                        if let Some(end) = &mut framing.end {
+                            // A closing marker's newline may also belong to the
+                            // next enclosing delimiter, which writes it itself.
+                            if boundary_end > position.offset {
+                                let trim = (boundary_end - position.offset) as usize;
+                                assert!(
+                                    (trim == 1 && end.ends_with(b"\n"))
+                                        || (trim == 2 && end.ends_with(b"\r\n")),
+                                    "only a delimiter newline can overlap an enclosing marker"
+                                );
+                                end.truncate(end.len() - trim);
+                            }
+                        }
+                        framing.boundary = headers.get("Content-Type").and_then(|header| {
+                            crate::ContentType::parse_for_reader(header.raw_value())
+                                .0
+                                .boundary()
+                                .map(str::to_owned)
+                        });
+                        framing.content_type = headers
+                            .get("Content-Type")
+                            .expect("parsed multipart type")
+                            .raw_value()
+                            .to_vec();
+                        framing.transfer_encoding = headers
+                            .get("Content-Transfer-Encoding")
+                            .map(|header| header.raw_value().to_vec());
+                        let mut multipart =
+                            Multipart::from_parts(headers, children, preamble, epilogue);
+                        multipart.framing = Some(framing);
+                        multipart.into()
+                    }
                     (MimeEntityKind::MessagePart, Content::MessagePart(message)) => {
+                        parsed.no_content = message.is_none()
+                            && self
+                                .end_boundary
+                                .is_none_or(|boundary| boundary.offset <= headers_end.offset);
                         MessagePart::from_parts(headers, message).into()
                     }
                     _ => unreachable!("entity end matches its begin kind"),
                 };
+                entity.set_parsed(parsed);
                 // Like MimeKit's construction stack, attach a completed entity
                 // to its immediate multipart or message without recursive calls.
                 match self.stack.last_mut() {

@@ -238,20 +238,9 @@ fn missing_message_and_present_empty_message_round_trip_at_eof_and_boundaries() 
             // Without an enclosing boundary, EOF constructs an empty embedded
             // message even if the original wrapper had no payload.
             assert!(attached(&parsed).message().is_some());
-            let expected = if present {
-                raw.clone()
-            } else {
-                [
-                    raw.as_slice(),
-                    if format == NewLineFormat::Dos {
-                        b"\r\n"
-                    } else {
-                        b"\n"
-                    },
-                ]
-                .concat()
-            };
-            assert_eq!(write(&mut parsed, format), expected);
+            // The recovered empty message has no separator on the wire.
+            // Preserve that absence rather than adding a newline on output.
+            assert_eq!(write(&mut parsed, format), raw);
             let mut multipart: Multipart = Multipart::new("mixed", "outer").unwrap();
             multipart.children_mut().extend([root, binary(b"sibling")]);
             let mut root: MimeEntity = multipart.into();
@@ -291,20 +280,7 @@ fn empty_message_chains_keep_separator_ownership_at_each_nesting_level() {
                     entity = wrap(entity);
                 }
                 let raw = write(&mut entity, format);
-                let expected = if kind == 0 {
-                    [
-                        raw.as_slice(),
-                        if format == NewLineFormat::Dos {
-                            b"\r\n"
-                        } else {
-                            b"\n"
-                        },
-                    ]
-                    .concat()
-                } else {
-                    raw.clone()
-                };
-                assert_eq!(write(&mut load(&raw), format), expected);
+                assert_eq!(write(&mut load(&raw), format), raw);
                 let mut parent: Multipart = Multipart::new("mixed", "outer").unwrap();
                 parent.children_mut().extend([entity, binary(b"sibling")]);
                 let raw = write(&mut parent.into(), format);

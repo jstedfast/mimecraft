@@ -87,7 +87,7 @@ impl<R: Read + Seek> MimeEntity<R> {
 }
 
 impl<R: Read + Seek> Multipart<R> {
-    /// Serializes a complete multipart tree using CRLF and default encoder widths.
+    /// Serializes a multipart tree using CRLF and default encoder widths.
     ///
     /// Uses an explicit traversal stack and existing single-part serializers.
     /// See [`Self::write_to_with_options`] for framing, validation, and errors.
@@ -101,24 +101,25 @@ impl<R: Read + Seek> Multipart<R> {
 
     /// Writes headers, preamble, child entities, closing delimiter, and epilogue.
     ///
-    /// Headers use the same normalization and missing-terminator repair as leaf
-    /// serialization. Preamble/epilogue newlines are converted without charset
-    /// decoding or folding. A nonempty preamble is newline-terminated before
-    /// the first delimiter, including for an empty container. Closing delimiter
-    /// lines always terminate; stored epilogue bytes exclude that line ending.
-    /// Empty containers emit only a closing delimiter after any preamble.
+    /// Headers use the leaf writer's normalization and parsed-separator rules.
+    /// Preamble/epilogue newlines are converted without charset decoding or
+    /// folding. Nonempty preambles are terminated before emitted delimiters.
+    /// Authored containers emit a terminated closing delimiter even when empty.
+    /// Unchanged parsed containers retain raw marker spelling, padding, original
+    /// marker line endings, and missing closing markers or final terminators.
     ///
-    /// Every child is followed by a separate delimiter-owned newline. It is
-    /// never borrowed from the child's body, even when that body ends in CRLF.
-    /// This preserves binary suffixes and empty bodies. `ensure_new_line`
-    /// affects the root epilogue only; children, including attached messages,
-    /// are written without forcing extra body newlines. Encoder-generated
-    /// endings are still retained.
+    /// A separate delimiter-owned newline follows each child unless its parsed
+    /// empty-body or truncated framing already owns that newline. Binary body
+    /// suffixes are never consumed. `ensure_new_line` applies to the epilogue,
+    /// or the final child/trailing marker of a truncated container. Binary tails
+    /// remain unchanged. Encoder-generated endings are retained.
     /// With LF output, a child ending in bare CR receives a CRLF delimiter
     /// prefix instead, avoiding an ambiguous CR+LF pair that would lose the
-    /// body's CR when parsed. The marker line still uses the selected newline.
+    /// body's CR when parsed. Generated marker lines use the selected newline.
     ///
-    /// Each container requires a valid multipart Content-Type and boundary.
+    /// Authored or edited containers require a valid multipart type and boundary.
+    /// Unchanged parsed metadata retains the reader's recovery interpretation,
+    /// including missing boundaries whose content remains entirely preamble.
     /// Equal or prefix-overlapping ancestor boundaries are rejected; siblings
     /// may reuse a boundary. Ancestors remain active across message wrappers.
     /// Multipart transfer encoding must be absent, 7bit,
@@ -418,11 +419,14 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                 // Content-only omits the wrapper, not the embedded message's
                 // header section. The message is still written in full.
                 if !content_only {
-                    part.headers()
-                        .write_terminated(output, options.new_line_format)?;
-                    output.write_all(newline)?;
+                    crate::mime_entity::write_entity_headers(
+                        part.headers(),
+                        part.parsed,
+                        output,
+                        options,
+                    )?;
                 }
-                if let Some(message) = part.message_mut() {
+                if let Some(message) = part.message.as_deref_mut() {
                     // The embedded message inherits its wrapper's final-newline
                     // policy, not the top-level formatting option.
                     stack.push(Task::Message(message, ensure_new_line));
@@ -446,16 +450,47 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                 }
             }
             Task::Multipart(multipart, ensure_new_line, content_only) => {
-                let boundary = checked_boundary(multipart)?;
-                let digest = multipart
-                    .content_type()
-                    .map_err(|error| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            MultipartError::ContentType(error),
-                        )
-                    })?
-                    .is_some_and(|value| value.is_mime_type("multipart", "digest"));
+                let original_framing = multipart.original_framing();
+                if original_framing.is_some_and(|framing| framing.boundary.is_none()) {
+                    // Without a boundary parameter, the reader retains all
+                    // bytes as preamble. Do not invent a marker on output.
+                    if !content_only {
+                        crate::mime_entity::write_entity_headers(
+                            multipart.headers(),
+                            multipart.parsed,
+                            output,
+                            options,
+                        )?;
+                    }
+                    write_text(
+                        output,
+                        multipart.preamble(),
+                        options,
+                        ensure_new_line,
+                        masking,
+                    )?;
+                    continue;
+                }
+                let boundary = if let Some(framing) = original_framing {
+                    framing.boundary.clone().expect("handled missing boundary")
+                } else {
+                    checked_boundary(multipart)?
+                };
+                let digest = if let Some(framing) = original_framing {
+                    crate::ContentType::parse_for_reader(&framing.content_type)
+                        .0
+                        .is_mime_type("multipart", "digest")
+                } else {
+                    multipart
+                        .content_type()
+                        .map_err(|error| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                MultipartError::ContentType(error),
+                            )
+                        })?
+                        .is_some_and(|value| value.is_mime_type("multipart", "digest"))
+                };
                 for ancestor in &stack {
                     if let Task::Children(frame) = ancestor
                         && (boundary.starts_with(&frame.boundary)
@@ -468,13 +503,25 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     }
                 }
                 if !content_only {
-                    multipart
-                        .headers()
-                        .write_terminated(output, options.new_line_format)?;
-                    output.write_all(newline)?;
+                    crate::mime_entity::write_entity_headers(
+                        multipart.headers(),
+                        original_framing.and(multipart.parsed),
+                        output,
+                        options,
+                    )?;
                 }
-                write_text(output, multipart.preamble(), options, true, masking)?;
-                let (children, epilogue) = multipart.children_and_epilogue();
+                let framing = original_framing;
+                let preserve_framing = framing.is_some();
+                let truncated = framing.is_some_and(|framing| framing.end.is_none());
+                write_text(
+                    output,
+                    multipart.preamble(),
+                    options,
+                    !truncated || !multipart.children().is_empty() || ensure_new_line,
+                    masking,
+                )?;
+                let (children, epilogue, framing) = multipart.children_and_epilogue();
+                let framing = framing.filter(|_| preserve_framing);
                 stack.push(Task::Children(Frame {
                     children: children.iter_mut(),
                     boundary,
@@ -482,13 +529,21 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     after_child: false,
                     ensure_new_line,
                     digest,
+                    framing,
+                    index: 0,
                 }));
             }
             Task::Children(mut frame) => {
                 // The newline preceding a boundary belongs to that
                 // delimiter, not to the previous child's content. Never
                 // consume an existing body newline, especially for binary.
-                if frame.after_child {
+                let raw_boundary = frame
+                    .framing
+                    .and_then(|framing| framing.boundaries.get(frame.index));
+                let truncated = frame.framing.is_some_and(|framing| framing.end.is_none());
+                let has_marker =
+                    !frame.children.as_slice().is_empty() || raw_boundary.is_some() || !truncated;
+                if frame.after_child && has_marker {
                     let delimiter_newline = if newline == b"\n" && output.last == Some(b'\r') {
                         b"\r\n".as_slice()
                     } else {
@@ -496,19 +551,48 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                     };
                     output.write_all(delimiter_newline)?;
                 }
-                output.write_all(b"--")?;
-                output.write_all(frame.boundary.as_bytes())?;
                 if let Some(child) = frame.children.next() {
-                    output.write_all(newline)?;
-                    frame.after_child = true;
+                    if let Some(raw) = raw_boundary {
+                        write_raw_boundary(output, raw, options, masking.is_some())?;
+                    } else {
+                        output.write_all(b"--")?;
+                        output.write_all(frame.boundary.as_bytes())?;
+                        output.write_all(newline)?;
+                    }
+                    frame.after_child = !child.ends_with_delimiter_newline();
+                    frame.index += 1;
+                    let ensure_child = frame.ensure_new_line
+                        && truncated
+                        && frame.children.as_slice().is_empty()
+                        && frame
+                            .framing
+                            .is_some_and(|framing| framing.boundaries.len() == frame.index);
                     let digest_child = frame.digest;
                     stack.push(Task::Children(frame));
                     // As in MimeKit, every multipart child starts a complete
                     // entity, even when its parent's headers were omitted.
-                    stack.push(Task::Entity(child, false, digest_child, false));
+                    stack.push(Task::Entity(child, ensure_child, digest_child, false));
+                } else if truncated {
+                    // No closing boundary or epilogue was present. Preserve
+                    // a trailing opening marker even when it has no MIME part.
+                    if let Some(raw) = raw_boundary {
+                        write_raw_boundary(output, raw, options, masking.is_some())?;
+                    }
+                    if frame.ensure_new_line
+                        && (raw_boundary.is_some() || !frame.after_child)
+                        && output.last.is_some_and(|last| last != b'\n')
+                    {
+                        output.write_all(newline)?;
+                    }
                 } else {
-                    output.write_all(b"--")?;
-                    output.write_all(newline)?;
+                    if let Some(raw) = frame.framing.and_then(|framing| framing.end.as_ref()) {
+                        write_raw_boundary(output, raw, options, masking.is_some())?;
+                    } else {
+                        output.write_all(b"--")?;
+                        output.write_all(frame.boundary.as_bytes())?;
+                        output.write_all(b"--")?;
+                        output.write_all(newline)?;
+                    }
                     write_text(
                         output,
                         frame.epilogue,
@@ -516,6 +600,9 @@ fn write_tree<R: Read + Seek, W: Write + ?Sized>(
                         frame.ensure_new_line,
                         masking,
                     )?;
+                    if frame.ensure_new_line && output.last.is_some_and(|last| last != b'\n') {
+                        output.write_all(newline)?;
+                    }
                 }
             }
         }
@@ -530,6 +617,8 @@ struct Frame<'a, R> {
     after_child: bool,
     ensure_new_line: bool,
     digest: bool,
+    framing: Option<&'a crate::multipart::ParsedMultipart>,
+    index: usize,
 }
 
 struct EndingWriter<'a, W: ?Sized> {
@@ -557,6 +646,21 @@ enum Task<'a, R> {
     Message(&'a mut MimeMessage<R>, bool),
     Multipart(&'a mut Multipart<R>, bool, bool),
     Children(Frame<'a, R>),
+}
+
+fn write_raw_boundary<W: Write + ?Sized>(
+    output: &mut W,
+    bytes: &[u8],
+    options: &MimePartWriteOptions,
+    normalize: bool,
+) -> io::Result<()> {
+    // MimeKit retains parsed marker bytes, including padding and line endings.
+    // The anonymizer instead retains its existing output-newline policy.
+    if normalize {
+        write_text(output, bytes, options, false, None)
+    } else {
+        output.write_all(bytes)
+    }
 }
 
 fn write_text<W: Write + ?Sized>(

@@ -20,6 +20,7 @@ pub struct MimePartWriteOptions {
     ///
     /// Applies to headers and nonbinary body output, not decoded bytes before
     /// Base64 encoding. Lone CR bytes follow the existing newline filters.
+    /// Ordinary serialization preserves parsed multipart marker line endings.
     pub new_line_format: NewLineFormat,
     /// Requested encoder line width, defaulting to 78; must be in 60..=998.
     ///
@@ -28,9 +29,10 @@ pub struct MimePartWriteOptions {
     pub max_line_length: usize,
     /// Ensures a final root-body newline except for binary output. Defaults to false.
     ///
-    /// Newly encoded nonempty bodies already end with a newline. Empty Base64
-    /// and QP output receives one when requested; UU always has its terminator.
-    /// For a multipart root this affects its epilogue, not child body contents.
+    /// Newly encoded nonempty bodies already end with a newline. Authored empty
+    /// Base64/QP bodies receive one when requested; UU emits a terminator.
+    /// Parsed absent content remains absent. For a multipart this affects its
+    /// epilogue, or its final child/trailing marker when truncated.
     pub ensure_new_line: bool,
 }
 
@@ -96,8 +98,9 @@ impl<R: Read + Seek> MimePart<R> {
     /// Writes a complete single part without changing its headers or stored bytes.
     ///
     /// Headers retain spelling, folding, duplicates, and malformed records using
-    /// [`crate::HeaderList`]'s newline rules. Missing record terminators are added
-    /// in output so records and the blank separator cannot run together.
+    /// [`crate::HeaderList`]'s newline rules. Authored records receive missing
+    /// terminators. Loaded EOF-truncated records and missing separators are
+    /// retained unless edits require a following record or body separator.
     /// This is not header validation, transport preparation, or message writing.
     ///
     /// Newly UU-encoded bodies get `begin 0644 filename` and `end` wrappers.
@@ -115,7 +118,8 @@ impl<R: Read + Seek> MimePart<R> {
     /// # Errors
     ///
     /// Invalid options return [`io::ErrorKind::InvalidInput`]; unknown transfer
-    /// encoding, malformed required filename metadata, or unsafe UU filenames
+    /// encoding (unless unchanged since reader recovery), malformed required
+    /// filename metadata, or unsafe UU filenames
     /// return [`io::ErrorKind::InvalidData`]. These checks precede any source I/O,
     /// output, or flush. Other content headers are not parsed unnecessarily.
     ///
@@ -204,9 +208,19 @@ impl<R: Read + Seek> MimePart<R> {
         content_only: bool,
     ) -> io::Result<()> {
         let newline = options.validate()?;
-        let encoding = self
-            .content_transfer_encoding()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        // Preserve an unchanged unknown encoding using the reader's default,
+        // rather than rejecting bytes that were accepted during parsing.
+        // Newly authored or edited invalid metadata still fails validation.
+        let encoding = if self.recovered_encoding.as_deref().is_some_and(|original| {
+            self.headers()
+                .get("Content-Transfer-Encoding")
+                .is_some_and(|header| header.raw_value() == original)
+        }) {
+            ContentEncoding::Unspecified
+        } else {
+            self.content_transfer_encoding()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        };
         // Stored encoding describes the actual source bytes, which may differ
         // from the requested header. Decode before applying the new encoding.
         let transcode = encoding != self.content().encoding();
@@ -238,9 +252,12 @@ impl<R: Read + Seek> MimePart<R> {
         };
 
         if !content_only {
-            self.headers()
-                .write_terminated(output, options.new_line_format)?;
-            output.write_all(newline)?;
+            crate::mime_entity::write_entity_headers(self.headers(), self.parsed, output, options)?;
+        }
+        // MimeKit's null Content writes no body, even with a new encoding or
+        // EnsureNewLine. Mutable content access clears this parsed distinction.
+        if self.parsed.is_some_and(|parsed| parsed.no_content) {
+            return output.flush();
         }
         if let Some(name) = &uu_name {
             output.write_all(b"begin 0644 ")?;
@@ -251,9 +268,9 @@ impl<R: Read + Seek> MimePart<R> {
         if let Some(filter) = filter {
             let mut filtered = FilteredWriter::new(&mut *output, filter);
             let count = if transcode {
-                self.content_mut().decode_to(&mut filtered)?
+                self.content.decode_to(&mut filtered)?
             } else {
-                self.content_mut().write_to(&mut filtered)?
+                self.content.write_to(&mut filtered)?
             };
             filtered.finish()?;
             // Encoders terminate nonempty output; empty Base64/QP output
@@ -262,10 +279,10 @@ impl<R: Read + Seek> MimePart<R> {
                 output.write_all(newline)?;
             }
         } else if transcode {
-            self.content_mut().decode_to(output)?;
+            self.content.decode_to(output)?;
         } else {
             // Do not alter binary content, even when ensuring a final newline.
-            self.content_mut().write_to(output)?;
+            self.content.write_to(output)?;
         }
         if uu_name.is_some() {
             output.write_all(b"end")?;
