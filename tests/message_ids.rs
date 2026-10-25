@@ -2,7 +2,112 @@
 // UnitTests/Utils/ParseUtilsTests.cs, and UnitTests/MimeMessageTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use mimecraft::{HeaderId, HeaderParser, MessageId, MessageIdParseErrorKind as Kind};
+use mimecraft::{
+    HeaderId, HeaderParser, MessageId, MessageIdGenerationError, MessageIdParseErrorKind as Kind,
+    MimeContent, MimeMessage, MimePart,
+};
+
+#[test]
+fn generated_identifiers_normalize_domains_and_round_trip_through_headers() {
+    let longest = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    );
+    assert_eq!(longest.len(), 253);
+    for (domain, expected) in [
+        ("Mj\u{f6}lnir", "xn--mjlnir-xxa"),
+        ("EXAMPLE.COM", "example.com"),
+        ("example.com.", "example.com"),
+        ("localhost", "localhost"),
+        ("b\u{fc}cher.example", "xn--bcher-kva.example"),
+        ("example.com\u{ff0e}", "example.com"),
+        (longest.as_str(), longest.as_str()),
+    ] {
+        let id = MessageId::generate(domain).unwrap();
+        assert_eq!(id.as_str().split_once('@').unwrap().1, expected);
+        assert_eq!(MessageId::parse(id.as_str().as_bytes()).unwrap(), id);
+        assert_eq!(MessageId::from_value(id.as_str()).unwrap(), id);
+
+        let mut message: MimeMessage = MimeMessage::new();
+        message.set_message_id(id.as_str()).unwrap();
+        let mut part = MimePart::new(MimeContent::new(std::io::Cursor::new(b"body".to_vec())));
+        part.set_content_id(Some(id.as_str())).unwrap();
+        message.set_body(Some(part.into()));
+        let mut wire = Vec::new();
+        message.write_to(&mut wire).unwrap();
+        let loaded = MimeMessage::load(&mut std::io::Cursor::new(wire)).unwrap();
+        assert_eq!(loaded.message_id().unwrap(), Some(id.clone()));
+        assert_eq!(loaded.body().unwrap().content_id().unwrap(), Some(id));
+    }
+}
+
+#[test]
+fn generated_identifiers_reject_invalid_or_unsafe_domains() {
+    for domain in [
+        "",
+        ".",
+        "a..b",
+        "-a.example",
+        "a-.example",
+        "a@b",
+        "a b",
+        "a\tb",
+        "a\r\nBcc: victim@example.com",
+        "a\0b",
+        "[127.0.0.1]",
+        "example\u{ff20}evil.com",
+        "a\u{2009}b",
+    ] {
+        assert!(
+            matches!(
+                MessageId::generate(domain),
+                Err(MessageIdGenerationError::InvalidDomain(_))
+            ),
+            "{domain:?}"
+        );
+    }
+    assert!(MessageId::generate(&"x".repeat(64)).is_err());
+    assert!(MessageId::generate(&format!("{}.com", "x.".repeat(126))).is_err());
+}
+
+#[test]
+fn generated_identifiers_have_expected_shape_across_concurrent_calls() {
+    let ids = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..128)
+                        .map(|_| MessageId::generate("example.com").unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        let (local, domain) = id.as_str().split_once('@').unwrap();
+        assert_eq!(domain, "example.com");
+        let components: Vec<_> = local.split('.').collect();
+        assert_eq!(components.len(), 2);
+        for component in components {
+            assert!((1..=13).contains(&component.len()));
+            assert!(
+                component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+            );
+        }
+        assert!(seen.insert(id));
+    }
+    assert_eq!(seen.len(), 512);
+}
 
 #[test]
 fn source_message_identifier_vectors() {

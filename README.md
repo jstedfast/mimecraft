@@ -4100,7 +4100,8 @@ and enclosed streams cannot define their new order. Ordinary and masked writers
 therefore emit combined message headers before root-body Content-* headers.
 Descendant offsets and embedded-message header interleaving remain intact;
 the enclosing and input fragment headers are unchanged.
-Automatic splitting and generated IDs remain deferred. Fragment leaves can use
+Automatic splitting remains deferred. Explicit-domain IDs can be created with
+`MessageId::generate`. Fragment leaves can use
 ordinary part/tree transport preparation; no splitting-specific preparation
 is performed.
 
@@ -4944,8 +4945,8 @@ zero-based input byte offset. Parsing never changes the raw header record.
 retains MimeKit's loose token grammar: it may accept controls, collapse unquoted
 whitespace, or tolerate a closing `>` without an opening `<`. Do not insert the
 result into a header without separate authoring validation. Use
-`MessageId::from_value` for MimeKit's setter-style checks. ID generation is not
-implemented.
+`MessageId::from_value` for MimeKit's setter-style checks, or
+`MessageId::generate` to author new identifiers.
 Prefix parsing begins at the first non-comment token; it does not search for
 an embedded `<id>` and can absorb whitespace-separated text in a loose local
 part. Both APIs take a complete input slice, independent of I/O or chunking.
@@ -4985,6 +4986,32 @@ formatter. `FromStr` remains the tolerant reading API; it does not implicitly
 opt into assignment validation.
 `MimeMessage`'s identifier and reference setters use this assignment validation
 before formatting complete headers; standalone `MessageId` remains a value type.
+
+`MessageId::generate(domain)` ports MimeKit's explicit-domain message/content-ID
+generator. It combines UTC ticks since year 1 and eight OS-random bytes, using
+MimeKit's uppercase, least-significant-digit-first base36 representation and
+big-endian random integer interpretation. It returns a `MessageId` without angle
+brackets; callers explicitly assign the result to Message-Id or Content-Id.
+
+```rust
+use mimecraft::{MessageId, MimeMessage};
+
+let id = MessageId::generate("example.com").unwrap();
+let mut message: MimeMessage = MimeMessage::new();
+message.set_message_id(id.as_str()).unwrap();
+```
+
+Generation uses `getrandom` for OS entropy, not a time-seeded PRNG. Uniqueness
+is probabilistic; these identifiers are not authentication tokens.
+`MessageIdGenerationError` distinguishes invalid domains, clock values outside
+years 1 through 9999, and entropy failures, retaining underlying error sources.
+Domain and clock checks precede the entropy request; failures never substitute
+a weak random source or fallback identifier. Unlike MimeKit's platform IDN
+wrapper, generation uses the existing MIME-safe IDNA validation, lowercases
+ASCII domains, and removes an optional final DNS root dot. Hostname discovery
+and automatic constructor/header assignment remain deferred.
+Build targets must support a `getrandom` backend; targets without a default
+backend require its explicit platform-specific configuration.
 
 ### References and In-Reply-To
 
@@ -6468,7 +6495,8 @@ rejected. Shared parser limits bound the reassembled decoded message; no
 intermediate concatenated message buffer is required. As in MimeKit, combined
 message and root-body offsets are cleared without changing descendant offsets.
 Visitor dispatch and disposal comments do not apply to the Rust model.
-Automatic splitting and ID generation are not yet ported.
+Automatic splitting is not yet ported; explicit-domain ID generation is available
+through `MessageId::generate`.
 `MimeReader.cs`'s multipart/digest default is scoped to the immediate parent
 and resets at embedded message roots. Unlike cached effective metadata, the
 raw API keeps missing headers absent; the writer uses its parent frame to
@@ -6699,7 +6727,7 @@ from the getter's first-child fallback. The source's Thunderbird bug 471402
 comment is retained/adapted where first-child roots remove start. Explicit
 Content-Ids replace automatic generation, atomic checked metadata edits replace
 cached parameter updates, and replaced children are returned to the caller.
-URI-based resource lookup/opening and generated IDs are not yet ported;
+URI-based resource lookup/opening and automatic Content-Id assignment remain deferred;
 visitor dispatch and disposal invariants do not apply to the Rust model.
 Bounded stream views follow `IO/BoundedStream.cs`, with range and seek cases
 adapted from `UnitTests/IO/BoundedStreamTests.cs`. Relative positions, source

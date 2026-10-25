@@ -21,7 +21,7 @@ use crate::{
 /// or reposition sources, and returned parameter values are detached.
 ///
 /// [`Self::join`] reassembles existing fragments using the first enclosing
-/// message's headers. Automatic splitting, generated IDs, and transport
+/// message's headers. Automatic splitting, automatic ID assignment, and transport
 /// preparation are not implemented.
 ///
 /// ```

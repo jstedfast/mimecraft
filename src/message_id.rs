@@ -1,7 +1,13 @@
 // Adapted from MimeKit's Utils/ParseUtils.cs and Utils/MimeUtils.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{error::Error, fmt, iter::FusedIterator, str::FromStr};
+use std::{
+    error::Error,
+    fmt,
+    iter::FusedIterator,
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::parse_utils::{
     DomainParseErrorKind, is_atom, is_whitespace, skip_comments_and_whitespace, skip_quoted,
@@ -19,7 +25,7 @@ use crate::parse_utils::{
 /// missing domains, unusual local-part characters (including controls), repeated
 /// `@` signs, and other malformed forms may be accepted. Its output is not
 /// guaranteed safe to insert into a header. Use [`Self::from_value`] for
-/// MimeKit's setter-style checks. ID generation is not implemented yet.
+/// MimeKit's setter-style checks, or [`Self::generate`] to author a new ID.
 ///
 /// [`Display`](fmt::Display) returns the normalized value without angle brackets;
 /// use [`crate::Header::raw`] to preserve an original header unchanged.
@@ -41,6 +47,62 @@ pub struct MessageId {
 }
 
 impl MessageId {
+    /// Generates a new Message-Id or Content-Id using an explicit domain.
+    ///
+    /// Ports MimeKit's `MimeUtils.GenerateMessageId(domain)`: a UTC timestamp
+    /// and eight OS-random bytes form two uppercase base36 components, followed
+    /// by `@` and the domain. Digits are emitted least-significant first.
+    /// The result has no angle brackets and uniqueness is probabilistic.
+    /// Identifiers are not authentication tokens.
+    ///
+    /// Unlike the loose parsing APIs, domains undergo [`crate::idna::to_ascii`]
+    /// validation and lowercase ASCII normalization. An optional final DNS root
+    /// dot is omitted, matching this type's normalized representation.
+    /// Hostname discovery, fallback domains, and automatic header assignment
+    /// are deliberately not performed.
+    ///
+    /// ```
+    /// use mimecraft::{MessageId, MimeMessage};
+    ///
+    /// let id = MessageId::generate("example.com")?;
+    /// let mut message: MimeMessage = MimeMessage::new();
+    /// message.set_message_id(id.as_str())?;
+    /// assert!(id.as_str().ends_with("@example.com"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageIdGenerationError`] for invalid domains, an OS clock
+    /// outside years 1 through 9999, or failure to obtain OS randomness.
+    /// Domain and clock validation precede the entropy request. No weak random
+    /// source or substitute identifier is used on failure.
+    pub fn generate(domain: &str) -> Result<Self, MessageIdGenerationError> {
+        Self::generate_with(domain, SystemTime::now(), getrandom::fill)
+    }
+
+    fn generate_with(
+        domain: &str,
+        now: SystemTime,
+        fill: impl FnOnce(&mut [u8]) -> Result<(), getrandom::Error>,
+    ) -> Result<Self, MessageIdGenerationError> {
+        let domain =
+            crate::idna::to_ascii(domain).map_err(MessageIdGenerationError::InvalidDomain)?;
+        let ticks = message_id_ticks(now)?;
+        let mut random = [0; 8];
+        fill(&mut random).map_err(MessageIdGenerationError::Random)?;
+
+        let mut value = String::with_capacity(28 + domain.len());
+        append_base36(&mut value, ticks);
+        value.push('.');
+        // MimeKit assembles the random integer most-significant byte first,
+        // independently of the host's native byte order.
+        append_base36(&mut value, u64::from_be_bytes(random));
+        value.push('@');
+        value.push_str(domain.trim_end_matches('.'));
+        Ok(Self { value })
+    }
+
     /// Normalizes a value using MimeKit's message-ID property setter rules.
     ///
     /// Unlike [`Self::parse`] and [`FromStr`], this rejects NULs and non-folding
@@ -337,6 +399,67 @@ impl MessageId {
     }
 }
 
+fn message_id_ticks(now: SystemTime) -> Result<u64, MessageIdGenerationError> {
+    // MimeKit uses 100-nanosecond UTC ticks since 0001-01-01, not Unix time.
+    const UNIX_EPOCH_TICKS: u128 = 621_355_968_000_000_000;
+    const MAX_TICKS: u128 = 3_155_378_975_999_999_999;
+
+    let ticks = match now.duration_since(UNIX_EPOCH) {
+        Ok(duration) => Some(UNIX_EPOCH_TICKS + duration.as_nanos() / 100),
+        // Round toward the earlier tick, including immediately before 1970.
+        Err(error) => UNIX_EPOCH_TICKS.checked_sub(error.duration().as_nanos().div_ceil(100)),
+    };
+    ticks
+        .filter(|ticks| *ticks <= MAX_TICKS)
+        .map(|ticks| ticks as u64)
+        .ok_or(MessageIdGenerationError::ClockOutOfRange)
+}
+
+fn append_base36(output: &mut String, mut value: u64) {
+    const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    // Preserve MimeKit's reversed digit order, including one digit for zero.
+    loop {
+        output.push(char::from(DIGITS[(value % 36) as usize]));
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+/// A new message or content identifier could not be generated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageIdGenerationError {
+    /// The domain failed IDNA or MIME-safe ASCII validation.
+    InvalidDomain(crate::idna::IdnaError),
+    /// The OS clock lies outside MimeKit's supported years 1 through 9999.
+    ClockOutOfRange,
+    /// The operating system could not supply random bytes.
+    Random(getrandom::Error),
+}
+
+impl fmt::Display for MessageIdGenerationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDomain(error) => write!(f, "invalid message identifier domain: {error}"),
+            Self::ClockOutOfRange => {
+                f.write_str("message identifier clock is outside years 1 through 9999")
+            }
+            Self::Random(error) => write!(f, "message identifier randomness failed: {error}"),
+        }
+    }
+}
+
+impl Error for MessageIdGenerationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidDomain(error) => Some(error),
+            Self::Random(error) => Some(error),
+            Self::ClockOutOfRange => None,
+        }
+    }
+}
+
 /// Lazily parses bracketed message identifiers from References or In-Reply-To.
 ///
 /// This follows MimeKit's `MimeUtils.EnumerateReferences` scanning and recovery
@@ -578,3 +701,122 @@ impl fmt::Display for MessageIdParseError {
 }
 
 impl Error for MessageIdParseError {}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn base36_keeps_mimekits_digit_order_and_zero() {
+        for (value, expected) in [(0, "0"), (35, "Z"), (36, "01"), (1295, "ZZ"), (1296, "001")] {
+            let mut output = String::from("prefix:");
+            append_base36(&mut output, value);
+            assert_eq!(output, format!("prefix:{expected}"));
+        }
+        let mut output = String::new();
+        append_base36(&mut output, u64::MAX);
+        assert_eq!(
+            u64::from_str_radix(&output.chars().rev().collect::<String>(), 36),
+            Ok(u64::MAX)
+        );
+        assert_eq!(output.len(), 13);
+    }
+
+    #[test]
+    fn timestamps_use_utc_ticks_and_floor_subtick_precision() {
+        let epoch = 621_355_968_000_000_000;
+        for (nanoseconds, ticks) in [(0, 0), (1, 0), (99, 0), (100, 1), (101, 1)] {
+            let duration = Duration::from_nanos(nanoseconds);
+            let now = UNIX_EPOCH + duration;
+            // Windows SystemTime cannot represent sub-100-nanosecond steps.
+            if now.duration_since(UNIX_EPOCH).unwrap() != duration {
+                continue;
+            }
+            assert_eq!(message_id_ticks(now), Ok(epoch + ticks));
+        }
+        for (nanoseconds, ticks) in [(1, 1), (99, 1), (100, 1), (101, 2)] {
+            let duration = Duration::from_nanos(nanoseconds);
+            let now = UNIX_EPOCH - duration;
+            if UNIX_EPOCH.duration_since(now).unwrap() != duration {
+                continue;
+            }
+            assert_eq!(message_id_ticks(now), Ok(epoch - ticks));
+        }
+        let end = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+        assert_eq!(
+            message_id_ticks(end - Duration::from_nanos(100)),
+            Ok(3_155_378_975_999_999_999)
+        );
+        assert_eq!(
+            message_id_ticks(end),
+            Err(MessageIdGenerationError::ClockOutOfRange)
+        );
+        // Some platforms cannot represent year 1 as a SystemTime.
+        if let Some(start) = UNIX_EPOCH.checked_sub(Duration::from_secs(62_135_596_800)) {
+            assert_eq!(message_id_ticks(start), Ok(0));
+            if let Some(before) = start.checked_sub(Duration::from_nanos(100)) {
+                assert_eq!(
+                    message_id_ticks(before),
+                    Err(MessageIdGenerationError::ClockOutOfRange)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generation_uses_eight_big_endian_random_bytes() {
+        let id = MessageId::generate_with("EXAMPLE.COM.", UNIX_EPOCH, |bytes| {
+            assert_eq!(bytes.len(), 8);
+            bytes.copy_from_slice(&[0, 0, 0, 0, 0, 0, 1, 0]);
+            Ok(())
+        })
+        .unwrap();
+        let (local, domain) = id.as_str().split_once('@').unwrap();
+        let (timestamp, random) = local.split_once('.').unwrap();
+        assert_eq!(domain, "example.com");
+        assert_eq!(random, "47"); // 256, least-significant digit first.
+        assert_eq!(
+            u64::from_str_radix(&timestamp.chars().rev().collect::<String>(), 36),
+            Ok(621_355_968_000_000_000)
+        );
+        let zero = MessageId::generate_with("example.com", UNIX_EPOCH, |bytes| {
+            bytes.fill(0);
+            Ok(())
+        })
+        .unwrap();
+        assert!(zero.as_str().ends_with(".0@example.com"));
+    }
+
+    #[test]
+    fn validation_precedes_entropy_and_failures_have_no_fallback() {
+        let no_entropy = |_: &mut [u8]| -> Result<(), getrandom::Error> {
+            panic!("invalid inputs must fail before requesting entropy")
+        };
+        let error = MessageId::generate_with("", UNIX_EPOCH, no_entropy).unwrap_err();
+        assert!(matches!(error, MessageIdGenerationError::InvalidDomain(_)));
+        assert!(error.source().unwrap().is::<crate::idna::IdnaError>());
+        assert!(error.to_string().contains("domain"));
+
+        let end = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+        let error = MessageId::generate_with("example.com", end, no_entropy).unwrap_err();
+        assert_eq!(error, MessageIdGenerationError::ClockOutOfRange);
+        assert!(error.source().is_none());
+        assert!(error.to_string().contains("clock"));
+
+        let error = MessageId::generate_with("example.com", UNIX_EPOCH, |bytes| {
+            bytes[0] = 42;
+            Err(getrandom::Error::UNSUPPORTED)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            MessageIdGenerationError::Random(getrandom::Error::UNSUPPORTED)
+        );
+        assert_eq!(
+            error.source().unwrap().downcast_ref::<getrandom::Error>(),
+            Some(&getrandom::Error::UNSUPPORTED)
+        );
+        assert!(error.to_string().contains("randomness"));
+    }
+}

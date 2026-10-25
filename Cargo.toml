@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 encoding_rs = "0.8"
+getrandom = "0.4"
 idna = "1.1"
 memchr = "2"
 unicode-general-category = "1.1"
