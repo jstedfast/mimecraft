@@ -97,6 +97,8 @@
 //! [`MimeEntity::load`] reads complete entity trees from buffered sources into
 //! owned body streams, preserving encoded bytes and raw headers with explicit
 //! [`MimeEntityParseOptions`] limits and default truncated-header/container recovery.
+//! [`MimeEntity::load_content`] loads body-only input with a separately supplied
+//! [`ContentType`], prepending a formatted header before ordinary copying parsing.
 //! [`MimeComplianceLogger`] optionally receives [`MimeComplianceIssue`] values
 //! through the reader/parser `*_with_logger` methods; logger errors abort unchanged.
 //! [`MimeComplianceOptions`] selects severity context and per-violation quotas.

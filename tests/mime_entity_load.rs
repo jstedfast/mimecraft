@@ -1,10 +1,12 @@
+// Includes tests adapted from MimeKit's MimePartTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 
 use mimecraft::{
-    ContentEncoding, Header, HeaderTooLong, MimeContent, MimeEntity, MimeEntityParseOptions,
-    MimePart, MimePartWriteOptions, Multipart, TextPart, encodings::NewLineFormat,
+    ContentEncoding, ContentType, Header, HeaderFormatError, HeaderTooLong, MimeContent,
+    MimeEntity, MimeEntityParseOptions, MimePart, MimePartWriteOptions, Multipart, TextPart,
+    encodings::NewLineFormat,
 };
 
 fn load(bytes: &[u8]) -> MimeEntity {
@@ -47,6 +49,261 @@ fn binary(body: &[u8]) -> MimeEntity {
     let mut part = MimePart::new(MimeContent::new(Cursor::new(body.to_vec())));
     part.set_content_transfer_encoding(ContentEncoding::Binary);
     part.into()
+}
+
+#[test]
+fn load_http_web_response() {
+    let content_type = ContentType::new("text", "plain").unwrap();
+    for newline in ["\n", "\r\n"] {
+        let text = format!("This is some text and stuff.{newline}");
+        for capacity in [1, 7, 4096] {
+            let mut content = BufReader::with_capacity(capacity, ChunkReader::new(text.as_bytes()));
+            let MimeEntity::Part(part) =
+                MimeEntity::load_content(&content_type, &mut content).unwrap()
+            else {
+                panic!("expected text part");
+            };
+            assert_eq!(TextPart::from_part(part).unwrap().text().unwrap(), text);
+            assert_eq!(content.get_ref().position, text.len());
+        }
+    }
+}
+
+#[test]
+fn body_only_leaf_preserves_bytes_and_copies_supplied_metadata() {
+    for raw in [
+        b"".as_slice(),
+        b"\r\n",
+        b"Content-Type: multipart/mixed\r\n\r\nnot MIME headers",
+        b"\xef\xbb\xbf\0\xff\rbare\nmixed\r\n",
+    ] {
+        let mut content_type = ContentType::new("application", "octet-stream").unwrap();
+        content_type.set_name(Some("r\u{e9}sum\u{e9}.bin"));
+        let mut input = Cursor::new([b"skip".as_slice(), raw].concat());
+        input.set_position(4);
+        let entity = MimeEntity::load_content(&content_type, &mut input).unwrap();
+        assert_eq!(entity.headers().len(), 1);
+        let header = entity.headers().get("Content-Type").unwrap();
+        assert_eq!(header.offset(), Some(0));
+        assert_eq!(
+            header.parse_content_type().unwrap().name(),
+            Some("r\u{e9}sum\u{e9}.bin")
+        );
+        assert_eq!(
+            part(&entity).content().encoding(),
+            ContentEncoding::Unspecified
+        );
+        assert_eq!(part(&entity).content().get_ref().position(), 0);
+        assert_eq!(bytes(&entity), raw);
+        content_type.set_name(Some("changed.bin"));
+        input.get_mut().fill(b'x');
+        drop(input);
+        assert_eq!(bytes(&entity), raw);
+        assert_eq!(
+            header.parse_content_type().unwrap().name(),
+            Some("r\u{e9}sum\u{e9}.bin")
+        );
+    }
+}
+
+#[test]
+fn body_only_multipart_form_data_uses_the_shared_parser() {
+    let content_type = ContentType::parse(b"multipart/form-data; boundary=b").unwrap();
+    let content = b"preamble\r\n--b\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nAlice\r\n\
+        --b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\n\
+        Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--b--\r\nepilogue";
+    let prefix = format!("{}\r\n", content_type.to_header_string().unwrap());
+    let expected = [prefix.as_bytes(), content].concat();
+    for split in 0..=content.len() {
+        let mut input = Cursor::new(&content[..split]).chain(Cursor::new(&content[split..]));
+        let input: &mut dyn BufRead = &mut input;
+        let mut entity = MimeEntity::load_content(&content_type, input).unwrap();
+        let multi = multipart(&entity);
+        assert_eq!(multi.preamble(), b"preamble\r\n");
+        assert_eq!(multi.epilogue(), b"epilogue");
+        assert_eq!(multi.children().len(), 2);
+        assert_eq!(bytes(&multi.children()[0]), b"Alice");
+        assert_eq!(bytes(&multi.children()[1]), b"aGVsbG8=");
+        assert_eq!(
+            part(&multi.children()[1]).content().encoding(),
+            ContentEncoding::Base64
+        );
+        assert_eq!(
+            multi.children()[0]
+                .headers()
+                .get("Content-Disposition")
+                .unwrap()
+                .offset(),
+            Some((prefix.len() + b"preamble\r\n--b\r\n".len()) as u64),
+        );
+        assert_eq!(write(&mut entity, NewLineFormat::Dos), expected);
+    }
+}
+
+#[test]
+fn body_only_nested_messages_follow_options_and_recovery() {
+    let content_type = ContentType::new("message", "rfc822").unwrap();
+    let body = b"Subject: inner\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=";
+    let entity = MimeEntity::load_content(&content_type, &mut body.as_slice()).unwrap();
+    let MimeEntity::Message(part) = entity else {
+        panic!("expected message part");
+    };
+    let message = part.message().unwrap();
+    assert!(message.headers().contains("Subject"));
+    assert!(!message.headers().contains("Content-Transfer-Encoding"));
+    assert_eq!(bytes(message.body().unwrap()), b"aGVsbG8=");
+    let options = MimeEntityParseOptions {
+        parse_message_parts: false,
+        ..Default::default()
+    };
+    let entity =
+        MimeEntity::load_content_with_options(&content_type, &mut body.as_slice(), &options)
+            .unwrap();
+    assert_eq!(bytes(&entity), body);
+    let options = MimeEntityParseOptions {
+        max_depth: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        MimeEntity::load_content_with_options(&content_type, &mut body.as_slice(), &options)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData,
+    );
+
+    let content_type = ContentType::parse(b"multipart/mixed; boundary=b").unwrap();
+    for body in [b"--b\r\n\r\nbody".as_slice(), b"--b\r\n\r\nbody\r\n"] {
+        let mut entity = MimeEntity::load_content(&content_type, &mut &body[..]).unwrap();
+        assert_eq!(multipart(&entity).children().len(), 1);
+        let expected = [
+            format!("{}\r\n", content_type.to_header_string().unwrap()).as_bytes(),
+            body,
+        ]
+        .concat();
+        assert_eq!(write(&mut entity, NewLineFormat::Dos), expected);
+    }
+}
+
+#[test]
+fn body_only_limits_include_synthesized_headers_and_separator() {
+    let content_type = ContentType::new("text", "plain").unwrap();
+    let header = content_type.to_header_string().unwrap();
+    let prefix = header.len() + 2;
+    let body = b"body";
+    for limit in 1..=prefix + body.len() {
+        let mut input = body.as_slice();
+        let options = MimeEntityParseOptions {
+            max_input_bytes: limit,
+            ..Default::default()
+        };
+        let result = MimeEntity::load_content_with_options(&content_type, &mut input, &options);
+        if limit == prefix + body.len() {
+            assert_eq!(bytes(&result.unwrap()), body);
+        } else {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        }
+        assert_eq!(input, &body[limit.saturating_sub(prefix)..]);
+    }
+
+    let mut folded_type = content_type.clone();
+    folded_type.set_name(Some(&"r\u{e9}sum\u{e9}".repeat(40)));
+    assert!(
+        folded_type
+            .to_header_string()
+            .unwrap()
+            .matches("\r\n")
+            .count()
+            > 1
+    );
+    for content_type in [&content_type, &folded_type] {
+        let header = content_type.to_header_string().unwrap();
+        for limit in [header.len() - 1, header.len()] {
+            let mut input = BufReader::new(ChunkReader::new(body));
+            let options = MimeEntityParseOptions {
+                max_header_length: limit,
+                ..Default::default()
+            };
+            let result = MimeEntity::load_content_with_options(content_type, &mut input, &options);
+            if limit == header.len() {
+                assert_eq!(bytes(&result.unwrap()), body);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                assert!(
+                    error
+                        .get_ref()
+                        .unwrap()
+                        .downcast_ref::<HeaderTooLong>()
+                        .is_some()
+                );
+                assert_eq!(input.get_ref().calls, 0);
+            }
+        }
+    }
+
+    let mut input = BufReader::with_capacity(7, ChunkReader::new(body));
+    let options = MimeEntityParseOptions {
+        max_input_bytes: prefix + 2,
+        ..Default::default()
+    };
+    assert!(MimeEntity::load_content_with_options(&content_type, &mut input, &options).is_err());
+    let mut remainder = Vec::new();
+    input.read_to_end(&mut remainder).unwrap();
+    assert_eq!(remainder, b"dy");
+}
+
+#[test]
+fn body_only_validation_precedes_io_and_source_errors_propagate() {
+    let content_type = ContentType::new("application", &"x".repeat(200)).unwrap();
+    let mut input = BufReader::new(ChunkReader::new(b"body"));
+    let error = MimeEntity::load_content(&content_type, &mut input).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(
+        error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<HeaderFormatError>()
+            .is_some()
+    );
+    assert_eq!(input.get_ref().calls, 0);
+    for options in [
+        MimeEntityParseOptions {
+            max_depth: 0,
+            ..Default::default()
+        },
+        MimeEntityParseOptions {
+            max_input_bytes: 0,
+            ..Default::default()
+        },
+        MimeEntityParseOptions {
+            max_header_length: 0,
+            ..Default::default()
+        },
+    ] {
+        let error =
+            MimeEntity::load_content_with_options(&content_type, &mut input, &options).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<HeaderFormatError>()
+                .is_none()
+        );
+        assert_eq!(input.get_ref().calls, 0);
+    }
+
+    let content_type = ContentType::parse(b"multipart/mixed; boundary=b").unwrap();
+    let body = b"--b\r\n\r\nbody\r\n--b--\r\nepilogue";
+    for fail_after in 0..=body.len() {
+        let mut source = ChunkReader::new(body);
+        source.fail_after = Some(fail_after);
+        let mut input = BufReader::with_capacity(7, source);
+        let error = MimeEntity::load_content(&content_type, &mut input).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "source failed");
+        assert_eq!(input.get_ref().position, fail_after);
+    }
 }
 
 #[test]

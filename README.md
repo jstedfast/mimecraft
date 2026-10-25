@@ -1482,6 +1482,18 @@ let mut output = Vec::new();
 text.part_mut().write_to(&mut output).unwrap();
 ```
 
+For body-only input whose Content-Type was parsed separately, use
+`MimeEntity::load_content(&content_type, &mut input)` or
+`load_content_with_options(&content_type, &mut input, &options)`. These mirror
+MimeKit's Content-Type/content loading overloads for HTTP-style response bodies.
+They stream a formatted Content-Type header and CRLF separator ahead of the
+borrowed content, then reuse the copying loader, including multipart and nested
+message parsing. Header-looking body bytes remain content; no root transfer
+encoding is inferred. The returned model borrows neither argument, and no
+seeking or source closing occurs. Limits and header offsets include the
+synthesized prefix. Invalid options and Content-Type formatting errors fail
+before reading the body.
+
 The loader uses `MimeParser` over `MimeReader`'s iterative event traversal and
 incremental buffered reads. The parser retains the resulting headers,
 preambles, epilogues, and encoded leaf bodies; owned-tree loading is not

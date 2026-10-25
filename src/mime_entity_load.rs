@@ -1,13 +1,87 @@
 // Adapted from MimeKit's MimeEntity.cs, MimeReader.cs and MimeParser.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead, Read, Seek};
+use std::io::{self, BufRead, Cursor, Read, Seek};
 
 use crate::{
-    MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimeParser,
+    ContentType, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions,
+    MimeParser,
 };
 
 impl MimeEntity {
+    /// Loads a body whose Content-Type was parsed separately from its bytes.
+    ///
+    /// Intended for APIs such as HTTP clients that expose headers separately
+    /// from the content stream. Prepends a formatted Content-Type and a blank
+    /// line, then uses the ordinary copying entity loader. The supplied body
+    /// does not need MIME headers; header-like leading bytes remain content.
+    ///
+    /// Multipart bodies and transparent message wrappers are parsed normally.
+    /// No transfer encoding is inferred or supplied for the root. Copied leaf
+    /// bytes remain undecoded, including transfer-encoded multipart children.
+    /// The returned model does not borrow the content or the Content-Type.
+    /// The content stream is neither sought nor closed. Wrap plain [`Read`]
+    /// sources in [`io::BufReader`]; nonseekable [`BufRead`] sources work directly.
+    ///
+    /// # Errors
+    ///
+    /// Uses default parse limits. Formatting or parsing errors return no partial
+    /// model; see [`Self::load_content_with_options`] for limits and offsets.
+    ///
+    /// ```
+    /// use mimecraft::{ContentType, MimeEntity, TextPart};
+    ///
+    /// let content_type = ContentType::parse(b"text/plain; charset=utf-8")?;
+    /// let mut content = b"This is the response body.".as_slice();
+    /// let MimeEntity::Part(part) = MimeEntity::load_content(&content_type, &mut content)? else {
+    ///     unreachable!()
+    /// };
+    /// assert_eq!(TextPart::from_part(part)?.text()?, "This is the response body.");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn load_content<R: BufRead + ?Sized>(
+        content_type: &ContentType,
+        content: &mut R,
+    ) -> io::Result<Self> {
+        Self::load_content_with_options(content_type, content, &MimeEntityParseOptions::default())
+    }
+
+    /// Loads a body with a separately supplied Content-Type and explicit limits.
+    ///
+    /// Follows [`Self::load_content`], with options applied to the entire
+    /// synthesized MIME entity. Input-byte and header-length budgets include
+    /// the formatted Content-Type; the input budget also includes its blank
+    /// separator. Header offsets include this prefix, not just the body bytes.
+    /// Nested-message interpretation and recovery follow [`Self::load_with_options`].
+    ///
+    /// The prefix uses the existing Content-Type formatter's default folding
+    /// and RFC 2231 parameter encoding, with CRLF termination and a CRLF blank
+    /// line. This does not modify the supplied Content-Type or normalize body
+    /// bytes. Only the prefix is buffered before parsing begins.
+    ///
+    /// # Errors
+    ///
+    /// Invalid options fail before formatting or source I/O. An unformattable
+    /// Content-Type returns [`io::ErrorKind::InvalidInput`] containing
+    /// [`crate::HeaderFormatError`], also before I/O. Parse and source errors
+    /// propagate unchanged. On failure, the caller's source remains open but
+    /// consumed bytes are not restored; buffered read-ahead stays with it.
+    pub fn load_content_with_options<R: BufRead + ?Sized>(
+        content_type: &ContentType,
+        content: &mut R,
+        options: &MimeEntityParseOptions,
+    ) -> io::Result<Self> {
+        options.validate()?;
+        let mut header = content_type
+            .to_header_string()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        header.push_str("\r\n");
+        // Like MimeKit's ChainedStream, prepend MIME headers without copying
+        // the content stream. Borrowing replaces its leaveOpen ownership flag.
+        let mut input = Cursor::new(header.into_bytes()).chain(content);
+        Self::load_with_options(&mut input, options)
+    }
+
     /// Loads one MIME entity through EOF into owned in-memory body streams.
     ///
     /// Uses default [`MimeEntityParseOptions`]. For plain [`io::Read`] sources,
