@@ -1348,7 +1348,7 @@ alternatives.children_mut().push(TextPart::new("plain", "hello").unwrap().into()
 alternatives.children_mut().push(TextPart::new("html", "<b>hello</b>").unwrap().into());
 
 let mut mixed: Multipart = Multipart::new("mixed", "outer-boundary").unwrap();
-mixed.set_preamble(b"This message has multiple parts.\r\n".to_vec());
+mixed.set_preamble_text("This message has multiple parts.");
 mixed.children_mut().push(alternatives.into());
 let root: MimeEntity = mixed.into();
 assert_eq!(root.leaf_parts().count(), 2);
@@ -1373,15 +1373,34 @@ Content-Type records, and leave unrelated bytes and children untouched.
 
 `children_mut()` exposes normal vector insertion, removal, replacement, and
 reordering. Removed children retain their source ownership; clearing drops them.
-Preamble and epilogue setters take raw byte vectors and return the previous
+Raw `set_preamble` and `set_epilogue` take byte vectors and return the previous
 bytes, without decoding, folding, or newline conversion. These vectors exclude
 delimiter lines; epilogue begins after the closing delimiter's line ending.
-Taking `children_mut()` or replacing the preamble/epilogue discards this container's
+Taking `children_mut()` or replacing the raw preamble/epilogue discards this container's
 parsed framing, even without subsequent vector edits; writing then generates
 complete delimiters with a header/body separator.
 `from_parts`/`into_parts` transfer all four components without validation,
 default insertion, source I/O, or copying; private parsed-framing provenance is
 not transferred. Empty vectors represent absent text.
+
+`preamble_text()` and `epilogue_text()` decode strict UTF-8 without changing the
+stored bytes; their `*_with_charset()` variants accept an explicit `Charset`.
+Malformed input returns `CharsetError`, not replacement characters or guessed
+encodings. Empty vectors decode to empty strings. BOMs and newlines survive,
+including an epilogue's leading blank lines: its delimiter newline is already
+stored separately.
+
+`set_preamble_text()` and `set_epilogue_text()` encode UTF-8 and fold words with
+MimeKit's soft 78-column target, measured in UTF-8 bytes rather than UTF-16 code
+units. Long words are not split. LF and its preceding whitespace become the
+selected newline; bare CR otherwise remains ordinary whitespace. Nonempty
+final lines receive a newline. Output defaults to CRLF; the
+`*_with_new_line_format()` variants accept DOS or Unix and reject Mixed without
+changing text or framing. No delimiter-owned newline is prepended to epilogues.
+Empty text clears the corresponding vector. Byte-identical folded output is
+a no-op, retaining parsed markers and truncation; other changes use the raw
+setter's framing invalidation. In particular, a changed epilogue restores a
+truncated multipart's closing delimiter. Headers and child sources are untouched.
 
 `leaf_parts()` visits leaves depth-first using an explicit stack, descending
 through attached messages as well as multiparts. Empty containers and absent
@@ -6358,6 +6377,12 @@ random generation for now. Raw preamble/epilogue bytes avoid implicit string
 decoding, and iterative leaf traversal avoids recursive enumeration. Private
 parser provenance preserves original delimiters and truncation until structural
 or framing-metadata edits require regeneration.
+Text setters adapt `Multipart.FoldPreambleOrEpilogue` and its upstream folding
+and setter-side-effect tests. UTF-8 byte widths replace UTF-16 character counts;
+explicit strict charset getters replace implicit detection and fallback.
+Epilogue text neither adds nor strips the closing delimiter's separately stored
+newline. Byte-identical folded assignments preserve parsed framing without
+depending on cached decoded strings.
 Multipart writing follows `MimeWriter.cs`'s explicit frames and
 `MimeEntity.EndsWithDelimiterNewLine` ownership rules, including truncated and
 empty-body cases. Rust retains an empty stream plus private no-content metadata

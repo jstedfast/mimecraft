@@ -1,15 +1,19 @@
+// Includes tests adapted from MimeKit's UnitTests/MultipartTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
+    borrow::Cow,
     error::Error,
     io::{self, Cursor, Read, Seek, SeekFrom},
     iter::FusedIterator,
 };
 
 use mimecraft::{
-    ContentType, Header, HeaderFormatOptions, HeaderList, HeaderParser, MimeContent, MimeEntity,
-    MimePart, Multipart, MultipartError, ParameterComplianceMode, ParameterParseOptions, TextPart,
-    encodings::NewLineFormat,
+    ContentType, Header, HeaderFormatOptions, HeaderList, HeaderParser, MimeContent,
+    MimeContentStorage, MimeEntity, MimeParser, MimePart, Multipart, MultipartError,
+    ParameterComplianceMode, ParameterParseOptions, TextPart,
+    charsets::{Charset, CharsetError},
+    encodings::{EncoderOptionsError, NewLineFormat},
 };
 
 fn multipart() -> Multipart {
@@ -127,6 +131,277 @@ fn raw_components_are_adopted_and_extracted_without_repair_or_copying() {
             .position(),
         1
     );
+}
+
+fn assert_folded_text(input: &str, expected: &str) {
+    for newline in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let expected = if newline == NewLineFormat::Dos {
+            expected.replace('\n', "\r\n")
+        } else {
+            expected.to_owned()
+        };
+        // Text operations do not require readable or seekable child sources.
+        let mut part: Multipart<()> = Multipart::new("mixed", "b").unwrap();
+        let original_headers = part.headers().clone();
+        part.set_preamble_text_with_new_line_format(input, newline)
+            .unwrap();
+        part.set_epilogue_text_with_new_line_format(input, newline)
+            .unwrap();
+        assert_eq!(part.preamble(), expected.as_bytes(), "preamble: {input:?}");
+        assert_eq!(part.epilogue(), expected.as_bytes(), "epilogue: {input:?}");
+        assert_eq!(part.preamble_text().unwrap(), expected);
+        assert_eq!(part.epilogue_text().unwrap(), expected);
+        assert_eq!(part.headers(), &original_headers);
+        assert!(part.children().is_empty());
+    }
+    let mut part: Multipart<()> = Multipart::new("mixed", "b").unwrap();
+    part.set_preamble_text(input);
+    part.set_epilogue_text(input);
+    assert_eq!(part.preamble(), expected.replace('\n', "\r\n").as_bytes());
+    assert_eq!(part.epilogue(), part.preamble());
+    part.set_preamble_text("");
+    part.set_epilogue_text("");
+    assert!(part.preamble().is_empty());
+    assert!(part.epilogue().is_empty());
+    assert_eq!(part.preamble_text().unwrap(), "");
+    assert_eq!(part.epilogue_text().unwrap(), "");
+}
+
+#[test]
+fn multiline_and_long_preamble_and_epilogue() {
+    let cases = [
+        (
+            concat!(
+                "This is a part in a (multipart) message generated with the MimeKit library.\n\n",
+                "All of the parts of this message are identical, however they've been encoded ",
+                "for transport using different methods.\n",
+            ),
+            concat!(
+                "This is a part in a (multipart) message generated with the MimeKit library.\n\n",
+                "All of the parts of this message are identical, however they've been encoded\n",
+                "for transport using different methods.\n",
+            ),
+        ),
+        (
+            concat!(
+                "This is a part in a (multipart) message generated with the MimeKit library. ",
+                "All of the parts of this message are identical, however they've been encoded ",
+                "for transport using different methods.",
+            ),
+            concat!(
+                "This is a part in a (multipart) message generated with the MimeKit library.\n",
+                "All of the parts of this message are identical, however they've been encoded\n",
+                "for transport using different methods.\n",
+            ),
+        ),
+        (
+            "This is a multipart MIME message. If you are reading this text, then it means that your mail client does not support MIME.\n",
+            "This is a multipart MIME message. If you are reading this text, then it means\nthat your mail client does not support MIME.\n",
+        ),
+        (
+            "This is a multipart epilogue.",
+            "This is a multipart epilogue.\n",
+        ),
+    ];
+    for (input, expected) in cases {
+        assert_folded_text(input, expected);
+        assert_folded_text(&input.replace('\n', "\r\n"), expected);
+    }
+}
+
+#[test]
+fn text_folding_preserves_words_and_observes_exact_soft_limits() {
+    for (input, expected) in [
+        ("", ""),
+        ("\n", "\n"),
+        ("\r\n", "\n"),
+        (" \t", " \t\n"),
+        ("one \t\r\n \t\n  two \t\n", "one\n\n  two\n"),
+        ("one\r two", "one\r two\n"),
+        ("one\r", "one\r\n"),
+        ("a\u{a0}b", "a\u{a0}b\n"),
+        ("a\u{85}b", "a\u{85}b\n"),
+    ] {
+        assert_folded_text(input, expected);
+    }
+    for (input, expected) in [
+        (
+            format!("{} y", "x".repeat(75)),
+            format!("{} y\n", "x".repeat(75)),
+        ),
+        (
+            format!("{} y", "x".repeat(76)),
+            format!("{}\ny\n", "x".repeat(76)),
+        ),
+        (
+            format!("{}\t y", "x".repeat(76)),
+            format!("{}\ny\n", "x".repeat(76)),
+        ),
+        (
+            format!("{}\u{a0}y", "x".repeat(76)),
+            format!("{}\ny\n", "x".repeat(76)),
+        ),
+        (
+            format!("{} ", "x".repeat(77)),
+            format!("{}\n", "x".repeat(77)),
+        ),
+        ("x".repeat(78), format!("{}\n", "x".repeat(78))),
+        ("x".repeat(100_000), format!("{}\n", "x".repeat(100_000))),
+        (
+            format!("{} hello", "\u{e9}".repeat(36)),
+            format!("{}\nhello\n", "\u{e9}".repeat(36)),
+        ),
+        (
+            format!("{} end", "\u{1f600}".repeat(20)),
+            format!("{}\nend\n", "\u{1f600}".repeat(20)),
+        ),
+    ] {
+        assert_folded_text(&input, &expected);
+    }
+}
+
+#[test]
+fn text_getters_decode_strictly_without_losing_raw_bytes_or_initial_newlines() {
+    let mut part: Multipart<()> = Multipart::new("mixed", "b").unwrap();
+    assert_eq!(part.preamble_text().unwrap(), "");
+    assert_eq!(part.epilogue_text().unwrap(), "");
+    let preamble = b"caf\xe9\r\n";
+    let epilogue = b"\r\ncaf\xe9\n";
+    part.set_preamble(preamble.to_vec());
+    part.set_epilogue(epilogue.to_vec());
+    assert_eq!(
+        part.preamble_text(),
+        Err(CharsetError::InvalidBytes(Charset::UTF8))
+    );
+    assert_eq!(
+        part.epilogue_text(),
+        Err(CharsetError::InvalidBytes(Charset::UTF8))
+    );
+    assert_eq!(
+        part.preamble_text_with_charset(Charset::LATIN1).unwrap(),
+        "caf\u{e9}\r\n"
+    );
+    assert_eq!(
+        part.epilogue_text_with_charset(Charset::LATIN1).unwrap(),
+        "\r\ncaf\u{e9}\n"
+    );
+    assert_eq!(part.preamble(), preamble);
+    assert_eq!(part.epilogue(), epilogue);
+    part.set_preamble_text("\u{feff}caf\u{e9}");
+    part.set_epilogue_text("\n\u{feff}caf\u{e9}");
+    assert!(matches!(
+        part.preamble_text().unwrap(),
+        Cow::Borrowed("\u{feff}caf\u{e9}\r\n")
+    ));
+    assert!(matches!(
+        part.epilogue_text().unwrap(),
+        Cow::Borrowed("\r\n\u{feff}caf\u{e9}\r\n")
+    ));
+    assert_eq!(
+        part.preamble_text_with_charset(Charset::ASCII),
+        Err(CharsetError::InvalidBytes(Charset::ASCII))
+    );
+}
+
+fn text_edit_output<R: Read + Seek>(entity: &mut MimeEntity<R>) -> Vec<u8> {
+    let mut output = Vec::new();
+    entity.write_to(&mut output).unwrap();
+    output
+}
+
+#[test]
+fn text_no_ops_and_failed_edits_preserve_parsed_framing() {
+    let wire = b"Content-Type: multipart/mixed; boundary=b\r\n\r\nold preamble\r\n\
+--b \t\r\nContent-Type: text/plain\r\n\r\nbody\r\n--b-- \t\r\n\r\nold epilogue\r\n";
+    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+        let mut entity = MimeParser::with_storage(Cursor::new(wire.as_slice()), storage)
+            .unwrap()
+            .parse_entity()
+            .unwrap();
+        let MimeEntity::Multipart(part) = &mut entity else {
+            panic!()
+        };
+        let original_headers = part.headers().clone();
+        let preamble_ptr = part.preamble().as_ptr();
+        let epilogue_ptr = part.epilogue().as_ptr();
+        part.set_preamble_text("old preamble");
+        part.set_epilogue_text("\nold epilogue");
+        assert_eq!(part.preamble().as_ptr(), preamble_ptr);
+        assert_eq!(part.epilogue().as_ptr(), epilogue_ptr);
+        for text in ["", "replacement"] {
+            assert_eq!(
+                part.set_preamble_text_with_new_line_format(text, NewLineFormat::Mixed),
+                Err(EncoderOptionsError::InvalidNewLineFormat(
+                    NewLineFormat::Mixed
+                ))
+            );
+            assert_eq!(
+                part.set_epilogue_text_with_new_line_format(text, NewLineFormat::Mixed),
+                Err(EncoderOptionsError::InvalidNewLineFormat(
+                    NewLineFormat::Mixed
+                ))
+            );
+        }
+        assert_eq!(part.preamble_text().unwrap(), "old preamble\r\n");
+        assert_eq!(part.epilogue_text().unwrap(), "\r\nold epilogue\r\n");
+        assert_eq!(part.headers(), &original_headers);
+        assert_eq!(text_edit_output(&mut entity), wire);
+        let MimeEntity::Multipart(part) = &mut entity else {
+            panic!()
+        };
+        part.set_preamble_text("new preamble");
+        part.set_epilogue_text("new epilogue");
+        assert_eq!(
+            text_edit_output(&mut entity),
+            b"Content-Type: multipart/mixed; boundary=b\r\n\r\nnew preamble\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n--b--\r\nnew epilogue\r\n"
+        );
+    }
+}
+
+#[test]
+fn changed_epilogue_restores_a_truncated_multipart_end_boundary() {
+    // A parsed multipart without an end boundary must gain one when a new
+    // epilogue is assigned; otherwise the epilogue would become child content.
+    let wire = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nbody";
+    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+        let mut entity = MimeParser::with_storage(Cursor::new(wire.as_slice()), storage)
+            .unwrap()
+            .parse_entity()
+            .unwrap();
+        let MimeEntity::Multipart(part) = &mut entity else {
+            panic!()
+        };
+        part.set_epilogue_text("");
+        assert_eq!(text_edit_output(&mut entity), wire);
+        let MimeEntity::Multipart(part) = &mut entity else {
+            panic!()
+        };
+        part.set_epilogue_text("tail");
+        let output = text_edit_output(&mut entity);
+        assert_eq!(output, [wire.as_slice(), b"\r\n--b--\r\ntail\r\n"].concat());
+        let MimeEntity::Multipart(part) = &mut entity else {
+            panic!()
+        };
+        part.set_epilogue_text("tail\r\n");
+        assert_eq!(text_edit_output(&mut entity), output);
+        let reparsed = MimeParser::new(output.as_slice()).parse_entity().unwrap();
+        let MimeEntity::Multipart(part) = reparsed else {
+            panic!()
+        };
+        assert_eq!(part.epilogue_text().unwrap(), "tail\r\n");
+        assert_eq!(part.children().len(), 1);
+        assert_eq!(
+            part.leaf_parts()
+                .next()
+                .unwrap()
+                .content()
+                .get_ref()
+                .get_ref(),
+            b"body"
+        );
+    }
 }
 
 #[test]

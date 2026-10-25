@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
+    borrow::Cow,
     error::Error,
     fmt,
     io::{self, Cursor},
@@ -10,6 +11,8 @@ use std::{
 use crate::{
     ContentEncoding, ContentHeaderParseError, ContentType, HeaderFormatError, HeaderFormatOptions,
     HeaderList, LeafParts, MimeEntity, ParameterParseOptions,
+    charsets::{Charset, CharsetError},
+    encodings::{EncoderOptionsError, NewLineFormat},
 };
 
 /// An ordered multipart container with authoritative raw headers.
@@ -20,7 +23,8 @@ use crate::{
 /// collision-free values; no random-generation dependency is introduced.
 ///
 /// Preamble and epilogue are raw bytes, not decoded strings or delimiter lines.
-/// They are stored without newline conversion or folding. An empty vector
+/// Raw setters store them without newline conversion or folding; text setters
+/// encode UTF-8 and fold at word boundaries. An empty vector
 /// represents absence. Parsed delimiter spelling and truncation are retained
 /// separately while framing metadata and child structure remain unchanged.
 /// Children share one source type but may be nested containers, attached
@@ -248,6 +252,147 @@ impl<R> Multipart<R> {
         std::mem::replace(&mut self.epilogue, bytes)
     }
 
+    /// Decodes the preamble as strict UTF-8 without changing its bytes.
+    ///
+    /// Returns an empty string for absent text. Newlines and BOMs are preserved;
+    /// no charset detection or replacement characters are used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CharsetError::InvalidBytes`] for malformed UTF-8. Use
+    /// [`Self::preamble_text_with_charset`] for a known legacy charset.
+    pub fn preamble_text(&self) -> Result<Cow<'_, str>, CharsetError> {
+        self.preamble_text_with_charset(Charset::UTF8)
+    }
+
+    /// Decodes the preamble strictly with an explicitly selected charset.
+    ///
+    /// Does not inspect Content-Type, change bytes, or access child streams.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CharsetError::InvalidBytes`] for malformed input.
+    pub fn preamble_text_with_charset(
+        &self,
+        charset: Charset,
+    ) -> Result<Cow<'_, str>, CharsetError> {
+        charset.decode(&self.preamble)
+    }
+
+    /// Decodes the epilogue as strict UTF-8 without changing its bytes.
+    ///
+    /// Like [`Self::preamble_text`], preserves newlines and BOMs. An initial
+    /// newline is content, not part of the closing delimiter, and is retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CharsetError::InvalidBytes`] for malformed UTF-8.
+    pub fn epilogue_text(&self) -> Result<Cow<'_, str>, CharsetError> {
+        self.epilogue_text_with_charset(Charset::UTF8)
+    }
+
+    /// Decodes the epilogue strictly with an explicitly selected charset.
+    ///
+    /// Does not inspect Content-Type, change bytes, or access child streams.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CharsetError::InvalidBytes`] for malformed input.
+    pub fn epilogue_text_with_charset(
+        &self,
+        charset: Charset,
+    ) -> Result<Cow<'_, str>, CharsetError> {
+        // MimeKit's RawEpilogue includes the closing boundary's newline and its
+        // text getter skips it. Our raw epilogue already excludes that framing;
+        // stripping another newline would discard actual epilogue content.
+        charset.decode(&self.epilogue)
+    }
+
+    /// Replaces the preamble with UTF-8 text folded using CRLF line endings.
+    ///
+    /// Uses [`Self::set_preamble_text_with_new_line_format`]'s folding rules.
+    /// Empty text clears the preamble. Byte-identical folded output is a no-op;
+    /// other replacements discard parsed framing as [`Self::set_preamble`] does.
+    ///
+    /// ```
+    /// use mimecraft::Multipart;
+    ///
+    /// let mut part: Multipart = Multipart::new("mixed", "boundary")?;
+    /// part.set_preamble_text("This message has multiple parts.");
+    /// assert_eq!(part.preamble_text()?, "This message has multiple parts.\r\n");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_preamble_text(&mut self, text: &str) {
+        self.set_preamble_text_with_new_line_format(text, NewLineFormat::Dos)
+            .expect("CRLF is a valid output format");
+    }
+
+    /// Replaces the preamble with UTF-8 text using explicit line endings.
+    ///
+    /// Follows MimeKit's word folding with a soft target of 78 UTF-8 bytes,
+    /// rather than UTF-16 code units. If adding a whitespace/word span would
+    /// reach or exceed the target on a nonempty line, starts a new line and
+    /// drops that word's preceding whitespace. Long words are never split.
+    /// Unicode whitespace separates words; whitespace immediately before LF
+    /// is discarded and LF becomes the selected newline. Bare CR is otherwise
+    /// preserved as whitespace, not treated as a line break.
+    ///
+    /// Nonempty final lines receive a newline; empty input stays empty.
+    /// No headers or child content are changed. Byte-identical output preserves
+    /// parsed framing; changed output discards it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncoderOptionsError::InvalidNewLineFormat`] for `Mixed`,
+    /// leaving all stored bytes and parsed framing unchanged.
+    pub fn set_preamble_text_with_new_line_format(
+        &mut self,
+        text: &str,
+        new_line_format: NewLineFormat,
+    ) -> Result<(), EncoderOptionsError> {
+        let bytes = fold_preamble_or_epilogue(text, new_line_format)?;
+        if self.preamble != bytes {
+            self.set_preamble(bytes);
+        }
+        Ok(())
+    }
+
+    /// Replaces the epilogue with UTF-8 text folded using CRLF line endings.
+    ///
+    /// Uses [`Self::set_preamble_text_with_new_line_format`]'s folding rules.
+    /// Unlike MimeKit's raw epilogue, no delimiter-owned leading newline is
+    /// inserted. Caller-supplied leading newlines are retained.
+    /// Empty text clears the epilogue; byte-identical output is a no-op.
+    pub fn set_epilogue_text(&mut self, text: &str) {
+        self.set_epilogue_text_with_new_line_format(text, NewLineFormat::Dos)
+            .expect("CRLF is a valid output format");
+    }
+
+    /// Replaces the epilogue with UTF-8 text using explicit line endings.
+    ///
+    /// Uses [`Self::set_preamble_text_with_new_line_format`]'s folding rules
+    /// without adding a delimiter-owned leading newline. A changed epilogue
+    /// discards parsed framing, restoring the closing delimiter of a truncated
+    /// multipart. Empty text already represented by an empty vector is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncoderOptionsError::InvalidNewLineFormat`] for `Mixed`,
+    /// leaving all stored bytes and parsed framing unchanged.
+    pub fn set_epilogue_text_with_new_line_format(
+        &mut self,
+        text: &str,
+        new_line_format: NewLineFormat,
+    ) -> Result<(), EncoderOptionsError> {
+        let bytes = fold_preamble_or_epilogue(text, new_line_format)?;
+        if self.epilogue != bytes {
+            // If the parsed multipart lacked an end boundary, assigning a new
+            // epilogue restores the default closing delimiter.
+            self.set_epilogue(bytes);
+        }
+        Ok(())
+    }
+
     /// Visits all descendant leaf parts in depth-first child order.
     ///
     /// Does not parse metadata, read sources, or recurse on the call stack.
@@ -421,6 +566,61 @@ pub(crate) fn checked_header_boundary(headers: &HeaderList) -> io::Result<String
         ));
     }
     Ok(boundary)
+}
+
+fn fold_preamble_or_epilogue(
+    text: &str,
+    new_line_format: NewLineFormat,
+) -> Result<Vec<u8>, EncoderOptionsError> {
+    let newline = match new_line_format {
+        NewLineFormat::Dos => "\r\n",
+        NewLineFormat::Unix => "\n",
+        NewLineFormat::Mixed => {
+            return Err(EncoderOptionsError::InvalidNewLineFormat(new_line_format));
+        }
+    };
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.char_indices().peekable();
+    let mut line_length = 0;
+    let mut index = 0;
+    while index < text.len() {
+        let mut start_index = index;
+        while let Some(&(offset, character)) = characters.peek() {
+            if !character.is_whitespace() {
+                break;
+            }
+            characters.next();
+            index = offset + character.len_utf8();
+            if character == '\n' {
+                output.push_str(newline);
+                start_index = index;
+                line_length = 0;
+            }
+        }
+        let word_index = index;
+        while let Some(&(offset, character)) = characters.peek() {
+            if character.is_whitespace() {
+                break;
+            }
+            characters.next();
+            index = offset + character.len_utf8();
+        }
+        let mut length = index - start_index;
+        if line_length > 0 && line_length + length >= 78 {
+            output.push_str(newline);
+            start_index = word_index;
+            length = index - word_index;
+            line_length = 0;
+        }
+        if length > 0 {
+            output.push_str(&text[start_index..index]);
+            line_length += length;
+        }
+    }
+    if line_length > 0 {
+        output.push_str(newline);
+    }
+    Ok(output.into_bytes())
 }
 
 pub(crate) fn check_multipart_type(value: &ContentType) -> Result<(), MultipartError> {
