@@ -7199,6 +7199,17 @@ repeated byte-exact serialization are checked in all storage modes after the
 parser is dropped. Golden comparisons account for MimeKit's logical end
 offsets: Rust retains the delimiter-preceding newline in a truncated multipart's
 physical preamble range, just as the upstream preamble callbacks do.
+Ten additional upstream multipart cases distinguish EOF at the end of an
+opening delimiter from EOF after its newline: the former retains the marker
+without inventing a child, while the latter retains an empty child. Coverage
+also includes truncated child header values/names, a closing delimiter in place
+of the header/body separator, and invalid `--`-prefixed headers that are not
+boundaries. Unix/DOS input, one-byte/short/full refills, logging, and default,
+Memory, and Source storage all preserve raw headers, body bytes, and source
+ranges. Repeated serialization with `ensure_new_line` toggled retains the
+original framing after the parser is dropped. Empty recovered leaves keep a
+missing Content-Type absent even though MimeKit classifies them as TextPart
+instances.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases remain deferred. Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source
