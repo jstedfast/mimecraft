@@ -9,6 +9,8 @@
 //! decoding with opt-in reference diagnostics, and plain/flowed HTML rendering,
 //! plus an in-memory HTML writer, known tag/attribute identifiers, checked
 //! attribute collections, and owned HTML token serialization.
+//! Enriched-text HTML conversion adds character and paragraph formatting,
+//! validated parameters, malformed-command recovery, and explicit resource limits.
 //! A byte-oriented streaming RTF tokenizer supplies owned tokens, keyword
 //! classifications, positions, and optionally capped lexical recovery callbacks.
 //! An RTF validator adds document-header and group-structure checks without
@@ -25,6 +27,7 @@
 //! HTML tokenization/filtering, HTML-input conversion, and streaming-output
 //! converters are deferred.
 
+mod enriched_to_html;
 mod flowed_to_html;
 mod flowed_to_text;
 mod header_footer_format;
@@ -55,6 +58,7 @@ mod url_scanner;
 
 use crate::encodings::NewLineFormat;
 
+pub use enriched_to_html::{EnrichedToHtml, EnrichedToHtmlError};
 pub use flowed_to_html::FlowedToHtml;
 pub use flowed_to_text::FlowedToText;
 pub use header_footer_format::HeaderFooterFormat;

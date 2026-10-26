@@ -248,6 +248,8 @@
 //! links and decorations, preserving quote-depth boundaries and `delsp` behavior.
 //! Both converters accept per-conversion [`text::HtmlTagContext`] callbacks
 //! to customize body tags and suppress link labels, paragraphs, or quotations.
+//! [`text::EnrichedToHtml`] renders decoded RFC 1896 enriched text with character
+//! styles, paragraph formatting, validated parameters, and explicit resource limits.
 //! [`io::BoundedStream`] exposes a seekable source range without copying it,
 //! suitable for storing a MIME body's subrange in [`MimeContent`].
 //! [`io::SharedStream`] coordinates read-only access through independent cursors.

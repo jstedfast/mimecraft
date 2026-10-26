@@ -95,6 +95,8 @@ MimeKit. The crate is not configured for publication.
   limits, and character-safe ellipsis truncation.
 - HTML character-data and quoted attribute encoding with decimal Unicode
   references and MimeKit-compatible control-character handling.
+- Enriched-text HTML rendering with character styles, paragraph formatting,
+  validated parameters, malformed-command recovery, and explicit resource limits.
 - HTML character-reference decoding with the complete named-entity table,
   longest-name matching, numeric-reference recovery, attribute-context rules,
   a bounded incremental decoder, and opt-in, per-violation-capped diagnostics.
@@ -4115,6 +4117,63 @@ so the callback can write its matching closing tag.
 Conversion does not modify MIME parts, decode charsets, sanitize trusted HTML,
 or expose stream APIs.
 
+### Enriched text to HTML
+
+`text::EnrichedToHtml` converts decoded RFC 1896 `text/enriched` into an HTML
+document or fragment. It does not interpret the older `text/richtext` format.
+
+```rust
+use mimecraft::text::EnrichedToHtml;
+
+let converter = EnrichedToHtml {
+    output_html_fragment: true,
+    ..EnrichedToHtml::new()
+};
+let html = converter.convert("<bold>Hello</bold> & goodbye").unwrap();
+assert_eq!(html,
+    "<div style=\"white-space: pre-wrap;\"><div><span style=\"font-weight: bold;\">Hello</span> &amp; goodbye</div></div>");
+```
+
+Character formatting includes bold, italic, underline, fixed-width and validated
+font families, named or 16-bit RGB colors, language attributes, and relative font
+sizes in one-sixth steps bounded to 1/6 through 12 times the base size. Block
+formatting includes alignment, nofill, excerpts, and four-character indentation
+steps. Nested state restores when commands close. Spaces and tabs are preserved.
+CRLF, CR, and LF are normalized: outside nofill, a single newline becomes a space
+and N consecutive newlines become N-1 breaks; inside nofill, every newline is
+retained. Block transitions avoid introducing duplicate implicit breaks.
+
+Unknown commands retain their text, but parameter content is always suppressed.
+Only immediately adjacent parameters can affect the preceding eligible command.
+Nested commands invalidate a parameter. Invalid parameters preserve inherited
+formatting; malformed command syntax is literal text. Command names are ASCII
+case-insensitive and limited to 60 characters. Unmatched ends are ignored,
+mismatched ends close intervening commands, and EOF closes remaining formatting.
+
+`max_element_depth` and `max_parameter_length` default to 4096;
+`max_input_length` and `max_output_length` default to 16 MiB and 64 MiB.
+All use `NonZeroUsize`. Lengths count **UTF-8 bytes**, not UTF-16 code units.
+Parameter lengths include suppressed content and nested command markup after
+newline normalization; `<<` counts both input bytes. Original input is checked
+before conversion. Output limits include wrappers, escaped text, and decorations.
+Limit failures return a specific `EnrichedToHtmlError` and no partial HTML.
+All conversion state is local, so the converter remains reusable after an error.
+
+The `header`, `footer`, and corresponding format fields follow `TextToHtml`:
+plain-text decorations use its link/quotation conversion; HTML decorations are
+trusted caller-supplied markup. Decorations do not count toward the input limit.
+Plain-text decorations are rendered before checking their resulting size, so
+their intermediate allocations are not bounded by the output limit.
+Body text never generates automatic links or fetches external resources.
+
+Font validation uses the existing `unicode-general-category` dependency for
+letters and decimal digits, plus spaces, hyphens, underscores, and periods.
+Rust validates complete scalars, so supplementary letters/digits are accepted
+where MimeKit's UTF-16-character check rejects their surrogate halves.
+No dependency or bundled Unicode-table changes are required.
+Stream adapters, charset conversion, tag callbacks, and automatic MIME-body
+replacement are not part of this converter.
+
 ### Delivery-status groups
 
 `MessageDeliveryStatus<R>` wraps a `MimePart<R>` whose first Content-Type is
@@ -7267,6 +7326,15 @@ space-unstuffing with `FlowedToText`, but retains its own paragraph state machin
 the source converters differ when a pending flowed paragraph is empty.
 Paragraph markup newlines default to CRLF rather than the platform newline,
 with the same checked `NewLineFormat` constructor pattern as `FlowedToText`.
+Enriched HTML rendering adapts `Text/EnrichedToHtml.cs` and
+`UnitTests/Text/EnrichedToHtmlTests.cs`, preserving the applicable scalar-buffer
+comment and the name-indexed stack rationale from `Text/HtmlTagContextStack.cs`.
+An iterative command stack, shared immutable formatting strings, and a bounded
+text buffer replace the C# reader/writer machinery. The existing HTML encoders
+escape text and attributes. All 79 upstream formatting cases, the RFC example,
+invalid parameters, exact resource thresholds, Unicode/buffer boundaries, and
+large/malformed command sequences have direct regressions. Stream-only tests
+are outside this whole-string milestone.
 Delivery-status groups adapt `MessageDeliveryStatus.cs`,
 `MimeParser.ParseStatusGroup`, `MimeReader.SkipBlankLines`, and
 `UnitTests/MessageDeliveryStatusTests.cs`; `ParserOptions.cs` supplies the

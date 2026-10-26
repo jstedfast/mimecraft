@@ -106,7 +106,7 @@ The library's direct dependencies are listed in [Cargo.toml](Cargo.toml):
 | [getrandom](https://github.com/rust-random/getrandom) | Operating-system randomness for generated Message-Ids and multipart boundaries. |
 | [idna](https://github.com/servo/rust-url) | Internationalized domain-name conversion and raw Punycode encoding/decoding for SMTPUTF8 validation. |
 | [memchr](https://github.com/BurntSushi/memchr) | Optimized byte searches in MIME parsing, newline scanning, and transfer-encoding compliance checks. |
-| [unicode-general-category](https://github.com/yeslogic/unicode-general-category) | Unicode character classification for URL and email-address recognition in text-to-HTML conversion. |
+| [unicode-general-category](https://github.com/yeslogic/unicode-general-category) | Unicode character classification for URL/email recognition and enriched-text font-family validation. |
 
 SMTPUTF8 policy and NFC checking use separately bundled Unicode tables, not
 `unicode-general-category`'s data. See the
