@@ -2623,10 +2623,65 @@ The collections are `Vec<MimeEntity>` using the default `Cursor<Vec<u8>>`
 storage. Entities are moved without copying or reading their content; headers,
 stored encoding, parsed framing, and source positions remain unchanged. Supply
 filenames, dispositions, Content-Ids, and Content-Locations explicitly before
-building. File/stream attachment-loading convenience APIs remain unported.
+building, or use the standalone `attachment` helpers below.
 Construction errors include formatting and OS-randomness failures and retain
 their underlying causes. On failure, the consumed builder and its entities
 are dropped rather than returning a partial body.
+
+### Constructing attachments and linked resources
+
+`attachment::from_bytes`, `from_reader`, and `from_file` return owned in-memory
+entities for ordinary vectors, including `BodyBuilder`'s collections. Their
+`_with_options` counterparts accept `&AttachmentOptions` to override the inferred
+Content-Type, mark a linked resource, or configure input/message-parser limits.
+
+```rust
+use mimecraft::{AttachmentOptions, BodyBuilder, attachment};
+
+let mut builder = BodyBuilder {
+    html_body: Some("<p>Report</p><img src=\"logo.png\">".into()),
+    ..BodyBuilder::new()
+};
+builder.attachments.push(attachment::from_bytes("report.txt", b"report\r\n").unwrap());
+let inline = AttachmentOptions {
+    linked_resource: true,
+    ..AttachmentOptions::default()
+};
+builder.linked_resources.push(
+    attachment::from_file_with_options("logo.png", &inline).unwrap()
+);
+let body = builder.into_message_body().unwrap();
+```
+
+MIME types are inferred from the final filename extension using `MimeTypes`;
+unknown extensions become application/octet-stream. Both slash styles are
+recognized in filename metadata. The Content-Type `name` and disposition
+`filename` contain only the basename. Linked resources receive inline disposition
+and an escaped relative Content-Location; other attachments receive attachment
+disposition. Content-Ids are never generated. Literal URI syntax and UTF-8
+filename bytes are percent-encoded; an escaped location may contain at most
+997 bytes so its folded header respects the 998-byte physical-line limit.
+Empty, whitespace-only, dot-component, or control-containing names are rejected.
+File paths require a Unicode filename.
+
+Text attachments use the existing seven-bit encoding heuristic with a 78-column
+content-line threshold; other opaque types request Base64. Stored bytes remain
+unencoded, with no charset guessing or transcoding. Explicit Content-Type
+parameters are retained except `name`. A message/rfc822 attachment instead parses
+into a fresh `MessagePart` with filename metadata and no transfer-encoding header.
+Its supplied type parameters are not retained. Unlike MimeKit's inferred-message
+fallback, malformed messages return parsing errors; explicitly select
+application/octet-stream to retain them as opaque data.
+
+All inputs are copied and bounded by `AttachmentOptions::parse_options.max_input_bytes`
+(64 MiB by default); other parser limits apply to embedded messages. All numeric
+limits and metadata are validated before I/O. Borrowed readers need only `Read`,
+start at their current position, and are not closed or rewound. Limit detection
+consumes at most one excess byte, while an exact-limit input still probes EOF.
+Parsing occurs after the bounded copy. Errors return no partial entity and retain
+their causes; file handles are closed before return. Input budgets do not bound
+decoded payloads or total allocation overhead. Async loading, streaming-backed
+attachments, and collection wrappers are not provided.
 
 ### Text-body selection
 
@@ -6911,7 +6966,15 @@ Owned vectors and consuming construction replace shared mutable attachment
 collections. Existing text and multipart helpers supply strict encoding,
 generated boundaries, and related-root metadata; upstream default, charset,
 and attachment cases accompany combination and serialization regressions.
-Attachment file-loading helpers remain separate from this assembly port.
+Standalone attachment helpers adapt `AttachmentCollection.cs` and its synchronous
+`UnitTests/AttachmentCollectionTests.cs` cases, using the original `girl.jpg` and
+`lorem-ipsum.txt` fixtures in `tests/data/attachments` and existing message fixtures.
+They preserve the applicable charset-detection TODO and filename, disposition,
+encoding-selection, and embedded-message behavior. Ordinary vectors replace
+collection wrappers; malformed inferred messages intentionally return errors,
+with explicit binary attachment as the opt-in alternative. Bounded nonseekable
+reads, escaped resource locations, and source-lifetime regressions accompany
+the upstream byte/reader/file cases.
 Alternative multipart bodies adapt `MultipartAlternative.cs` and
 `UnitTests/MultipartAlternativeTests.cs`. Composition replaces inheritance;
 one format-taking read method covers the source's plain/HTML properties and

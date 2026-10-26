@@ -90,6 +90,8 @@
 //! sharing nested-container rules and preserving parsed framing during decoding.
 //! [`BodyBuilder`] assembles owned in-memory text alternatives, linked resources,
 //! and attachments into common MIME layouts, with configurable text encoding.
+//! [`attachment`] constructs in-memory attachments from bytes, readers, or files,
+//! with filename metadata, inline resources, and bounded embedded-message parsing.
 //! [`MultipartRelated`] shares text-body root selection and adds atomic root
 //! replacement with checked type/start parameters and automatic missing IDs
 //! for non-first roots. It also exposes direct preferred-text-body selection.
@@ -348,6 +350,7 @@ mod address_encode;
 mod address_header_format;
 mod address_list;
 pub mod anonymize;
+pub mod attachment;
 mod body_builder;
 pub mod charsets;
 mod content_disposition;
@@ -413,6 +416,7 @@ pub use address::{Address, AddressParseError, AddressParseErrorKind, AddressPars
 pub use address_encode::{AddressEncodeError, AddressEncodeErrorKind};
 pub use address_header_format::{AddressHeaderFormatError, AddressHeaderFormatOptions};
 pub use address_list::{AddressList, Mailboxes};
+pub use attachment::{AttachmentError, AttachmentOptions};
 pub use body_builder::{BodyBuilder, BodyBuilderError};
 pub use content_disposition::{ContentDisposition, ContentDispositionSizeError};
 pub use content_encoding::{ContentEncoding, UnknownContentEncoding};

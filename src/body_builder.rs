@@ -13,7 +13,8 @@ use crate::{
 /// Plain text precedes HTML in multipart/alternative. Linked resources accompany
 /// HTML in multipart/related; attachments follow the body in multipart/mixed.
 /// Construction consumes the builder and moves entities rather than cloning
-/// their headers or content. File-loading convenience methods are not provided.
+/// their headers or content. The standalone [`crate::attachment`] helpers create
+/// attachments and linked resources from bytes, readers, or files.
 ///
 /// ```
 /// use mimecraft::{BodyBuilder, MimeMessage, TextFormat};
