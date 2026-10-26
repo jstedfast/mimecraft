@@ -230,6 +230,9 @@ impl<R: Read + Seek> MessagePart<R> {
     /// text/rfc822-headers Content-Type and an absent, 7bit, 8bit, or binary
     /// transfer encoding. Returned-header wrappers use the same traversal;
     /// an existing contained body is not discarded.
+    /// Unchanged parsed empty/unknown transfer-encoding headers retain the
+    /// reader's unspecified interpretation; authored or edited invalid values
+    /// remain errors.
     /// Writing through a multipart/digest parent also accepts a missing
     /// Content-Type on its immediate message-part children. Standalone writing
     /// still requires an explicit type; add one before detaching such a child.

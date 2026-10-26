@@ -35,6 +35,9 @@ use crate::{
 /// recognized, transparently encoded message types by default. Set
 /// [`crate::MimeEntityParseOptions::parse_message_parts`] to false to retain
 /// all message parts as opaque leaves instead.
+/// Unchanged parsed empty/unknown transfer-encoding values retain the reader's
+/// unspecified interpretation when writing. Authored or edited invalid values
+/// remain errors.
 ///
 /// Untyped children of multipart/digest are implicitly message/rfc822. Loading
 /// retains their absent Content-Type header, and writing through that digest
@@ -63,6 +66,7 @@ pub struct MessagePart<R = Cursor<Vec<u8>>> {
     headers: HeaderList,
     pub(crate) message: Option<Box<MimeMessage<R>>>,
     pub(crate) parsed: Option<crate::mime_entity::ParsedEntity>,
+    pub(crate) recovered_encoding: Option<Vec<u8>>,
 }
 
 impl<R> MessagePart<R> {
@@ -99,6 +103,7 @@ impl<R> MessagePart<R> {
             headers,
             message: message.map(Box::new),
             parsed: None,
+            recovered_encoding: None,
         }
     }
 
@@ -293,8 +298,11 @@ pub(crate) fn check_message_part<R>(part: &MessagePart<R>, digest_child: bool) -
             MessagePartError::MissingContentType,
         ));
     }
-    let encoding = crate::mime_part::transfer_encoding(part.headers())
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let encoding = crate::mime_part::transfer_encoding_for_write(
+        part.headers(),
+        part.recovered_encoding.as_deref(),
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if !matches!(
         encoding,
         ContentEncoding::Unspecified

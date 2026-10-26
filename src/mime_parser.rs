@@ -705,6 +705,15 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                 else {
                     unreachable!("entity end matches an entity frame");
                 };
+                let recovered_encoding = crate::mime_part::transfer_encoding(&headers)
+                    .is_err()
+                    .then(|| {
+                        headers
+                            .get("Content-Transfer-Encoding")
+                            .expect("invalid encoding header")
+                            .raw_value()
+                            .to_vec()
+                    });
                 let mut entity: MimeEntity<C> = match (kind, content) {
                     (
                         MimeEntityKind::Part,
@@ -735,15 +744,6 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                         )?;
                         let mut body = MimeContent::with_encoding(source, encoding);
                         body.set_new_line_format(new_line_format);
-                        let recovered_encoding = crate::mime_part::transfer_encoding(&headers)
-                            .is_err()
-                            .then(|| {
-                                headers
-                                    .get("Content-Transfer-Encoding")
-                                    .expect("invalid encoding header")
-                                    .raw_value()
-                                    .to_vec()
-                            });
                         let mut part = MimePart::from_parts(headers, body);
                         part.recovered_encoding = recovered_encoding;
                         part.into()
@@ -795,7 +795,9 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                             && self
                                 .end_boundary
                                 .is_none_or(|boundary| boundary.offset <= headers_end.offset);
-                        MessagePart::from_parts(headers, message).into()
+                        let mut part = MessagePart::from_parts(headers, message);
+                        part.recovered_encoding = recovered_encoding;
+                        part.into()
                     }
                     _ => unreachable!("entity end matches its begin kind"),
                 };

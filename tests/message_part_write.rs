@@ -353,6 +353,121 @@ fn wrapper_metadata_is_checked_before_its_output_even_without_a_message() {
 }
 
 #[test]
+fn parsed_unknown_wrapper_encodings_are_preserved_only_while_unchanged() {
+    for value in ["", " \t", "unknown"] {
+        for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+            let raw = format!(
+                "Content-Type: message/rfc822{newline}\
+                 Content-Transfer-Encoding:{value}{newline}{newline}\
+                 Subject: attached{newline}{newline}body"
+            );
+            let MimeEntity::Message(mut part) = MimeEntity::load(&mut raw.as_bytes()).unwrap()
+            else {
+                panic!("unknown encoding should recover as a transparent wrapper")
+            };
+            let original_headers = part.headers().clone();
+            for ensure in [false, true, false] {
+                let expected = if ensure {
+                    format!("{raw}{newline}")
+                } else {
+                    raw.clone()
+                };
+                assert_eq!(wire(&mut part, format, ensure), expected.as_bytes());
+                assert_eq!(part.headers(), &original_headers);
+            }
+            let mut content = Vec::new();
+            part.write_content_to_with_options(
+                &mut content,
+                &MimePartWriteOptions {
+                    new_line_format: format,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                content,
+                format!("Subject: attached{newline}{newline}body").as_bytes()
+            );
+
+            // Editing the contained message or unrelated wrapper metadata does
+            // not change how the original transfer-encoding value was recovered.
+            part.message_mut()
+                .unwrap()
+                .headers_mut()
+                .add(Header::parse(b"X-Inner: edited\n").unwrap());
+            part.headers_mut()
+                .add(Header::parse(b"X-Wrapper: edited\n").unwrap());
+            assert!(wire(&mut part, format, false).ends_with(b"body"));
+            for replacement in [
+                "different-unknown",
+                "base64",
+                "quoted-printable",
+                "x-uuencode",
+            ] {
+                part.headers_mut()
+                    .replace_all(
+                        Header::parse(
+                            format!("Content-Transfer-Encoding: {replacement}\n").as_bytes(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                for content_only in [false, true] {
+                    let mut sink = Sink::default();
+                    let error = if content_only {
+                        part.write_content_to(&mut sink)
+                    } else {
+                        part.write_to(&mut sink)
+                    }
+                    .unwrap_err();
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                    assert_eq!(sink.calls + sink.flushes, 0);
+                    if replacement == "different-unknown" {
+                        assert!(
+                            error
+                                .get_ref()
+                                .unwrap()
+                                .downcast_ref::<UnknownContentEncoding>()
+                                .is_some()
+                        );
+                    }
+                }
+            }
+            part.headers_mut().remove_all("Content-Transfer-Encoding");
+            assert!(wire(&mut part, format, false).ends_with(b"body"));
+            part.headers_mut()
+                .add(Header::parse(b"Content-Transfer-Encoding: 7bit\n").unwrap());
+            assert!(wire(&mut part, format, false).ends_with(b"body"));
+        }
+    }
+}
+
+#[test]
+fn authored_empty_or_unknown_wrapper_encodings_remain_errors() {
+    for value in ["", " \t", "unknown"] {
+        let raw = format!("Content-Type: message/rfc822\nContent-Transfer-Encoding:{value}\n");
+        let mut part: MessagePart = MessagePart::from_parts(headers(raw.as_bytes()), None);
+        for content_only in [false, true] {
+            let mut sink = Sink::default();
+            let error = if content_only {
+                part.write_content_to(&mut sink)
+            } else {
+                part.write_to(&mut sink)
+            }
+            .unwrap_err();
+            assert!(
+                error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<UnknownContentEncoding>()
+                    .is_some()
+            );
+            assert_eq!(sink.calls + sink.flushes, 0);
+        }
+    }
+}
+
+#[test]
 fn transparent_wrapper_encodings_and_truncated_records_are_preserved() {
     for encoding in ["7bit", "8bit", "binary"] {
         let raw = format!("Content-Type: message/global\nContent-Transfer-Encoding: {encoding}");

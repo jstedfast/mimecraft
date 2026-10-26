@@ -1070,3 +1070,21 @@ pub(crate) fn transfer_encoding(
         None => Ok(ContentEncoding::Unspecified),
     }
 }
+
+pub(crate) fn transfer_encoding_for_write(
+    headers: &HeaderList,
+    recovered: Option<&[u8]>,
+) -> Result<ContentEncoding, UnknownContentEncoding> {
+    // Preserve an unchanged unknown encoding using the reader's default,
+    // rather than rejecting bytes that were accepted during parsing.
+    // Newly authored or edited invalid metadata still fails validation.
+    if recovered.is_some_and(|original| {
+        headers
+            .get("Content-Transfer-Encoding")
+            .is_some_and(|header| header.raw_value() == original)
+    }) {
+        Ok(ContentEncoding::Unspecified)
+    } else {
+        transfer_encoding(headers)
+    }
+}

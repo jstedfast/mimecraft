@@ -4596,6 +4596,12 @@ The wrapper requires a valid message/* or text/rfc822-headers Content-Type,
 except for an implicit message/rfc822 child written through a multipart/digest
 parent, and an absent, 7bit, 8bit, or binary transfer encoding. Byte-range
 restrictions are not checked.
+Parsed empty or unknown transfer-encoding headers retain the reader's
+`Unspecified` interpretation while their first raw value is unchanged, using
+the same recovery guard as ordinary leaf writers. Unrelated wrapper or message
+edits preserve that interpretation. Authored or changed invalid values still
+fail before wrapper output, including content-only writes; replacing the header
+with Base64, quoted-printable, or UU still rejects a structured wrapper.
 Base64/quoted-printable/UU wrapper encoding, including for message/global,
 is not implemented and returns an error rather than misleading output.
 Use opaque encoded leaves for these representations. Inner leaf transfer
@@ -4605,6 +4611,8 @@ beyond the constructor's Content-Type, and Bcc fields are not hidden.
 `MimeEntity::load` and `MimeMessage::load` recognize message/rfc822, news,
 global, global-headers, external-body, and rfc2822, plus text/rfc822-headers,
 ignoring case, when the wrapper encoding is absent, 7bit, 8bit, or binary.
+Empty or unknown encoding values also recover as unspecified, with their raw
+headers and compliance diagnostics retained.
 Each becomes a `MessagePart`
 whose inner message owns its non-Content headers and whose body owns its
 Content-* headers. Input, header, and depth limits apply throughout the tree;
@@ -7221,6 +7229,21 @@ source ranges, and repeatable serialization after dropping the parser, across
 Unix/DOS newlines, short refills, logging, and all storage modes. Applicable
 MimeKit serialization comments are retained. Existing parsing and serialization
 behavior satisfies these cases without production changes.
+Eight additional message/rfc822 cases cover wrappers truncated after their
+headers or followed immediately by a closing delimiter; complete, EOF-only,
+and truncated munged From-markers; transparent wrappers with absent or empty
+transfer encoding; and opaque Base64 wrappers decoded and reparsed explicitly.
+They run with Unix/DOS newlines, one-byte/short/full refills, logging, and
+default/Memory/Source storage, checking topology, metadata, raw bodies/source
+ranges, and repeated serialization after the parser is dropped. The munged
+message reuses the exact upstream inline fixture from the existing mbox corpus.
+Rust keeps embedded From-markers as invalid raw headers rather than a separate
+message marker property. EOF-only markers remain unterminated even with
+`ensure_new_line`, matching MimeKit's verbatim marker and absent-content rules.
+The empty-encoding regression exposed and fixed wrapper serialization rejecting
+unchanged recovered encoding headers. Focused writer cases also enforce strict
+validation of authored/changed values without invalidating recovery on unrelated
+edits. Applicable upstream comments and compatibility rationale are retained.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases remain deferred. Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source

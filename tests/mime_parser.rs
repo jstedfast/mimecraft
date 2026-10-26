@@ -1766,7 +1766,7 @@ fn assert_truncated_multipart(subject: &str, body: &str, children: &[(&str, &str
                     .unwrap();
                     let message = parse_truncated_multipart(parser, &input, logged);
                     assert_stored_recovery_bodies(
-                        &message,
+                        message.leaf_parts(),
                         &input,
                         storage,
                         children.iter().map(|(_, body)| body.as_str()),
@@ -1778,13 +1778,12 @@ fn assert_truncated_multipart(subject: &str, body: &str, children: &[(&str, &str
     }
 }
 
-fn assert_stored_recovery_bodies<'a, R: Read + Seek>(
-    message: &MimeMessage<mimecraft::MimeContentStream<R>>,
+fn assert_stored_recovery_bodies<'a, 'b, R: Read + Seek + 'b>(
+    mut parts: impl Iterator<Item = &'b mimecraft::MimePart<mimecraft::MimeContentStream<R>>>,
     input: &str,
     storage: MimeContentStorage,
     expected: impl IntoIterator<Item = &'a str>,
 ) {
-    let mut parts = message.leaf_parts();
     for expected in expected {
         let part = parts.next().expect("missing recovered leaf");
         match part.content().get_ref() {
@@ -1880,6 +1879,16 @@ fn assert_recovery_serialization<R: Read + Seek>(
     input: &str,
     format: NewLineFormat,
 ) {
+    assert_recovery_output(input, format, |output, options| {
+        message.write_to_with_options(output, options)
+    });
+}
+
+fn assert_recovery_output(
+    input: &str,
+    format: NewLineFormat,
+    mut write: impl FnMut(&mut Vec<u8>, &MimePartWriteOptions) -> io::Result<()>,
+) {
     let newline = match format {
         NewLineFormat::Dos => "\r\n",
         NewLineFormat::Unix => "\n",
@@ -1894,18 +1903,17 @@ fn assert_recovery_serialization<R: Read + Seek>(
     // Make sure that EnsureNewLine did not leave any state behind.
     for ensure_new_line in [false, true, false] {
         let mut output = Vec::new();
-        message
-            .write_to_with_options(
-                &mut output,
-                &MimePartWriteOptions {
-                    new_line_format: format,
-                    ensure_new_line,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        write(
+            &mut output,
+            &MimePartWriteOptions {
+                new_line_format: format,
+                ensure_new_line,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_round_trip(
-            "multipart recovery",
+            "parser recovery",
             if ensure_new_line {
                 ensured.as_bytes()
             } else {
@@ -2110,7 +2118,7 @@ fn assert_nested_multipart_recovery(original: &str, parent_boundary: bool) {
                     .unwrap();
                     let message = parse_truncated_multipart(parser, &input, logged);
                     assert_stored_recovery_bodies(
-                        &message,
+                        message.leaf_parts(),
                         &input,
                         storage,
                         expected.iter().map(|(_, body)| body.as_str()),
@@ -2424,6 +2432,467 @@ fn multipart_subpart_headers_line_starts_with_dash_dash_eof() {
         &format!("--{TRUNCATED_MULTIPART_BOUNDARY}\n{headers}"),
         &[(&headers, "")],
     );
+}
+
+#[test]
+fn truncated_immediately_after_message_rfc822_headers() {
+    assert_empty_message_rfc822(false);
+}
+
+#[test]
+fn message_rfc822_without_message() {
+    assert_empty_message_rfc822(true);
+}
+
+fn assert_empty_message_rfc822(closing_boundary: bool) {
+    let subject = if closing_boundary {
+        "test of message/rfc822 part without a message"
+    } else {
+        "test of message/rfc822 part truncated immediately after the MIME headers"
+    };
+    let length = if closing_boundary {
+        "Content-Length: 420\n"
+    } else {
+        ""
+    };
+    let ending = if closing_boundary {
+        format!("--{TRUNCATED_MULTIPART_BOUNDARY}--\n")
+    } else {
+        String::new()
+    };
+    let original = format!(
+        "From: mimekit@example.com\n\
+         To: mimekit@example.com\n\
+         Subject: {subject}\n\
+         Date: Tue, 12 Nov 2013 09:12:42 -0500\n\
+         MIME-Version: 1.0\n\
+         Message-ID: <54AD68C9E3B0184CAC6041320424FD1B5B81E74D@localhost.localdomain>\n\
+         X-Mailer: Microsoft Office Outlook 12.0\n\
+         Content-Type: multipart/mixed;\n\
+         \tboundary=\"{TRUNCATED_MULTIPART_BOUNDARY}\"\n{length}\n\n\
+         --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+         {TRUNCATED_PART_BODY}\n\
+         --{TRUNCATED_MULTIPART_BOUNDARY}\nContent-Type: message/rfc822\n\n{ending}"
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let body = TRUNCATED_PART_BODY.replace('\n', newline);
+        for chunk in [1, 2, 7, 4096] {
+            for logged in [false, true] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let message = parse_truncated_multipart(parser, &input, logged);
+                assert_empty_message_rfc822_model(message, &input, format, &body);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let message = parse_truncated_multipart(parser, &input, logged);
+                    assert_stored_recovery_bodies(
+                        message.leaf_parts(),
+                        &input,
+                        storage,
+                        [body.as_str()],
+                    );
+                    assert_empty_message_rfc822_model(message, &input, format, &body);
+                }
+            }
+        }
+    }
+}
+
+fn assert_empty_message_rfc822_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    format: NewLineFormat,
+    body: &str,
+) {
+    let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+        panic!("expected multipart")
+    };
+    assert_eq!(multipart.children().len(), 2);
+    let MimeEntity::Message(wrapper) = &multipart.children()[1] else {
+        panic!("expected empty message/rfc822 wrapper")
+    };
+    assert_eq!(wrapper.headers().len(), 1);
+    assert!(
+        wrapper
+            .content_type()
+            .unwrap()
+            .unwrap()
+            .is_mime_type("message", "rfc822")
+    );
+    assert!(wrapper.message().is_none());
+    assert_eq!(message.leaf_parts().count(), 1);
+    assert_recovery_serialization(&mut message, input, format);
+    let MimeEntity::Multipart(multipart) = message.body_mut().unwrap() else {
+        unreachable!()
+    };
+    let MimeEntity::Part(part) = &mut multipart.children_mut()[0] else {
+        panic!("expected first text/plain child")
+    };
+    assert_plain_utf8_body(part, body);
+}
+
+fn munged_rfc822_message() -> String {
+    // MimeKit's inline regression uses this message from its Content-Length
+    // corpus, without the extra blank line before the next mbox message.
+    let corpus = include_str!("data/mbox/content-length.mbox.txt").replace("\r\n", "\n");
+    let start = corpus.find("From - Fri Mar  7 02:51:22 1997\n").unwrap();
+    let end = start + corpus[start..].find("\nFrom ").unwrap();
+    format!("{}\n", corpus[start..end].trim_end_matches('\n'))
+}
+
+#[test]
+fn message_rfc822_with_munged_from_marker_before_message() {
+    assert_munged_rfc822(&munged_rfc822_message(), true);
+}
+
+#[test]
+fn message_rfc822_with_munged_from_marker_eof() {
+    let original = munged_rfc822_message();
+    let end = original
+        .find("\nReturn-Path: <blaker@craswell.com>")
+        .unwrap();
+    assert_munged_rfc822(&original[..end], false);
+}
+
+#[test]
+fn message_rfc822_with_truncated_munged_from_marker() {
+    let original = munged_rfc822_message();
+    let end = original.find(">From ").unwrap() + ">From".len();
+    assert_munged_rfc822(&original[..end], false);
+}
+
+fn assert_munged_rfc822(original: &str, complete: bool) {
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let body = if complete {
+            input.rsplit_once(&format!("{newline}{newline}")).unwrap().1
+        } else {
+            ""
+        };
+        for chunk in [1, 2, 7, 4096] {
+            for logged in [false, true] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let message = parse_munged_rfc822(parser, &input, logged);
+                assert_munged_rfc822_model(message, &input, format, complete);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let message = parse_munged_rfc822(parser, &input, logged);
+                    assert_stored_recovery_bodies(message.leaf_parts(), &input, storage, [body]);
+                    assert_munged_rfc822_model(message, &input, format, complete);
+                }
+            }
+        }
+    }
+}
+
+fn parse_munged_rfc822<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    logged: bool,
+) -> MimeMessage<C> {
+    let message = if logged {
+        parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_mbox_message()
+    }
+    .unwrap()
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    assert!(parser.parse_mbox_message().unwrap().is_none());
+    message
+}
+
+fn assert_munged_rfc822_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    format: NewLineFormat,
+    complete: bool,
+) {
+    let MimeEntity::Message(wrapper) = message.body().unwrap() else {
+        panic!("expected message/rfc822 wrapper")
+    };
+    let content_type = wrapper.content_type().unwrap().unwrap();
+    assert!(content_type.is_mime_type("message", "rfc822"));
+    assert_eq!(content_type.name(), Some("smime18-encrypted.msg"));
+    let disposition = wrapper
+        .headers()
+        .get("Content-Disposition")
+        .unwrap()
+        .parse_content_disposition()
+        .unwrap();
+    assert_eq!(disposition.disposition(), "inline");
+    assert_eq!(disposition.file_name(), Some("smime18-encrypted.msg"));
+    assert_eq!(
+        wrapper
+            .headers()
+            .get("Content-Transfer-Encoding")
+            .unwrap()
+            .decode_value()
+            .text,
+        "7bit"
+    );
+    let embedded = wrapper.message().unwrap();
+    // The Rust raw-header model retains the munged From-line as an invalid
+    // header rather than exposing MimeKit's separate Message.MboxMarker.
+    let marker_start = input.find(">From").unwrap();
+    let marker_end = input[marker_start..]
+        .find('\n')
+        .map_or(input.len(), |offset| marker_start + offset + 1);
+    let marker = embedded.headers().iter().next().unwrap();
+    assert!(marker.is_invalid());
+    assert_eq!(
+        marker.raw_field(),
+        &input.as_bytes()[marker_start..marker_end]
+    );
+    assert!(marker.raw_value().is_empty());
+    assert_eq!(embedded.headers().len(), if complete { 15 } else { 1 });
+    assert_eq!(
+        embedded
+            .headers()
+            .iter()
+            .filter(|header| !header.is_invalid())
+            .count(),
+        if complete { 14 } else { 0 }
+    );
+    let MimeEntity::Part(part) = embedded.body().unwrap() else {
+        panic!("expected embedded leaf")
+    };
+    assert_eq!(part.headers().len(), if complete { 3 } else { 0 });
+    if complete {
+        assert!(
+            part.content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("application", "x-pkcs7-mime")
+        );
+        assert_eq!(
+            part.content().encoding(),
+            mimecraft::ContentEncoding::Base64
+        );
+    } else {
+        assert!(part.content_type().unwrap().is_none());
+    }
+    let expected = &input[input.find('\n').unwrap() + 1..];
+    // Top-level mbox markers belong to the parser, not the serialized message.
+    if complete {
+        assert_recovery_serialization(&mut message, expected, format);
+    } else {
+        // MimeKit writes the marker verbatim, and null Content writes no body,
+        // even with EnsureNewLine. Do not invent a newline after the marker.
+        for ensure_new_line in [false, true, false] {
+            let mut output = Vec::new();
+            message
+                .write_to_with_options(
+                    &mut output,
+                    &MimePartWriteOptions {
+                        new_line_format: format,
+                        ensure_new_line,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_round_trip("munged marker at EOF", expected.as_bytes(), &output);
+        }
+    }
+    let MimeEntity::Message(wrapper) = message.body_mut().unwrap() else {
+        unreachable!()
+    };
+    let MimeEntity::Part(part) = wrapper.message_mut().unwrap().body_mut().unwrap() else {
+        unreachable!()
+    };
+    let mut stored = Vec::new();
+    part.content_mut().write_to(&mut stored).unwrap();
+    let expected = if complete {
+        let newline = if format == NewLineFormat::Dos {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        input.rsplit_once(&format!("{newline}{newline}")).unwrap().1
+    } else {
+        ""
+    };
+    assert_eq!(stored, expected.as_bytes());
+}
+
+const RFC822_MESSAGE: &str = concat!(
+    "From: mimekit@example.com\n",
+    "To: mimekit@example.com\n",
+    "Subject: embedded message\n",
+    "Date: Tue, 12 Nov 2013 09:12:42 -0500\n",
+    "MIME-Version: 1.0\n",
+    "Content-Type: text/plain; charset=utf-8\n\n",
+    "This is the rfc822 message body.\n",
+);
+const RFC822_BASE64: &str = concat!(
+    "RnJvbTogbWltZWtpdEBleGFtcGxlLmNvbQpUbzogbWltZWtpdEBleGFtcGxlLmNvbQpTdWJqZWN0\n",
+    "OiBlbWJlZGRlZCBtZXNzYWdlCkRhdGU6IFR1ZSwgMTIgTm92IDIwMTMgMDk6MTI6NDIgLTA1MDAK\n",
+    "TUlNRS1WZXJzaW9uOiAxLjAKQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04\n",
+    "CgpUaGlzIGlzIHRoZSByZmM4MjIgbWVzc2FnZSBib2R5Lgo=\n",
+);
+
+#[test]
+fn message_rfc822() {
+    assert_rfc822_entity("", false);
+}
+
+#[test]
+fn message_rfc822_with_content_transfer_encoding() {
+    assert_rfc822_entity("Content-Transfer-Encoding: \n", false);
+}
+
+#[test]
+fn message_rfc822_with_content_transfer_encoding_base64() {
+    assert_rfc822_entity("Content-Transfer-Encoding: base64\n", true);
+}
+
+fn assert_rfc822_entity(encoding_header: &str, encoded: bool) {
+    let original = format!(
+        "Content-Type: message/rfc822\n{encoding_header}\n{}",
+        if encoded {
+            RFC822_BASE64
+        } else {
+            RFC822_MESSAGE
+        }
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let stored = if encoded {
+            RFC822_BASE64
+        } else {
+            "This is the rfc822 message body.\n"
+        }
+        .replace('\n', newline);
+        for chunk in [1, 2, 7, 4096] {
+            for logged in [false, true] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let entity = parse_rfc822_entity(parser, &input, logged);
+                assert_rfc822_entity_model(entity, &input, format, encoded);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let entity = parse_rfc822_entity(parser, &input, logged);
+                    assert_stored_recovery_bodies(
+                        entity.leaf_parts(),
+                        &input,
+                        storage,
+                        [stored.as_str()],
+                    );
+                    assert_rfc822_entity_model(entity, &input, format, encoded);
+                }
+            }
+        }
+    }
+}
+
+fn parse_rfc822_entity<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    logged: bool,
+) -> MimeEntity<C> {
+    let entity = if logged {
+        parser.parse_entity_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_entity()
+    }
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    entity
+}
+
+fn assert_rfc822_entity_model<R: Read + Seek>(
+    mut entity: MimeEntity<R>,
+    input: &str,
+    format: NewLineFormat,
+    encoded: bool,
+) {
+    assert_recovery_output(input, format, |output, options| {
+        entity.write_to_with_options(output, options)
+    });
+    if encoded {
+        let MimeEntity::Part(part) = &mut entity else {
+            panic!("encoded message/rfc822 must remain an opaque leaf")
+        };
+        assert!(
+            part.content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("message", "rfc822")
+        );
+        assert_eq!(
+            part.content().encoding(),
+            mimecraft::ContentEncoding::Base64
+        );
+        // MimeKit opens the decoded content and parses it as a new message.
+        // Changing the wrapper's newlines must not change its encoded payload.
+        let mut message = MimeParser::new(part.content_mut().open().unwrap())
+            .parse_message()
+            .unwrap();
+        assert_recovery_serialization(&mut message, RFC822_MESSAGE, NewLineFormat::Unix);
+        assert_rfc822_message_body(&mut message, "\n");
+        // Reading the decoded view must not prevent a later byte-exact write.
+        assert_recovery_output(input, format, |output, options| {
+            entity.write_to_with_options(output, options)
+        });
+    } else {
+        let MimeEntity::Message(wrapper) = &mut entity else {
+            panic!("expected transparent message/rfc822 wrapper")
+        };
+        assert!(
+            wrapper
+                .content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("message", "rfc822")
+        );
+        let newline = if format == NewLineFormat::Dos {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        assert_rfc822_message_body(wrapper.message_mut().unwrap(), newline);
+    }
+}
+
+fn assert_rfc822_message_body<R: Read + Seek>(message: &mut MimeMessage<R>, newline: &str) {
+    assert_eq!(message.headers().len(), 5);
+    assert_eq!(message.subject().unwrap().text, "embedded message");
+    let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+        panic!("expected embedded text/plain leaf")
+    };
+    assert_plain_utf8_body(part, &format!("This is the rfc822 message body.{newline}"));
+}
+
+fn assert_plain_utf8_body<R: Read + Seek>(part: &mut mimecraft::MimePart<R>, body: &str) {
+    assert_eq!(part.headers().len(), 1);
+    let content_type = part.content_type().unwrap().unwrap();
+    assert!(content_type.is_mime_type("text", "plain"));
+    assert_eq!(content_type.charset(), Some("utf-8"));
+    let mut decoded = Vec::new();
+    part.content_mut().decode_to(&mut decoded).unwrap();
+    assert_eq!(decoded, body.as_bytes());
 }
 
 #[test]

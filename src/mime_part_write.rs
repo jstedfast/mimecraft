@@ -208,19 +208,11 @@ impl<R: Read + Seek> MimePart<R> {
         content_only: bool,
     ) -> io::Result<()> {
         let newline = options.validate()?;
-        // Preserve an unchanged unknown encoding using the reader's default,
-        // rather than rejecting bytes that were accepted during parsing.
-        // Newly authored or edited invalid metadata still fails validation.
-        let encoding = if self.recovered_encoding.as_deref().is_some_and(|original| {
-            self.headers()
-                .get("Content-Transfer-Encoding")
-                .is_some_and(|header| header.raw_value() == original)
-        }) {
-            ContentEncoding::Unspecified
-        } else {
-            self.content_transfer_encoding()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
-        };
+        let encoding = crate::mime_part::transfer_encoding_for_write(
+            self.headers(),
+            self.recovered_encoding.as_deref(),
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // Stored encoding describes the actual source bytes, which may differ
         // from the requested header. Decode before applying the new encoding.
         let transcode = encoding != self.content().encoding();
