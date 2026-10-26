@@ -2585,6 +2585,49 @@ returned references survive iterator advancement but tree edits during
 traversal are not supported. Parsing, body decoding, and mutable cursors are
 separate concerns; ordinary model destruction still recurses.
 
+### Building common message bodies
+
+`BodyBuilder` assembles existing in-memory entities with plain text and HTML
+into common MIME layouts. Set its public `text_body`, `html_body`,
+`body_encoding`, `linked_resources`, and `attachments` fields, then consume it
+with `into_message_body()`. `new()` and `default()` start empty with UTF-8.
+
+```rust
+use mimecraft::{BodyBuilder, MimeMessage, TextFormat};
+
+let builder = BodyBuilder {
+    text_body: Some("hello".into()),
+    html_body: Some("<p>hello</p>".into()),
+    ..BodyBuilder::new()
+};
+let mut message = MimeMessage::with_body(builder.into_message_body().unwrap());
+assert_eq!(message.text_body(TextFormat::Plain).unwrap().as_deref(), Some("hello"));
+assert_eq!(message.text_body(TextFormat::Html).unwrap().as_deref(), Some("<p>hello</p>"));
+```
+
+Plain text precedes HTML in multipart/alternative. Linked resources wrap HTML
+in multipart/related, with HTML first, `type=text/html`, and no `start`
+parameter. Attachments follow the body in multipart/mixed. All multipart
+boundaries are generated, and resource/attachment insertion order is retained.
+A lone attachment without either text body is returned directly. With no text
+or attachments, an empty text/plain body is produced in the selected charset.
+`Some("")` counts as a supplied body, unlike `None`. Linked resources without
+HTML are ignored and dropped with the consumed builder.
+
+Both text bodies use `body_encoding` with strict charset conversion; unencodable
+characters return `BodyBuilderError::Text` rather than replacement characters.
+Text, newlines, markup, and resource references are stored literally. There is
+no HTML rendering, resource discovery, or automatic transport preparation.
+
+The collections are `Vec<MimeEntity>` using the default `Cursor<Vec<u8>>`
+storage. Entities are moved without copying or reading their content; headers,
+stored encoding, parsed framing, and source positions remain unchanged. Supply
+filenames, dispositions, Content-Ids, and Content-Locations explicitly before
+building. File/stream attachment-loading convenience APIs remain unported.
+Construction errors include formatting and OS-randomness failures and retain
+their underlying causes. On failure, the consumed builder and its entities
+are dropped rather than returning a partial body.
+
 ### Text-body selection
 
 `MimeMessage` and `MimeEntity` provide `text_body_part(format)` and
@@ -6862,6 +6905,13 @@ disposition notifications. Explicit detached edits replace change events;
 the source's event-handler non-null invariant does not apply to Rust ownership.
 Serialization and separator handling are explained inline, while repeated
 Reported-Uri fields remain independently accessible.
+Common body assembly adapts `BodyBuilder.cs` and `UnitTests/BodyBuilderTests.cs`,
+including configurable body encoding and the single-attachment shortcut.
+Owned vectors and consuming construction replace shared mutable attachment
+collections. Existing text and multipart helpers supply strict encoding,
+generated boundaries, and related-root metadata; upstream default, charset,
+and attachment cases accompany combination and serialization regressions.
+Attachment file-loading helpers remain separate from this assembly port.
 Alternative multipart bodies adapt `MultipartAlternative.cs` and
 `UnitTests/MultipartAlternativeTests.cs`. Composition replaces inheritance;
 one format-taking read method covers the source's plain/HTML properties and
