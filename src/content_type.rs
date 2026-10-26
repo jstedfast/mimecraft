@@ -84,6 +84,7 @@ impl ContentType {
     /// Serializes a complete header using explicit folding and newline options.
     ///
     /// Output includes the field name and exactly one terminating newline.
+    /// [`HeaderFormatOptions::international`] allows raw UTF-8 parameters.
     ///
     /// # Errors
     ///

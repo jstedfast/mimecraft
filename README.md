@@ -6411,9 +6411,22 @@ Long values use numbered continuations. Escaped quotes, whitespace, complete
 percent triplets, and Unicode scalar boundaries are preserved. Encoding does
 not remove controls from the decoded value or make a filename safe to use.
 
-Charset selection follows MimeKit's automatic choice: printable ASCII uses
-`us-ascii`, controls and text entirely within U+00FF use `iso-8859-1`, and other
-Unicode uses `HeaderFormatOptions::parameter_charset` (UTF-8 by default).
+Set `HeaderFormatOptions::international` to `true` to allow raw UTF-8 in quoted
+parameter values and unencoded numbered continuations. These values remain
+UTF-8 regardless of preferred charsets; scalars and quoted-pair escapes are never
+split. Controls and literal `=?` sequences still require encoding. Selecting
+RFC 2047 also retains encoded-word output for values too long for an ordinary
+assignment. Short safe Unicode values use quoted UTF-8 even with an explicit
+encoding-method preference. The default remains ASCII output.
+
+This option applies only to Content-Type and Content-Disposition parameters,
+not international addresses or other headers, and does not negotiate transport
+capabilities. The caller must ensure that the destination accepts UTF-8 headers.
+
+For encoded output, charset selection follows MimeKit's automatic choice:
+printable ASCII uses `us-ascii`, controls and text entirely within U+00FF use
+`iso-8859-1`, and other Unicode uses `HeaderFormatOptions::parameter_charset`
+(UTF-8 by default).
 `Parameter::set_charset(Some(charset))` overrides that preference; `None`
 restores inheritance. These are preferences, not forced encodings: ASCII and
 Latin-1 selection still takes precedence, and a preferred charset that cannot
@@ -6463,7 +6476,7 @@ ordinary values without recognized encoded words keep default preferences.
 Recovered preferences take precedence over header-wide formatting choices.
 Clear them with `set_encoding_method(None)` and `set_charset(None)` on an owned
 parameter and replace its list entry to restore inheritance. These preferences
-do not force short ASCII values to be encoded or disable automatic Latin-1
+do not force short safe values to be encoded or disable automatic Latin-1
 selection. Formatting still normalizes syntax rather than reproducing the wire.
 
 The default line limit is 78 **bytes**, counting the field name, tabs, quotes,
@@ -6479,8 +6492,8 @@ declaration fits but the first character must go in the following section.
 Serialization preserves parameter order and spelling without mutating values,
 historical diagnostics, or separately stored raw headers. Failures return no
 partial output. These APIs normalize headers, not reproduce their original
-bytes; use `Header::raw()` for the latter. Raw internationalized headers remain
-unported.
+bytes; use `Header::raw()` for the latter. Internationalized output beyond MIME
+content-header parameters remains unported.
 
 ## Scope and compatibility
 
@@ -6501,8 +6514,8 @@ domain routes and IDNA conversion,
 quoted-string helpers, date-header handling,
 charset conversion, RFC 2047 text/phrase encoding and decoding, MIME parameter parsing, and
 typed Content-Type/Content-Disposition parsing, construction, editing, and
-folded ASCII serialization with RFC 2231 parameters. Single/text/multipart
-ownership and writing, complete entity-tree loading, a message wrapper
+folded serialization with RFC 2231 parameters and opt-in UTF-8 parameters.
+Single/text/multipart ownership and writing, complete entity-tree loading, a message wrapper
 with raw header partitioning and load/write APIs, and explicit attached-message
 ownership and writing are also implemented. A synchronous event reader and
 owned-model parser share default malformed-message recovery and explicit limits.

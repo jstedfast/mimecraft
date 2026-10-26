@@ -92,6 +92,8 @@ impl Parameter {
     /// Short ASCII values still use ordinary tokens or quoted strings. Encoding
     /// is needed for controls, non-ASCII text, encoded-word lookalikes, and values
     /// too long for an ordinary assignment.
+    /// [`crate::HeaderFormatOptions::international`] allows safe non-ASCII values
+    /// to use ordinary quoted strings or unencoded RFC 2231 continuations.
     ///
     /// ```
     /// use mimecraft::{ContentDisposition, Parameter, ParameterEncodingMethod};
@@ -134,6 +136,7 @@ impl Parameter {
     /// Latin-1 for controls and text entirely within U+00FF. Other text uses this
     /// preference if representable, or UTF-8 for the entire value otherwise.
     /// This never enables lossy substitution or forces a charset on plain tokens.
+    /// Raw international parameter output is always UTF-8, ignoring this preference.
     /// Mapping limitations are those of [`Charset::encode`].
     ///
     /// ```

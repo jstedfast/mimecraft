@@ -91,7 +91,9 @@ impl ContentDisposition {
     /// Serializes a complete header using explicit folding and newline options.
     ///
     /// Output includes the field name and exactly one terminating newline.
-    /// Unicode, controls, and encoded-word lookalikes use the selected encoding,
+    /// Unicode uses the selected encoding unless
+    /// [`HeaderFormatOptions::international`] enables raw UTF-8 parameters.
+    /// Controls and encoded-word lookalikes always use the selected encoding,
     /// preserving their decoded values without writing raw header delimiters.
     /// The value, diagnostics, and any separate raw header remain unchanged.
     ///

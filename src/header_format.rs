@@ -13,14 +13,14 @@ use crate::{
     utils::quote,
 };
 
-/// Options for ASCII Content-Type and Content-Disposition serialization.
+/// Options for Content-Type and Content-Disposition serialization.
 ///
 /// Defaults to 78-byte lines, CRLF endings, and quoting only when necessary.
 /// RFC 2231 is the default for non-ASCII text, controls, encoded-word lookalikes,
 /// and long values. RFC 2047 compatibility output can be explicitly selected or
 /// recovered from parsed parameters. Output charset selection prefers ASCII
 /// and Latin-1, then the configured charset (UTF-8 by default).
-/// Raw internationalized headers are not supported.
+/// Output is ASCII unless [`Self::international`] enables UTF-8 parameters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderFormatOptions {
     /// Maximum bytes per physical line, excluding the newline, in `60..=998`.
@@ -48,6 +48,26 @@ pub struct HeaderFormatOptions {
     /// UTF-8 is used instead, never replacement text or mixed charsets.
     /// This is independent of a Content-Type charset describing the message body.
     pub parameter_charset: Charset,
+    /// Allow raw UTF-8 in quoted parameter values, defaulting to false.
+    ///
+    /// Long values can use unencoded continuations with complete UTF-8 scalars.
+    /// Controls and encoded-word lookalikes still use the selected encoding;
+    /// RFC 2047 also remains the fallback for long values when selected.
+    /// Raw values are UTF-8 regardless of the preferred parameter charset.
+    /// This does not enable international addresses or negotiate transport
+    /// support; callers must ensure the destination accepts UTF-8 headers.
+    ///
+    /// ```
+    /// use mimecraft::{ContentDisposition, HeaderFormatOptions};
+    ///
+    /// let mut value = ContentDisposition::default();
+    /// value.set_file_name(Some("caf\u{e9}.txt"));
+    /// let options = HeaderFormatOptions { international: true, ..Default::default() };
+    /// assert_eq!(value.to_header_string_with_options(&options)?,
+    ///     "Content-Disposition: attachment; filename=\"caf\u{e9}.txt\"\r\n");
+    /// # Ok::<(), mimecraft::HeaderFormatError>(())
+    /// ```
+    pub international: bool,
 }
 
 impl Default for HeaderFormatOptions {
@@ -58,6 +78,7 @@ impl Default for HeaderFormatOptions {
             always_quote_parameters: false,
             parameter_encoding_method: ParameterEncodingMethod::Rfc2231,
             parameter_charset: Charset::UTF8,
+            international: false,
         }
     }
 }
@@ -220,10 +241,9 @@ impl HeaderWriter<'_> {
         let always_quote = self.options.always_quote_parameters || parameter.always_quote();
         // Quoting alone does not protect a literal encoded-word wrapper:
         // a tolerant parameter parser could decode it instead of retaining it.
-        let extended = value
-            .bytes()
-            .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
-            || value.contains("=?");
+        let extended = value.bytes().any(|byte| {
+            byte.is_ascii_control() || (!byte.is_ascii() && !self.options.international)
+        }) || value.contains("=?");
         if !extended {
             // Tokens cannot be empty. An empty value must be quoted and cannot
             // be split into continuations to make an oversized name fit.
@@ -322,7 +342,7 @@ impl HeaderWriter<'_> {
                     }
             } else {
                 raw_length(next)
-                    + if always_quote || !is_attribute(next as u8) {
+                    + if always_quote || !next.is_ascii() || !is_attribute(next as u8) {
                         2
                     } else {
                         0
@@ -478,7 +498,11 @@ fn next_charset_chunk(
 }
 
 fn raw_length(ch: char) -> usize {
-    if matches!(ch, '\\' | '"') { 2 } else { 1 }
+    if matches!(ch, '\\' | '"') {
+        2
+    } else {
+        ch.len_utf8()
+    }
 }
 
 fn next_chunk(
@@ -512,7 +536,9 @@ fn next_chunk(
     let mut escaped_length = 0;
     let mut quoted = always_quote;
     while let Some(&ch) = chars.peek() {
-        let needs_quotes = quoted || !is_attribute(ch as u8);
+        // International sections stay UTF-8, independent of the charset used
+        // for encoded sections. Never split a scalar's bytes between values.
+        let needs_quotes = quoted || !ch.is_ascii() || !is_attribute(ch as u8);
         let length = escaped_length + raw_length(ch);
         if length + if needs_quotes { 2 } else { 0 } > budget {
             break;
