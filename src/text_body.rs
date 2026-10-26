@@ -2,11 +2,17 @@
 // MultipartRelated.cs, and TextPart.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{error::Error, fmt, ops::Range, slice};
+use std::{
+    error::Error,
+    fmt,
+    io::{Read, Seek},
+    ops::Range,
+    slice,
+};
 
 use crate::{
-    ContentHeaderParseError, ContentType, MessageId, MessageIdParseError, MimeEntity, Multipart,
-    MultipartError, References, TextPartError,
+    ContentHeaderParseError, ContentType, MessageId, MessageIdParseError, MimeEntity, MimePart,
+    Multipart, MultipartError, References, TextPartError,
 };
 
 /// A text format for body selection, classification, or part construction.
@@ -60,15 +66,23 @@ struct Frame<'a, R> {
     default_message: bool,
 }
 
-// Paths include an artificial root index, so all frames use the same rules.
+// A single entity supplies an artificial root index, so all frames use the same rules.
 pub(crate) fn select<R>(
     root: &MimeEntity<R>,
     format: TextFormat,
     filter_attachment: bool,
 ) -> Result<Option<Vec<usize>>, TextBodyError> {
+    select_children(slice::from_ref(root), format, filter_attachment)
+}
+
+pub(crate) fn select_children<R>(
+    children: &[MimeEntity<R>],
+    format: TextFormat,
+    filter_attachment: bool,
+) -> Result<Option<Vec<usize>>, TextBodyError> {
     let mut stack = vec![Frame {
-        children: slice::from_ref(root),
-        remaining: 0..1,
+        children,
+        remaining: 0..children.len(),
         depth: 0,
         filter_attachment,
         default_message: false,
@@ -95,7 +109,8 @@ pub(crate) fn select<R>(
                 let content_type = effective_type(entity, frame.default_message)?;
                 let digest = content_type.is_mime_type("multipart", "digest");
                 let remaining = if content_type.is_mime_type("multipart", "alternative") {
-                    // Prefer the last (most faithful) suitable alternative.
+                    // Walk alternative children backwards, from the greatest
+                    // level of faithfulness to the least faithful.
                     0..part.children().len()
                 } else {
                     let index = if content_type.is_mime_type("multipart", "related") {
@@ -119,6 +134,63 @@ pub(crate) fn select<R>(
         }
     }
     Ok(None)
+}
+
+pub(crate) fn selected_part<'a, R>(
+    children: &'a [MimeEntity<R>],
+    path: &[usize],
+) -> &'a MimePart<R> {
+    let mut entity = &children[path[0]];
+    for &index in &path[1..] {
+        let MimeEntity::Multipart(part) = entity else {
+            unreachable!("body selection paths traverse only multipart nodes");
+        };
+        entity = &part.children()[index];
+    }
+    let MimeEntity::Part(part) = entity else {
+        unreachable!("body selection paths end at leaf parts");
+    };
+    part
+}
+
+pub(crate) fn decode_selected<R: Read + Seek>(
+    children: &mut [MimeEntity<R>],
+    path: &[usize],
+) -> Result<String, TextBodyError> {
+    let mut entity = &mut children[path[0]];
+    for &index in &path[1..] {
+        let MimeEntity::Multipart(part) = entity else {
+            unreachable!("body selection paths traverse only multipart nodes");
+        };
+        // Reading a body changes source position, not parsed MIME framing.
+        // The public editing accessor would discard that framing.
+        let (children, _, _) = part.children_and_epilogue();
+        entity = &mut children[index];
+    }
+    let MimeEntity::Part(part) = entity else {
+        unreachable!("body selection paths end at leaf parts");
+    };
+    let content_type = part.content_type().map_err(TextBodyError::ContentType)?;
+    let charset = content_type
+        .as_ref()
+        .map(|value| value.charset_encoding())
+        .transpose()
+        .map_err(|error| TextBodyError::Text(TextPartError::Charset(error)))?
+        .flatten()
+        .unwrap_or(crate::charsets::Charset::UTF8);
+    let text = crate::text_part::decode_text(part, charset).map_err(TextBodyError::Text)?;
+    if let Some(content_type) = content_type
+        && TextFormat::Flowed.matches(&content_type)
+    {
+        let mut converter = crate::text::FlowedToText::new();
+        converter.delete_space = content_type
+            .parameters()
+            .get("delsp")
+            .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+        Ok(converter.convert(&text))
+    } else {
+        Ok(text)
+    }
 }
 
 fn effective_type<R>(

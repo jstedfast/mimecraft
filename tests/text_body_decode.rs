@@ -6,9 +6,9 @@ use std::{
 };
 
 use mimecraft::{
-    ContentEncoding, Header, HeaderList, MessagePart, MimeContent, MimeEntity, MimeMessage,
-    MimePart, Multipart, TextBodyError, TextFormat, TextPart, TextPartError,
-    charsets::CharsetError,
+    ContentEncoding, Header, HeaderList, MessagePart, MimeContent, MimeContentStorage, MimeEntity,
+    MimeMessage, MimeParser, MimePart, Multipart, TextBodyError, TextFormat, TextPart,
+    TextPartError, charsets::CharsetError,
 };
 
 fn raw_part<R: Read + Seek>(
@@ -39,6 +39,50 @@ fn absent_and_empty_bodies_remain_distinct_and_attached_messages_are_not_read() 
     assert_eq!(message.text_body(TextFormat::Html).unwrap(), None);
     let mut wrapper: MimeEntity = MessagePart::new(message).into();
     assert_eq!(wrapper.text_body(TextFormat::Plain).unwrap(), None);
+}
+
+#[test]
+fn message_body_reads_preserve_truncated_framing_on_matches_misses_and_errors() {
+    for (tail, expected) in [
+        (&b"Content-Type: text/plain\r\n"[..], Some("")),
+        (&b"Content-Type: text/plain\r\n\r\nbody"[..], Some("body")),
+        (
+            &b"Content-Type: text/plain; charset=x-unknown\r\n"[..],
+            None,
+        ),
+        (
+            &b"Content-Type: text/plain; charset=utf-8\r\n\r\n\xff"[..],
+            None,
+        ),
+    ] {
+        let mut wire =
+            b"Subject: retained\r\nContent-Type: multipart/alternative; boundary=o\r\n\r\n\
+--o \t\r\nContent-Type: multipart/mixed; boundary=i\r\n\r\n--i \t\r\n"
+                .to_vec();
+        wire.extend_from_slice(tail);
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let mut parser = MimeParser::with_storage(Cursor::new(&wire), storage).unwrap();
+            let mut message = parser.parse_message().unwrap();
+            drop(parser);
+            assert_eq!(message.text_body(TextFormat::Html).unwrap(), None);
+            let mut output = Vec::new();
+            message.write_to(&mut output).unwrap();
+            assert_eq!(output, wire);
+            for _ in 0..2 {
+                let result = message.text_body(TextFormat::Plain);
+                match expected {
+                    Some(text) => assert_eq!(result.unwrap().as_deref(), Some(text)),
+                    None => assert!(matches!(
+                        result,
+                        Err(TextBodyError::Text(TextPartError::Charset(_)))
+                    )),
+                }
+                output.clear();
+                message.write_to(&mut output).unwrap();
+                assert_eq!(output, wire);
+            }
+        }
+    }
 }
 
 #[test]

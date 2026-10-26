@@ -381,7 +381,9 @@ pub(crate) fn decode_text<R: Read + Seek>(
     charset: Charset,
 ) -> Result<String, TextPartError> {
     let mut bytes = Vec::new();
-    part.content_mut()
+    // Decoding only changes source position; the editing accessor would discard
+    // parsed flags for absent content and missing header/body separators.
+    part.content
         .decode_to(&mut bytes)
         .map_err(TextPartError::Io)?;
     charset

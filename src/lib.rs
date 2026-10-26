@@ -86,6 +86,8 @@
 //! of decoded fragment streams, with original-message header merging.
 //! [`MultipartReport`] adds checked report-type metadata to ordinary multipart
 //! containers without imposing a report layout or accessing child sources.
+//! [`MultipartAlternative`] adds preferred-body selection and decoded text reads,
+//! sharing nested-container rules and preserving parsed framing during decoding.
 //! [`MultipartRelated`] shares text-body root selection and adds atomic root
 //! replacement with checked type/start parameters and automatic missing IDs
 //! for non-first roots. It also exposes direct preferred-text-body selection.
@@ -386,6 +388,7 @@ mod mime_types;
 mod mime_types_data;
 mod mime_version;
 mod multipart;
+mod multipart_alternative;
 mod multipart_related;
 mod multipart_report;
 mod parameter;
@@ -465,6 +468,7 @@ pub use mime_reader::{
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};
 pub use mime_version::{MimeVersion, MimeVersionParseError, MimeVersionParseErrorKind};
 pub use multipart::{Multipart, MultipartError};
+pub use multipart_alternative::{MultipartAlternative, MultipartAlternativeError};
 pub use multipart_related::{MultipartRelated, MultipartRelatedError, RelatedResource};
 pub use multipart_report::{MultipartReport, MultipartReportError};
 pub use parameter::{

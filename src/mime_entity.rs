@@ -13,7 +13,8 @@ use crate::{
     ContentDisposition, ContentHeaderParseError, Header, HeaderFormatError, HeaderFormatOptions,
     HeaderList, MessageDeliveryStatus, MessageDispositionNotification, MessageFeedbackReport,
     MessageId, MessageIdParseError, MessagePart, MessagePartial, MimePart, Multipart,
-    MultipartRelated, MultipartReport, TextBodyError, TextFormat, TextPart, TextRfc822Headers,
+    MultipartAlternative, MultipartRelated, MultipartReport, TextBodyError, TextFormat, TextPart,
+    TextRfc822Headers,
 };
 
 /// An owned MIME tree node: a body stream, multipart container, or attached message.
@@ -352,17 +353,10 @@ impl<R> MimeEntity<R> {
         let Some(path) = crate::text_body::select(self, format, filter_attachment)? else {
             return Ok(None);
         };
-        let mut entity = self;
-        for index in path.into_iter().skip(1) {
-            let Self::Multipart(part) = entity else {
-                unreachable!("body selection paths traverse only multipart nodes");
-            };
-            entity = &part.children()[index];
-        }
-        let Self::Part(part) = entity else {
-            unreachable!("body selection paths end at leaf parts");
-        };
-        Ok(Some(part))
+        Ok(Some(crate::text_body::selected_part(
+            slice::from_ref(self),
+            &path,
+        )))
     }
 
     /// Mutably borrows the same body selected by [`Self::text_body_part`].
@@ -484,7 +478,8 @@ impl<R: Read + Seek> MimeEntity<R> {
     /// formatting or to choose a different conversion policy.
     ///
     /// Materializes transfer-decoded bytes, decoded text, and (for flowed text)
-    /// converted text in memory. No raw headers or stored bytes are changed.
+    /// converted text in memory. No raw headers, stored bytes, or parsed framing
+    /// are changed.
     ///
     /// # Errors
     ///
@@ -493,30 +488,10 @@ impl<R: Read + Seek> MimeEntity<R> {
     /// byte copy rewinds the source even if charset decoding subsequently fails.
     /// Errors never cause selection of an earlier alternative.
     pub fn text_body(&mut self, format: TextFormat) -> Result<Option<String>, TextBodyError> {
-        let Some(part) = self.text_body_part_mut(format)? else {
+        let Some(path) = crate::text_body::select(self, format, true)? else {
             return Ok(None);
         };
-        let content_type = part.content_type().map_err(TextBodyError::ContentType)?;
-        let charset = content_type
-            .as_ref()
-            .map(|value| value.charset_encoding())
-            .transpose()
-            .map_err(|error| TextBodyError::Text(crate::TextPartError::Charset(error)))?
-            .flatten()
-            .unwrap_or(crate::charsets::Charset::UTF8);
-        let text = crate::text_part::decode_text(part, charset).map_err(TextBodyError::Text)?;
-        if let Some(content_type) = content_type
-            && TextFormat::Flowed.matches(&content_type)
-        {
-            let mut converter = crate::text::FlowedToText::new();
-            converter.delete_space = content_type
-                .parameters()
-                .get("delsp")
-                .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
-            Ok(Some(converter.convert(&text)))
-        } else {
-            Ok(Some(text))
-        }
+        crate::text_body::decode_selected(slice::from_mut(self), &path).map(Some)
     }
 }
 
@@ -529,6 +504,12 @@ impl<R> From<MimePart<R>> for MimeEntity<R> {
 impl<R> From<Multipart<R>> for MimeEntity<R> {
     fn from(multipart: Multipart<R>) -> Self {
         Self::Multipart(multipart)
+    }
+}
+
+impl<R> From<MultipartAlternative<R>> for MimeEntity<R> {
+    fn from(alternative: MultipartAlternative<R>) -> Self {
+        Self::Multipart(alternative.into_multipart())
     }
 }
 

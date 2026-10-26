@@ -2637,6 +2637,41 @@ selection does not validate boundaries, charsets, or transfer encodings.
 Raw edits are visible immediately. Both lookup and mutable path resolution
 are iterative, with auxiliary storage proportional to nesting depth.
 
+### Alternative multipart bodies
+
+`MultipartAlternative<R>` composes `Multipart<R>` and selects the most faithful
+body in a requested `TextFormat`. `new()` generates the boundary;
+`with_boundary(boundary)` accepts an explicit value. `from_multipart` checks
+only the first Content-Type, without validating boundaries or children,
+repairing headers, or accessing content.
+
+```rust
+use mimecraft::{MultipartAlternative, TextFormat, TextPart};
+
+let mut alternative: MultipartAlternative = MultipartAlternative::new().unwrap();
+alternative.multipart_mut().children_mut().extend([
+    TextPart::new("plain", "hello").unwrap().into(),
+    TextPart::new("html", "<p>hello</p>").unwrap().into(),
+]);
+assert_eq!(alternative.text_body(TextFormat::Plain).unwrap().as_deref(), Some("hello"));
+assert_eq!(alternative.text_body(TextFormat::Html).unwrap().as_deref(), Some("<p>hello</p>"));
+```
+
+`text_body_part(format)` borrows the selected leaf without source trait bounds
+or I/O. Alternatives are searched last-to-first, including attached text parts;
+nested containers follow their own selection rules. Related containers search
+only their root, and mixed containers stop at their first body candidate.
+Attached messages are not entered. A later flowed alternative also matches Plain.
+
+`text_body(format)` requires `Read + Seek` and uses the shared transfer, charset,
+and flowed decoding described below. Only the selected source is read.
+Missing formats return `None`; empty bodies return `Some("")`. Invalid visited
+metadata and decoding errors propagate without falling back to another body.
+Reads preserve headers, stored bytes, and parsed framing, including truncated
+containers. `multipart_mut()` exposes ordinary editing APIs; subsequent body
+access rechecks the container's first Content-Type. Conversion to `MimeEntity`
+retains its ordinary multipart variant.
+
 ### Related multipart roots
 
 `MultipartRelated<R>` composes `Multipart<R>`, generating a boundary in `new()`
@@ -2814,6 +2849,8 @@ or a different conversion policy.
 
 These convenience operations materialize decoded bytes, Unicode text, and
 any converted text in memory. They do not change raw headers or stored bytes.
+Read-only decoding also preserves parsed multipart delimiters and missing
+header/body separators; public mutable body-part access remains an editing API.
 Streaming text converters and automatic HTML/RTF conversion remain deferred.
 
 ### Copying and decorating plain text
@@ -6825,6 +6862,15 @@ disposition notifications. Explicit detached edits replace change events;
 the source's event-handler non-null invariant does not apply to Rust ownership.
 Serialization and separator handling are explained inline, while repeated
 Reported-Uri fields remain independently accessible.
+Alternative multipart bodies adapt `MultipartAlternative.cs` and
+`UnitTests/MultipartAlternativeTests.cs`. Composition replaces inheritance;
+one format-taking read method covers the source's plain/HTML properties and
+`GetTextBody`, while borrowed selection replaces `TryGetValue`. The shared
+iterative selector retains last-to-first ordering and nested related/mixed
+rules, with applicable source comments and flowed/nesting tests. Decoding
+reuses the existing charset and flowed helpers without discarding parsed
+framing. Typed construction and enum conversion replace dynamic constructor
+arguments and visitor dispatch.
 Multipart reports adapt `MultipartReport.cs`, `Parameter.Value`, and
 `UnitTests/MultipartReportTests.cs`. Composition and conversion to the ordinary
 multipart variant replace inheritance and visitor dispatch; explicit boundaries
