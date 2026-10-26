@@ -1,16 +1,23 @@
 // Adapted from MimeKit's Utils/MimeUtils.cs and Header.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-//! Quoted-string and unfolding transformations for MIME header text.
+//! MIME header text transformations and SMTP envelope address validation.
 //!
-//! These operate on complete values, not input chunks. They do not validate
+//! Header transformations operate on complete values, not input chunks. They do not validate
 //! quoted-string grammar, encode words or character sets, or make arbitrary
 //! text safe to insert into headers. In particular, quoting preserves controls
 //! and line breaks; unquoting tolerates malformed quotes and escapes.
 //! Unfolding trims surrounding Unicode whitespace and removes CR/LF, but is
 //! not general control-character sanitization or strict folding validation.
+//! The separate SMTP validators check exact addr-spec syntax and policy without
+//! rewriting the supplied text.
 
 use std::borrow::Cow;
+
+pub use crate::smtp_address::{validate_smtp_address, validate_smtp_address_with_options};
+pub use crate::smtp_utf8_address::{
+    validate_smtp_utf8_address, validate_smtp_utf8_address_with_options,
+};
 
 /// Unfolds a header value using MimeKit's display transformation.
 ///

@@ -142,6 +142,88 @@ impl MailboxAddress {
         crate::address_encode::encode_mailbox(self, options)
     }
 
+    /// Validates the stored addr-spec for non-SMTPUTF8 SMTP envelope use.
+    ///
+    /// Ignores the display name, source route, and recovery diagnostics.
+    /// Validates the parsed address, not the original header text: parsing may
+    /// already have normalized that text. Does not modify this mailbox or
+    /// convert its domain to IDNA. Length limits are disabled by default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::SmtpAddressError`] as described by
+    /// [`utils::validate_smtp_address`].
+    ///
+    /// ```
+    /// use mimecraft::{MailboxAddress, SmtpAddressError};
+    ///
+    /// let mailbox: MailboxAddress = "Ren\u{e9}e <user@example.com>".parse()?;
+    /// assert_eq!(mailbox.validate_smtp(), Ok(()));
+    /// let mailbox: MailboxAddress = "<user@b\u{fc}cher.example>".parse()?;
+    /// assert_eq!(mailbox.validate_smtp(), Err(SmtpAddressError::NonAscii));
+    /// # Ok::<(), mimecraft::MailboxParseError>(())
+    /// ```
+    pub fn validate_smtp(&self) -> Result<(), crate::SmtpAddressError> {
+        utils::validate_smtp_address(self.address.as_str())
+    }
+
+    /// Validates the stored addr-spec with SMTP compatibility/length options.
+    ///
+    /// See [`Self::validate_smtp`]. This does not change header parsing policy;
+    /// use [`utils::validate_smtp_address_with_options`] to validate original
+    /// text, including legacy ISO-2022-JP escape sequences.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::SmtpAddressError`] as described by
+    /// [`utils::validate_smtp_address_with_options`].
+    pub fn validate_smtp_with_options(
+        &self,
+        options: &crate::SmtpAddressValidationOptions,
+    ) -> Result<(), crate::SmtpAddressError> {
+        utils::validate_smtp_address_with_options(self.address.as_str(), options)
+    }
+
+    /// Validates the stored addr-spec using MimeKit's SMTPUTF8 Unicode policy.
+    ///
+    /// Ignores the display name, route, and recovery diagnostics, without changing
+    /// the mailbox. Checks the stored address, not the original header text.
+    /// Domain A-labels are rejected by default; this is stricter than checking
+    /// RFC 6531 syntax alone. See [`utils::validate_smtp_utf8_address`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`crate::SmtpUtf8AddressError`] in its checking order.
+    pub fn validate_smtp_utf8(&self) -> Result<(), crate::SmtpUtf8AddressError> {
+        utils::validate_smtp_utf8_address(self.address.as_str())
+    }
+
+    /// Validates SMTPUTF8 policy with IDN, script, and length options.
+    ///
+    /// See [`Self::validate_smtp_utf8`]. IDN decoding is temporary: even after a
+    /// successful check, the stored address retains its original spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors as described by [`utils::validate_smtp_utf8_address_with_options`].
+    ///
+    /// ```
+    /// use mimecraft::{MailboxAddress, SmtpUtf8AddressError, SmtpUtf8AddressValidationOptions};
+    ///
+    /// let mailbox: MailboxAddress = "<user@xn--gr-zia.example.com>".parse()?;
+    /// assert_eq!(mailbox.validate_smtp_utf8(), Err(SmtpUtf8AddressError::ALabel));
+    /// let options = SmtpUtf8AddressValidationOptions { decode_idn: true, ..Default::default() };
+    /// assert_eq!(mailbox.validate_smtp_utf8_with_options(&options), Ok(()));
+    /// assert_eq!(mailbox.address().as_str(), "user@xn--gr-zia.example.com");
+    /// # Ok::<(), mimecraft::MailboxParseError>(())
+    /// ```
+    pub fn validate_smtp_utf8_with_options(
+        &self,
+        options: &crate::SmtpUtf8AddressValidationOptions,
+    ) -> Result<(), crate::SmtpUtf8AddressError> {
+        utils::validate_smtp_utf8_address_with_options(self.address.as_str(), options)
+    }
+
     /// Creates a mailbox from a Unicode display name and a parsed address.
     ///
     /// The name is trimmed, but not unquoted, RFC 2047-decoded, or sanitized.

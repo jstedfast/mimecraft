@@ -4,7 +4,10 @@
 
 use unicode_general_category::{GeneralCategory, get_general_category};
 
-use crate::{idna, parse_utils::is_ascii_atom};
+use crate::{
+    idna,
+    parse_utils::{is_ascii_atom, skip_ipv4, skip_ipv6},
+};
 
 // RFC 5321, 4.5.3.1.1-2 limits local parts to 64 octets and domains to 255.
 // RFC 1035, 2.3.4 limits labels to 63 octets. Count UTF-8 bytes, not UTF-16 units.
@@ -299,98 +302,6 @@ fn address_start(text: &str, at: usize) -> Option<usize> {
         }
     }
     (at - index <= MAX_LOCAL_PART).then_some(index)
-}
-
-fn skip_ipv4(text: &str, index: &mut usize, allow_leading_zeros: bool) -> bool {
-    for group in 0..4 {
-        let start = *index;
-        let mut value = 0u16;
-        // Stop after four digits; more than three is invalid regardless of value.
-        while *index - start < 4 && text.as_bytes().get(*index).is_some_and(u8::is_ascii_digit) {
-            value = value * 10 + u16::from(text.as_bytes()[*index] - b'0');
-            *index += 1;
-        }
-        if *index == start || *index - start > 3 || value > 255 {
-            return false;
-        }
-        // URI dec-octets (RFC 3986) exclude leading zeros, unlike SMTP's Snum.
-        if !allow_leading_zeros && *index - start > 1 && text.as_bytes()[start] == b'0' {
-            return false;
-        }
-        if group < 3 {
-            if text.as_bytes().get(*index) != Some(&b'.') {
-                return false;
-            }
-            *index += 1;
-        }
-    }
-    true
-}
-
-fn skip_ipv6(text: &str, index: &mut usize, smtp: bool) -> bool {
-    // Handle full/compressed IPv6 and embedded IPv4. SMTP (RFC 5321, 4.1.3)
-    // requires "::" to replace at least two groups; URI hosts (RFC 3986, 3.2.2)
-    // allow one. Count groups, not colons, to reject empty single-colon groups.
-    let mut compact = false;
-    let mut groups = 0;
-    if text.as_bytes().get(*index) == Some(&b':') {
-        if text.as_bytes().get(*index + 1) != Some(&b':') {
-            return false;
-        }
-        *index += 2;
-        compact = true;
-    }
-    while *index < text.len() && text.as_bytes()[*index] != b']' {
-        let start = *index;
-        if groups == 8 {
-            return false;
-        }
-        // Stop after five hex digits; more than four is invalid.
-        while *index - start < 5
-            && text
-                .as_bytes()
-                .get(*index)
-                .is_some_and(u8::is_ascii_hexdigit)
-        {
-            *index += 1;
-        }
-        let count = *index - start;
-        if count == 0 || count > 4 {
-            return false;
-        }
-        if text.as_bytes().get(*index) == Some(&b'.') {
-            // The IPv4 tail occupies two groups and must end the address.
-            *index = start;
-            if groups > 6 || !skip_ipv4(text, index, smtp) {
-                return false;
-            }
-            groups += 2;
-            break;
-        }
-        groups += 1;
-        if text.as_bytes().get(*index) != Some(&b':') {
-            break;
-        }
-        *index += 1;
-        if text.as_bytes().get(*index) == Some(&b':') {
-            if compact {
-                return false;
-            }
-            compact = true;
-            *index += 1;
-        } else if !text
-            .as_bytes()
-            .get(*index)
-            .is_some_and(u8::is_ascii_hexdigit)
-        {
-            return false;
-        }
-    }
-    if compact {
-        groups <= if smtp { 6 } else { 7 }
-    } else {
-        groups == 8
-    }
 }
 
 fn is_fully_qualified_domain(domain: &str) -> bool {

@@ -2301,8 +2301,10 @@ headers without body I/O or raw edits, and modifying returned mailboxes never
 changes the message. Body headers and attached messages do not contribute.
 
 Case-insensitive recipient deduplication (`GetRecipients(true)`), sender-inclusive
-collection, and SMTP envelope validation remain deferred. Collection does not
-remove or hide Bcc/Resent-Bcc during serialization.
+collection, and automatic SMTP envelope validation remain deferred. Explicit
+validation is available through `MailboxAddress::validate_smtp` and
+`validate_smtp_utf8`. Collection does not remove or hide Bcc/Resent-Bcc during
+serialization.
 
 ### Message sender mailboxes
 
@@ -5788,6 +5790,131 @@ in its `EHLO` response. Keep it false if the extension is unavailable; enabling
 it is optional when supported. This option does not negotiate SMTPUTF8; callers
 must ensure the destination accepts internationalized headers and addresses.
 
+### SMTP envelope address validation
+
+`utils::validate_smtp_address` checks exact addr-spec text for non-SMTPUTF8
+envelope use. This is separate from tolerant MIME header parsing and header
+formatting: display names, comments, angle brackets, whitespace around the
+address, local-only addresses, and the empty reverse path are not accepted.
+It performs no IDNA conversion, DNS lookup, delivery check, or normalization.
+
+```rust
+use mimecraft::{MailboxAddress, SmtpAddressError, SmtpAddressValidationOptions, utils};
+
+assert_eq!(utils::validate_smtp_address("user@example.com"), Ok(()));
+assert_eq!(utils::validate_smtp_address("caf\u{e9}@example.com"),
+    Err(SmtpAddressError::NonAscii));
+
+let options = SmtpAddressValidationOptions {
+    enforce_length_limits: true,
+    ..Default::default()
+};
+let long = format!("{}@example.com", "a".repeat(65));
+assert_eq!(utils::validate_smtp_address(&long), Ok(()));
+assert_eq!(utils::validate_smtp_address_with_options(&long, &options),
+    Err(SmtpAddressError::LocalPartTooLong));
+
+let mailbox: MailboxAddress = "Ren\u{e9}e <user@example.com>".parse()?;
+assert_eq!(mailbox.validate_smtp_with_options(&options), Ok(()));
+# Ok::<(), mimecraft::MailboxParseError>(())
+```
+
+Errors are reported in syntax, non-ASCII, local-part length, label length,
+domain length, then whole-address length order. Length checking is optional:
+when enabled, limits are 64, 63, 253, and 254 bytes respectively. Quotes and
+escapes count toward local-part length. Domain/label limits do not apply to
+address literals, but the whole-address limit does.
+
+Literal syntax supports IPv4 (including decimal leading zeros), `IPv6:`
+(SMTP compression must replace at least two groups), and general `tag:content`
+literals. General tags and ASCII ACE-looking labels are checked syntactically,
+not against a registry or IDNA semantics. `NonAscii` distinguishes otherwise
+syntactically valid Unicode text; it does not imply full SMTPUTF8 policy
+validation. For Unicode domains with ASCII local parts, explicitly convert
+with `AddrSpec::with_ascii_domain` and validate the resulting address.
+
+`allow_iso2022_jp_local_part`, also false by default, permits legacy ISO-2022-JP
+escapes inside quoted local parts. This is a nonstandard compatibility exception:
+only ASCII, JIS Roman, and paired JIS X 0208 runs are accepted, with a required
+return to ASCII before the closing quote. Quotes/backslashes still need wire
+escaping; character assignments are not decoded or checked.
+
+Mailbox methods validate only the stored addr-spec, ignoring display names,
+source routes, and recovery diagnostics. Parsing may already have normalized
+the original text; use the string utility to validate original input. These
+checks neither change header parsing/formatting nor negotiate SMTP capabilities.
+Raw UTF-8 headers can require SMTPUTF8 even when the envelope is ASCII.
+
+### SMTPUTF8 Unicode address policy
+
+`utils::validate_smtp_utf8_address` ports MimeKit's
+`draft-ietf-mailmaint-smtputf8-syntax` policy, which is stricter than RFC 6531
+transport syntax alone. It requires bare SMTP mailbox syntax, PRECIS
+IdentifierClass code points (plus quoted SPACE), NFC, contextual character
+rules, and compatible non-ASCII scripts across the address. It uses the same
+literal syntax as the ASCII validator, without its ISO-2022-JP exception.
+It neither proves spoof safety nor negotiates SMTPUTF8.
+
+```rust
+use mimecraft::{MailboxAddress, SmtpUtf8AddressError, SmtpUtf8AddressValidationOptions, utils};
+
+assert_eq!(utils::validate_smtp_utf8_address("caf\u{e9}@example.com"), Ok(()));
+assert_eq!(utils::validate_smtp_utf8_address("cafe\u{301}@example.com"),
+    Err(SmtpUtf8AddressError::NotNormalized));
+assert_eq!(utils::validate_smtp_utf8_address("user@xn--gr-zia.example.com"),
+    Err(SmtpUtf8AddressError::ALabel));
+
+let options = SmtpUtf8AddressValidationOptions {
+    decode_idn: true,
+    ascii_is_latin: true,
+    enforce_length_limits: true,
+};
+let mailbox: MailboxAddress = "User <user@xn--gr-zia.example.com>".parse()?;
+assert_eq!(mailbox.validate_smtp_utf8_with_options(&options), Ok(()));
+// Opt-in decoding validates without changing the stored address.
+assert_eq!(mailbox.address().as_str(), "user@xn--gr-zia.example.com");
+# Ok::<(), mimecraft::MailboxParseError>(())
+```
+
+All three options default to false:
+
+- `decode_idn` permits domain A-labels after canonical raw RFC 3492 decoding,
+  not UTS #46 mapping. Even without length enforcement, encoded labels must be
+  ASCII, at most 63 bytes, contain a non-ASCII scalar after decoding, obey the
+  decoded hyphen restrictions, and round-trip ignoring ASCII case. Decoded
+  text still undergoes all Unicode checks. Local atoms beginning with `xn--`
+  remain rejected; quoted local parts are exempt from this prefix check.
+- `ascii_is_latin` counts ASCII letters as Latin separately within the whole
+  local part and each domain label, detecting additional mixed-script forms.
+  It does not relax the global non-ASCII script policy.
+- `enforce_length_limits` measures the local part and original address as
+  UTF-8 bytes (64 and 254), and ordinary domain labels/domain in raw Punycode
+  A-label form (63 and 253). Quotes and escapes count; domain literals bypass
+  label/domain limits. Opt-in decoding does not change the measured spelling.
+
+Errors precede one another in syntax, optional local/label/domain/address
+lengths, A-labels, disallowed code points, NFC, context, then mixed-script order.
+Common and Inherited scripts are neutral. Han/Hiragana/Katakana, Han/Hangul,
+and Han/Bopomofo are compatible families, not one unrestricted CJK group.
+Default A-label rejection deliberately differs from the non-SMTPUTF8
+validator's syntactic acceptance of ASCII ACE-looking labels.
+
+The bundled policy and normalization tables share MimeKit's Unicode `18.0.0`
+snapshot, exposed as `SMTP_UTF8_UNICODE_VERSION`; this identifies the imported
+data, not a claim about a finalized Unicode release. The NFC conformance data
+comes from MimeKit's `UnitTests/TestData/unicode/NormalizationTest.txt.gz`.
+The standalone importer regenerates the tables and 277 upstream address
+fixtures (four lone-UTF-16-surrogate cases cannot be represented by Rust strings):
+
+```powershell
+rustc --edition 2024 tools\import-smtp-unicode.rs -o target\debug\import-smtp-unicode.exe
+.\target\debug\import-smtp-unicode.exe C:\src\MimeKit
+```
+
+Mailbox methods check the stored addr-spec only; names, source routes, and
+recovery diagnostics are ignored. These checks do not normalize or repair
+addresses, validate headers, look up DNS, or establish deliverability.
+
 ### Domain routes
 
 `DomainList` represents the obsolete route portion of a mailbox, not a full
@@ -7556,5 +7683,6 @@ executed under QEMU user-mode emulation. Native ARM throughput has not been
 measured; run the same benchmarks on ARM hardware for meaningful performance
 comparisons.
 
-Licensed under MIT, retaining the original MimeKit copyright notice in
-`LICENSE`.
+Library code is licensed under MIT, retaining the original MimeKit copyright
+notice in `LICENSE`. The bundled Unicode tables and normalization conformance
+data are covered by `LICENSE-Unicode` (Unicode License v3).

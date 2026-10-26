@@ -3,7 +3,7 @@ name = "mimecraft"
 version = "0.1.0"
 edition = "2024"
 description = "An idiomatic Rust port of MimeKit's core MIME library"
-license = "MIT"
+license = "MIT AND Unicode-3.0"
 publish = false
 
 [dependencies]

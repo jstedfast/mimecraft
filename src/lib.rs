@@ -301,6 +301,17 @@
 //! Address equality and hashing compare exact names/address text and ordered
 //! members, excluding source routes and decoding diagnostics.
 //! [`utils`] provides shared quoting, tolerant string/byte unquoting, and unfolding.
+//! Its [`utils::validate_smtp_address`] and [`MailboxAddress::validate_smtp`]
+//! separately validate non-SMTPUTF8 envelope addresses, with explicit errors and
+//! opt-in length limits or legacy ISO-2022-JP quoted-local compatibility via
+//! [`SmtpAddressValidationOptions`]. They do not normalize or convert domains,
+//! perform delivery checks, or implement full SMTPUTF8 Unicode-policy validation.
+//! [`utils::validate_smtp_utf8_address`] and [`MailboxAddress::validate_smtp_utf8`]
+//! implement MimeKit's separate draft-based SMTPUTF8 policy: PRECIS, NFC,
+//! contextual rules, and compatible scripts, using [`SMTP_UTF8_UNICODE_VERSION`].
+//! [`SmtpUtf8AddressValidationOptions`] optionally enables A-label decoding,
+//! per-segment ASCII-as-Latin checks, and length limits. Neither validator
+//! negotiates SMTP extensions, rewrites addresses, or proves spoof safety.
 //! [`DateTimeOffset`] parses legacy date-header values and formats canonical dates
 //! with checked calendar components and a fixed numeric UTC offset.
 //! [`charsets`] resolves MIME charset labels and converts complete text buffers,
@@ -409,10 +420,14 @@ mod parameter;
 mod parse_utils;
 mod report_fields;
 pub mod rfc2047;
+mod smtp_address;
+mod smtp_utf8_address;
+mod smtp_utf8_data;
 pub mod text;
 mod text_body;
 mod text_part;
 mod text_rfc822_headers;
+mod unicode_normalization;
 mod unstructured_header_format;
 pub mod utils;
 
@@ -492,6 +507,9 @@ pub use parameter::{
     ParameterIssueKind, ParameterList, ParameterListEditError, ParameterParseError,
     ParameterParseErrorKind, ParameterParseOptions,
 };
+pub use smtp_address::{SmtpAddressError, SmtpAddressValidationOptions};
+pub use smtp_utf8_address::{SmtpUtf8AddressError, SmtpUtf8AddressValidationOptions};
+pub use smtp_utf8_data::UNICODE_VERSION as SMTP_UTF8_UNICODE_VERSION;
 pub use text_body::{TextBodyError, TextFormat};
 pub use text_part::{TextPart, TextPartError};
 pub use text_rfc822_headers::{TextRfc822Headers, TextRfc822HeadersError};
