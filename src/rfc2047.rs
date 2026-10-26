@@ -119,7 +119,28 @@ pub fn decode_text(input: &[u8]) -> DecodedHeader {
 /// A change of charset, B/Q encoding, or intervening ordinary text ends a run.
 /// Supported charset mappings and replacement policy are those of [`crate::charsets`].
 pub fn decode_text_with_options(input: &[u8], options: &DecodeOptions) -> DecodedHeader {
-    decode(input, options, false)
+    decode(input, options, false, None)
+}
+
+pub(crate) fn decode_parameter(
+    input: &[u8],
+    options: &DecodeOptions,
+) -> (DecodedHeader, Option<Charset>) {
+    let mut charsets = Vec::new();
+    let decoded = decode(input, options, false, Some(&mut charsets));
+    // Plain text does not need an encoded-word formatting preference merely
+    // because UTF-8 would be the source decoder's default codepage.
+    let mut preferred = None;
+    let mut max_count = 0;
+    // Count encoded words, not bytes or decoder runs. As in MimeKit, ties
+    // select the first encountered charset; unsupported labels share one entry.
+    for (charset, count) in charsets {
+        if count > max_count {
+            preferred = charset;
+            max_count = count;
+        }
+    }
+    (decoded, preferred)
 }
 
 /// Decodes a phrase, such as an address display name, using default options.
@@ -143,7 +164,7 @@ pub fn decode_phrase(input: &[u8]) -> DecodedHeader {
 /// Strict mode recognizes ASCII atoms; loose mode also recovers encoded words
 /// embedded in atoms. Neither mode validates address grammar or quoted strings.
 pub fn decode_phrase_with_options(input: &[u8], options: &DecodeOptions) -> DecodedHeader {
-    decode(input, options, true)
+    decode(input, options, true, None)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -388,7 +409,12 @@ fn loose_word_end(input: &[u8], start: usize, phrase: bool) -> usize {
     index
 }
 
-fn decode(input: &[u8], options: &DecodeOptions, phrase: bool) -> DecodedHeader {
+fn decode(
+    input: &[u8],
+    options: &DecodeOptions,
+    phrase: bool,
+    mut charset_counts: Option<&mut Vec<(Option<Charset>, usize)>>,
+) -> DecodedHeader {
     let mut writer = Writer::new(input, options.fallback_charset);
     let mut index = 0;
     let mut previous_encoded = false;
@@ -429,6 +455,16 @@ fn decode(input: &[u8], options: &DecodeOptions, phrase: bool) -> DecodedHeader 
         }
         let range = start..index;
         if let Some(word) = encoded_word(input, range.clone()) {
+            if let Some(counts) = &mut charset_counts {
+                if let Some((_, count)) = counts
+                    .iter_mut()
+                    .find(|(charset, _)| *charset == word.charset)
+                {
+                    *count += 1;
+                } else {
+                    counts.push((word.charset, 1));
+                }
+            }
             // RFC 2047 discards whitespace between encoded words, even when
             // the charset or transfer encoding changes and ends a payload run.
             if !previous_encoded {

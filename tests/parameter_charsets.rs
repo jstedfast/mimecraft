@@ -74,7 +74,6 @@ fn round_trip(value: &ContentDisposition, options: &HeaderFormatOptions) -> Stri
                 .collect::<Vec<_>>(),
             "{output:?}"
         );
-        assert!(parsed.parameters().iter().all(|p| p.charset().is_none()));
     }
     output
 }

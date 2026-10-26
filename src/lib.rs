@@ -314,9 +314,9 @@
 //! with decoded parameters and accessors for common metadata. They also support
 //! construction and editing through validated tokens and ordered parameter lists;
 //! [`HeaderFormatOptions`] controls their ASCII header serialization, with
-//! RFC 2231 parameters, opt-in RFC 2047 compatibility output, per-parameter
+//! RFC 2231 parameters, RFC 2047 compatibility output, per-parameter
 //! encoding/quoting overrides, preferred charsets with whole-value UTF-8 fallback,
-//! folding, and selectable CRLF/LF endings.
+//! recovered parsed encoding preferences, folding, and selectable CRLF/LF endings.
 //!
 //! The default `simd` feature accelerates Base64 and UU with runtime-detected
 //! SSSE3/AVX2, and MIME content scanning with SSE2/AVX2, on x86/x86-64.

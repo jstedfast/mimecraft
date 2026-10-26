@@ -17,9 +17,10 @@ use crate::{
 ///
 /// Defaults to 78-byte lines, CRLF endings, and quoting only when necessary.
 /// RFC 2231 is the default for non-ASCII text, controls, encoded-word lookalikes,
-/// and long values. RFC 2047 output is opt-in for legacy compatibility. Output
-/// charset selection prefers ASCII and Latin-1, then the configured charset
-/// (UTF-8 by default). Raw internationalized headers are not supported.
+/// and long values. RFC 2047 compatibility output can be explicitly selected or
+/// recovered from parsed parameters. Output charset selection prefers ASCII
+/// and Latin-1, then the configured charset (UTF-8 by default).
+/// Raw internationalized headers are not supported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderFormatOptions {
     /// Maximum bytes per physical line, excluding the newline, in `60..=998`.

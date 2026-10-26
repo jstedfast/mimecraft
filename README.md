@@ -6428,8 +6428,8 @@ optionally quoted sections. Legacy/stateful and UTF-16 chunks are encoded as
 complete strings, preserving scalar boundaries and including state-reset bytes
 in their line budgets. Parameter and encoded-word decoding restart character
 conversion at explicit ISO-2022-JP ASCII-reset boundaries, while preserving
-split transfer escapes and charset state elsewhere. Original language tags and
-declared charsets are not recovered when parsing.
+split transfer escapes and charset state elsewhere. Original language tags,
+charset alias spelling, and unnecessary quoting are not retained.
 
 Set `HeaderFormatOptions::parameter_encoding_method` to
 `ParameterEncodingMethod::Rfc2047` for legacy clients that require encoded words
@@ -6447,8 +6447,24 @@ Charset, encoding-method, and quoting preferences survive cloning and value
 edits, including `ParameterList::set`
 and `ContentDisposition::set_file_name`. Add an authored `Parameter` with
 `ParameterList::add` or replace an existing entry with `ParameterList::replace`;
-names remain checked for case-insensitive uniqueness. Parsing continues to use
-default preferences rather than recovering formatting choices from the wire.
+names remain checked for case-insensitive uniqueness.
+
+Parsing now recovers per-parameter encoding preferences. Extended values and
+continuations select RFC 2231; the first encoded section supplies the charset,
+including Latin-1 recovery for missing or unsupported declarations. Entirely
+unencoded continuations inherit the charset. Ordinary values containing
+recognized encoded words select RFC 2047 and the most common word charset,
+with ties resolved by first encounter and charset aliases counted together.
+As in MimeKit, RFC 2047 UTF-8 inherits the header-wide charset; a predominant
+unsupported label leaves both preferences unset rather than remembering a
+guessed charset. Unlike upstream's default codepage result for plain text,
+ordinary values without recognized encoded words keep default preferences.
+
+Recovered preferences take precedence over header-wide formatting choices.
+Clear them with `set_encoding_method(None)` and `set_charset(None)` on an owned
+parameter and replace its list entry to restore inheritance. These preferences
+do not force short ASCII values to be encoded or disable automatic Latin-1
+selection. Formatting still normalizes syntax rather than reproducing the wire.
 
 The default line limit is 78 **bytes**, counting the field name, tabs, quotes,
 and separators but excluding newline bytes. Continuation lines start with one
@@ -6463,8 +6479,8 @@ declaration fits but the first character must go in the following section.
 Serialization preserves parameter order and spelling without mutating values,
 historical diagnostics, or separately stored raw headers. Failures return no
 partial output. These APIs normalize headers, not reproduce their original
-bytes; use `Header::raw()` for the latter. Raw internationalized headers and
-recovery of parsed encoding preferences remain unported.
+bytes; use `Header::raw()` for the latter. Raw internationalized headers remain
+unported.
 
 ## Scope and compatibility
 
@@ -7261,8 +7277,11 @@ and `Rfc2231GetNextValue`, including whole-value UTF-8 fallback and complete
 legacy/stateful chunks. ASCII, Latin-1, and UTF-8 keep their scalar fast path.
 GB18030 and unmappable-charset vectors come from `UnitTests/ParameterTests.cs`;
 Rust additionally checks UTF-16 surrogate boundaries, independent state resets,
-and exact physical-line budgets. Recovery of parsed encoding preferences is
-not yet ported.
+and exact physical-line budgets. Parsed encoding preferences follow
+`ParameterList.TryParse` and `Rfc2047.TokenDecoder.GetMostCommonCodePage`,
+including first-encounter ties, unknown-label grouping, and RFC 2047 UTF-8
+inheritance. Plain values keep default preferences rather than adopting
+RFC 2047 solely because of the source decoder's default codepage result.
 Typed content-header parsing and accessors follow `ContentType.cs` and
 `ContentDisposition.cs`, with vectors from their corresponding unit tests.
 Their parameter parser shares original-input positions with standalone parameter

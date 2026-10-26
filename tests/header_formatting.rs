@@ -261,7 +261,10 @@ fn rfc2047_parameter_compatibility_vectors() {
             )
             .unwrap();
             assert_eq!(parsed.file_name(), Some(text));
-            assert_eq!(parsed.parameters().as_slice()[0].encoding_method(), None);
+            assert_eq!(
+                parsed.parameters().as_slice()[0].encoding_method(),
+                Some(ParameterEncodingMethod::Rfc2047)
+            );
         }
     }
     let output = round_trip(&file_name("dir\\fichier-\u{e9}.txt"), &options);
@@ -424,6 +427,11 @@ fn canonical_latin1_and_utf8_vectors() {
         )
     );
     check_wire(&output, &options);
+    // Parsing retains the chosen output preferences as well as the text.
+    let mut parameter = value.parameters().as_slice()[1].clone();
+    parameter.set_encoding_method(Some(ParameterEncodingMethod::Rfc2231));
+    parameter.set_charset(Some(mimecraft::charsets::Charset::LATIN1));
+    value.parameters_mut().replace(1, parameter).unwrap();
     assert_eq!(
         ContentType::parse(output.split_once(':').unwrap().1.as_bytes()).unwrap(),
         value
@@ -764,7 +772,7 @@ fn serialized_headers_integrate_with_incremental_raw_parser() {
         let mut content_type = ContentType::new("text", "plain").unwrap();
         content_type.set_charset(Some("utf-8"));
         content_type.set_name(Some("\u{1f4e7}.txt"));
-        let disposition = file_name(&"document \u{e9}\u{2603}".repeat(30));
+        let mut disposition = file_name(&"document \u{e9}\u{2603}".repeat(30));
         let first = content_type
             .to_header_string_with_options(&options)
             .unwrap();
@@ -779,6 +787,15 @@ fn serialized_headers_integrate_with_incremental_raw_parser() {
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0].raw(), first.as_bytes());
         assert_eq!(headers[1].raw(), second.as_bytes());
+        for (parameters, index) in [
+            (content_type.parameters_mut(), 1),
+            (disposition.parameters_mut(), 0),
+        ] {
+            let mut parameter = parameters.as_slice()[index].clone();
+            parameter.set_encoding_method(Some(ParameterEncodingMethod::Rfc2231));
+            parameter.set_charset(Some(mimecraft::charsets::Charset::UTF8));
+            parameters.replace(index, parameter).unwrap();
+        }
         assert_eq!(
             ContentType::parse(headers[0].raw_value()).unwrap(),
             content_type

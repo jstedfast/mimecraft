@@ -18,8 +18,9 @@ use crate::{
 /// Names cannot be changed in place. Parsed names retain their first encountered
 /// spelling with continuation suffixes removed. Values are Unicode strings,
 /// not raw header syntax. Authored parameters may override the output encoding
-/// method, prefer a charset, and request quoting. Parsing does not recover those
-/// preferences or language tags.
+/// method, prefer a charset, and request quoting. Parsing recovers encoding
+/// preferences from extended parameters and recognized encoded words, but not
+/// language tags or a request to retain unnecessary quotes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
     name: String,
@@ -108,7 +109,21 @@ impl Parameter {
 
     /// Returns the preferred output charset, or `None` to inherit header options.
     ///
-    /// This is not the charset declared in a parsed parameter.
+    /// Parsing retains the first extended section's charset (including Latin-1
+    /// recovery), or the most common recognized encoded-word charset. Ties use
+    /// first encounter order. RFC 2047 UTF-8 uses inheritance, as in MimeKit;
+    /// ordinary text and a predominant unsupported label also use inheritance.
+    /// This is a formatting preference, not an exact record of the original label.
+    ///
+    /// ```
+    /// use mimecraft::{ParameterList, ParameterEncodingMethod, charsets::Charset};
+    ///
+    /// let parameters = ParameterList::parse(b"name*=ISO_8859_1'fr'caf%E9")?;
+    /// let parameter = &parameters.as_slice()[0];
+    /// assert_eq!(parameter.charset(), Some(Charset::LATIN1));
+    /// assert_eq!(parameter.encoding_method(), Some(ParameterEncodingMethod::Rfc2231));
+    /// # Ok::<(), mimecraft::ParameterParseError>(())
+    /// ```
     pub fn charset(&self) -> Option<Charset> {
         self.charset
     }
@@ -396,6 +411,9 @@ impl ParameterList {
     ///
     /// Recovery diagnostics are available via [`Self::issues`]. Neither syntax
     /// mode validates percent/Base64/Q payloads or all RFC 2231 constraints.
+    /// Parsed encoding preferences override header-wide formatting options.
+    /// Ordinary values retain default preferences; quoting and language tags
+    /// are not recovered.
     ///
     /// # Errors
     ///
@@ -435,26 +453,38 @@ impl ParameterList {
                     continue;
                 }
             }
-            let value = if continued || parts[0].encoded {
+            let (value, encoding_method, charset) = if continued || parts[0].encoded {
                 if continued {
                     // Stable ties give duplicate section numbers a deterministic
                     // encounter order; the source's List.Sort tie order is unspecified.
                     parts.sort_by_key(|part| part.id);
                     check_sections(&parts, &mut result.issues);
                 }
-                decode_extended(&parts, options, &mut result.issues)
+                let (value, charset) = decode_extended(&parts, options, &mut result.issues);
+                (value, Some(ParameterEncodingMethod::Rfc2231), charset)
             } else {
-                decode_ordinary(&parts[0], options, &mut result.issues)
+                let (value, charset) = decode_ordinary(&parts[0], options, &mut result.issues);
+                // UTF-8 is the default charset, so there is no need to remember
+                // it. Still retain RFC 2047 to avoid switching encoding methods
+                // on successive parse/format round trips.
+                (
+                    value,
+                    charset.map(|_| ParameterEncodingMethod::Rfc2047),
+                    charset.filter(|&charset| charset != Charset::UTF8),
+                )
             };
             if let Some(index) = existing {
-                result.parameters[index].value = value;
+                let parameter = &mut result.parameters[index];
+                parameter.value = value;
+                parameter.encoding_method = encoding_method;
+                parameter.charset = charset;
             } else {
                 positions.insert(key, result.parameters.len());
                 result.parameters.push(Parameter {
                     name: name.to_owned(),
                     value,
-                    encoding_method: None,
-                    charset: None,
+                    encoding_method,
+                    charset,
                     always_quote: false,
                 });
             }
@@ -864,13 +894,13 @@ fn decode_ordinary(
     part: &Pair<'_>,
     options: &ParameterParseOptions,
     issues: &mut Vec<ParameterIssue>,
-) -> String {
+) -> (String, Option<Charset>) {
     let bytes = if part.value.starts_with(b"\"") {
         unquote_bytes(&part.value, false)
     } else {
         Cow::Borrowed(part.value.as_ref())
     };
-    let decoded = rfc2047::decode_text_with_options(
+    let (decoded, charset) = rfc2047::decode_parameter(
         &bytes,
         &rfc2047::DecodeOptions {
             compliance_mode: options.rfc2047_compliance_mode,
@@ -896,7 +926,7 @@ fn decode_ordinary(
             kind,
         });
     }
-    decoded.text
+    (decoded.text, charset)
 }
 
 fn extended_charset<'a>(
@@ -938,7 +968,7 @@ fn decode_extended(
     parts: &[Pair<'_>],
     options: &ParameterParseOptions,
     issues: &mut Vec<ParameterIssue>,
-) -> String {
+) -> (String, Option<Charset>) {
     let mut output = String::new();
     let mut hex = Rfc2231Decoder::new();
     let mut charset: Option<Charset> = None;
@@ -1027,7 +1057,7 @@ fn decode_extended(
             kind: ParameterIssueKind::IncompletePercentEscape,
         });
     }
-    output
+    (output, charset)
 }
 
 fn flush_extended_bytes(

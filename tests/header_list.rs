@@ -466,6 +466,10 @@ X-Trace: unchanged\r\ncontent-type: application/octet-stream\r\n",
     let raw = list.get("content-type").unwrap();
     assert_eq!(raw.raw(), formatted.as_bytes());
     assert_eq!(raw.id(), HeaderId::ContentType);
+    let mut parameter = content_type.parameters().as_slice()[0].clone();
+    parameter.set_encoding_method(Some(mimecraft::ParameterEncodingMethod::Rfc2231));
+    parameter.set_charset(Some(mimecraft::charsets::Charset::LATIN1));
+    content_type.parameters_mut().replace(0, parameter).unwrap();
     assert_eq!(ContentType::parse(raw.raw_value()).unwrap(), content_type);
     assert_eq!(list.get("Subject").unwrap().raw(), b"Subject: keep me\r\n");
     assert_eq!(

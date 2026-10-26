@@ -350,6 +350,11 @@ fn custom_formatters_keep_folds_newlines_and_cached_identifiers() {
         assert!(header.raw().ends_with(b"\n"));
         assert!(header.raw().windows(2).any(|bytes| bytes == b"\n\t"));
     }
+    for parameters in [content_type.parameters_mut(), disposition.parameters_mut()] {
+        let mut parameter = parameters.as_slice()[0].clone();
+        parameter.set_encoding_method(Some(mimecraft::ParameterEncodingMethod::Rfc2231));
+        parameters.replace(0, parameter).unwrap();
+    }
     assert_eq!(type_header.parse_content_type().unwrap(), content_type);
     assert_eq!(
         disposition_header.parse_content_disposition().unwrap(),
