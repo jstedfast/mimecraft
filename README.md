@@ -180,8 +180,8 @@ MimeKit. The crate is not configured for publication.
   ordered groups/lists, without including routes or decoding diagnostics.
 - Checked ASCII address-value encoding with RFC 2047 names, IDNA domains/routes,
   iterative nested groups, and explicit errors identifying failed members.
-- Complete ASCII address headers with checked field names, CRLF/LF endings,
-  grammar-aware folding, and enforced physical-line limits.
+- Complete address headers with checked field names, CRLF/LF endings,
+  grammar-aware folding, enforced physical-line limits, and opt-in UTF-8.
 - Quoted-string utilities with append-only output, tolerant unquoting, optional
   tab conversion, and byte-preserving operation without charset decoding.
 - Date-header parsing and canonical formatting, with legacy format recovery,
@@ -2246,7 +2246,9 @@ pieces leave headers unchanged. Equal lists are still reformatted so route-only
 edits are not lost. `_with_options` setters accept `AddressHeaderFormatOptions`.
 
 Defaults use ASCII output, UTF-8 encoded names, IDNA domains/routes, CRLF, and
-78-byte physical lines. SMTPUTF8, field-specific address-count/group validation,
+78-byte physical lines. `AddressHeaderFormatOptions::international` enables UTF-8
+output; callers must ensure compatible transport support. SMTPUTF8 negotiation,
+field-specific address-count/group validation,
 Sender inference, reply-address fallback, and resent-block selection are not
 provided. Resent accessors aggregate and replace across all matching blocks.
 **Bcc and Resent-Bcc are not automatically hidden when writing messages**;
@@ -2336,12 +2338,13 @@ route-only changes. `None` removes all occurrences, including malformed values.
 Defaults use ASCII output, UTF-8 encoded display names, IDNA-normalized domains
 and routes, CRLF, and an enforced 78-byte physical-line limit. The `_with_options`
 setters accept `AddressHeaderFormatOptions`. Invalid options, encoding errors,
-international local parts, and unbreakable oversized pieces leave all headers
-unchanged. Removal ignores unused formatting options. Input mailboxes and body
-sources are never modified.
+international local parts in ASCII mode, and unbreakable oversized pieces leave
+all headers unchanged. Removal ignores unused formatting options. Input mailboxes
+and body sources are never modified.
 
 Sender and Resent-Sender are independent. No From/Resent-From inference, resent
-block construction, SMTP envelope generation, or SMTPUTF8 output is provided.
+block construction, SMTP envelope generation, or SMTPUTF8 negotiation is provided.
+Set `AddressHeaderFormatOptions::international` for UTF-8 header output.
 
 ### Message dates and MIME version
 
@@ -5699,7 +5702,8 @@ These methods return **unfolded value syntax**, not complete transport headers.
 They add no field name or terminal newline and do not enforce physical-line or
 SMTP address-length limits. Use `AddressList::to_header_string` when a complete
 folded field is needed. Name controls are encoded, not sanitized: decoded names
-can still contain controls. SMTPUTF8 output remains deferred.
+can still contain controls. These value APIs remain ASCII-only; international
+output is available through the complete header formatter.
 
 ### Folded address headers
 
@@ -5739,8 +5743,45 @@ when an indivisible piece cannot fit. Attached commas and semicolons stay with
 their preceding piece; exceptionally long routes, quoted local parts, or runs
 of closing nested-group semicolons may therefore fail rather than be rewritten.
 No partial header is returned, and source values/diagnostics remain unchanged.
-International local parts are still rejected; this is not SMTPUTF8 output,
-SMTP address-length validation, or decoded-name sanitization.
+International local parts are rejected by default. This does not perform
+SMTP address-length validation or decoded-name sanitization.
+
+#### International address headers
+
+Set `AddressHeaderFormatOptions::international` to allow UTF-8 display names
+and local parts. The formatter retains stored domain and source-route spelling,
+including Unicode, letter case, and ACE labels, after the same MIME-safe IDNA
+validation used for ASCII output. It does not decode ACE labels or normalize
+raw names to the selected encoding charset. Routes still skip whitespace-only
+entries and normalize domain-literal whitespace without validating IP addresses.
+
+```rust
+use mimecraft::{AddressList, AddressHeaderFormatOptions};
+
+let list: AddressList = "Ren\u{e9}e <caf\u{e9}@b\u{fc}cher.example>".parse()?;
+let options = AddressHeaderFormatOptions {
+    international: true,
+    ..Default::default()
+};
+assert_eq!(list.to_header_string_with_options("To", &options)?,
+    "To: Ren\u{e9}e <caf\u{e9}@b\u{fc}cher.example>\r\n");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Raw names are quoted when phrase specials or repeated spaces require it.
+Individual raw name pieces must fit with a continuation tab and a group's
+colon. Oversized names, ASCII controls, and literal encoded-word lookalikes
+use whole-name RFC 2047 encoding instead of inserting whitespace into the
+decoded name. Encoded fallback honors the chosen charset and encoded-word
+limit, returning an error if needed; raw UTF-8 ignores the charset, but invalid
+word limits are still rejected. Line limits count UTF-8 bytes, not characters.
+
+Strict addr-spec syntax, domain/route checks, indivisible addr-specs and routes,
+and nested error paths still apply. Message address and Sender/Resent-Sender
+`_with_options` setters support this mode and remain atomic on failure.
+ASCII-only value APIs and default header output are unchanged. This option
+does not negotiate SMTPUTF8; callers must ensure the destination accepts
+internationalized headers and addresses.
 
 ### Domain routes
 
@@ -6522,8 +6563,8 @@ declaration fits but the first character must go in the following section.
 Serialization preserves parameter order and spelling without mutating values,
 historical diagnostics, or separately stored raw headers. Failures return no
 partial output. These APIs normalize headers, not reproduce their original
-bytes; use `Header::raw()` for the latter. Unstructured UTF-8 output has its own
-formatting option; internationalized address formatting remains unported.
+bytes; use `Header::raw()` for the latter. Unstructured and address-header UTF-8
+output have their own independent formatting options.
 
 ## Scope and compatibility
 
@@ -7265,7 +7306,11 @@ using a syntax-aware scan of our encoded output to preserve quoted whitespace,
 routes, and addr-specs. Physical limits are hard bounds rather than soft
 targets; name words are bounded to fit, while indivisible oversized pieces
 fail explicitly. Field validation, LF/CRLF selection, and retained member-error
-paths complete the ASCII path. Internationalized output remains deferred.
+paths complete the ASCII path. International output also adapts
+`InternetAddress.EncodeInternationalizedPhrase` and the international mailbox,
+group, and route branches. Raw output retains checked address/domain spelling;
+whole-name encoding preserves controls, literal encoded-word lookalikes, and
+oversized words or quoted names without introducing decoded whitespace.
 Domain routes follow `DomainList.cs` and its `Utils/ParseUtils.cs` domain helpers,
 with vectors from `UnitTests/DomainListTests.cs`. Domain normalization is shared
 with message IDs while retaining each enclosing grammar's trailing-dot sentinels.

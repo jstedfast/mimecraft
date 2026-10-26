@@ -427,7 +427,9 @@ impl<R> MimeMessage<R> {
     /// route-only edits. The input list and unrelated headers remain unchanged.
     ///
     /// Defaults use ASCII output, UTF-8 encoded names, IDNA domains/routes,
-    /// CRLF, and enforced 78-byte physical lines. SMTPUTF8 is not supported.
+    /// CRLF, and enforced 78-byte physical lines. Set
+    /// [`AddressHeaderFormatOptions::international`] for UTF-8 output;
+    /// callers must ensure compatible transport support.
     /// This does not enforce field-specific address counts or group restrictions,
     /// infer Sender, build resent blocks, or prepare an SMTP envelope.
     ///
@@ -989,9 +991,10 @@ impl<R> MimeMessage<R> {
     /// Assigns or removes Sender using explicit address-header formatting.
     ///
     /// `Some` formats one mailbox through [`AddressList::to_header_with_options`],
-    /// including name encoding, IDNA conversion, and enforced physical-line
+    /// including name encoding, domain validation, and enforced physical-line
     /// limits. Defaults use ASCII output, UTF-8 encoded names, CRLF, and 78-byte
-    /// lines. International local parts are rejected; SMTPUTF8 is not supported.
+    /// lines. [`AddressHeaderFormatOptions::international`] enables UTF-8 names
+    /// and local parts; callers must ensure compatible transport support.
     ///
     /// Formatting finishes before editing. Replaces all occurrences at the
     /// first slot, or appends if absent. Every `Some` assignment reformats,

@@ -1,4 +1,5 @@
-// Adapted from MimeKit's MailboxAddress.cs, GroupAddress.cs and InternetAddressList.cs.
+// Adapted from MimeKit's InternetAddress.cs, MailboxAddress.cs, GroupAddress.cs
+// and InternetAddressList.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{error::Error, fmt};
@@ -7,15 +8,17 @@ use crate::{
     AddrSpec, AddrSpecParseError, AddrSpecParseOptions, Address, AddressComplianceMode,
     AddressList, DomainListEncodeError, GroupAddress, MailboxAddress,
     idna::IdnaError,
+    parse_utils::is_ascii_atom,
     rfc2047::{self, EncodeOptions},
+    utils::quote,
 };
 
-/// Why an address could not be encoded as an ASCII value.
+/// Why an address could not be encoded for header output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AddressEncodeErrorKind {
     /// Invalid name-encoding options, unmappable text, or an encoded word too long.
     Name(rfc2047::EncodeError),
-    /// A local part requires internationalized address support and cannot be downgraded.
+    /// A local part requires international output, but ASCII output was requested.
     InternationalLocalPart,
     /// An address accepted by compatibility parsing failed strict syntax parsing.
     AddrSpec(AddrSpecParseError),
@@ -25,7 +28,7 @@ pub enum AddressEncodeErrorKind {
     Route(DomainListEncodeError),
 }
 
-/// An ASCII address-value encoding failure, with no partial output returned.
+/// An address-value encoding failure, with no partial output returned.
 ///
 /// [`Self::path`] identifies the failing address by zero-based member indexes.
 /// For a list, its first element indexes the top-level list. For a standalone
@@ -58,7 +61,7 @@ impl AddressEncodeError {
 
 impl fmt::Display for AddressEncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("cannot encode ASCII address")?;
+        f.write_str("cannot encode address")?;
         if !self.path.is_empty() {
             write!(f, " at member path {:?}", self.path)?;
         }
@@ -103,7 +106,14 @@ pub(crate) fn encode_mailbox(
 ) -> Result<String, AddressEncodeError> {
     validate_options(options)?;
     let mut output = String::new();
-    append_mailbox(mailbox, options, &mut output).map_err(AddressEncodeError::at_root)?;
+    append_mailbox(
+        mailbox,
+        options,
+        false,
+        options.max_word_length,
+        &mut output,
+    )
+    .map_err(AddressEncodeError::at_root)?;
     Ok(output)
 }
 
@@ -113,8 +123,15 @@ pub(crate) fn encode_group(
 ) -> Result<String, AddressEncodeError> {
     validate_options(options)?;
     let mut output = String::new();
-    append_group_name(group, options, &mut output).map_err(AddressEncodeError::at_root)?;
-    append_members(group.members(), options, &mut output)?;
+    append_group_name(group, options, false, options.max_word_length, &mut output)
+        .map_err(AddressEncodeError::at_root)?;
+    append_members(
+        group.members(),
+        options,
+        false,
+        options.max_word_length,
+        &mut output,
+    )?;
     output.push(';');
     Ok(output)
 }
@@ -122,20 +139,24 @@ pub(crate) fn encode_group(
 pub(crate) fn encode_list(
     list: &AddressList,
     options: &EncodeOptions,
+    international: bool,
+    max_name_length: usize,
 ) -> Result<String, AddressEncodeError> {
     validate_options(options)?;
     let mut output = String::new();
-    append_members(list, options, &mut output)?;
+    append_members(list, options, international, max_name_length, &mut output)?;
     Ok(output)
 }
 
 fn append_mailbox(
     mailbox: &MailboxAddress,
     options: &EncodeOptions,
+    international: bool,
+    max_name_length: usize,
     output: &mut String,
 ) -> Result<(), AddressEncodeErrorKind> {
     let address = mailbox.address();
-    if !address.local_part().is_ascii() {
+    if !international && !address.local_part().is_ascii() {
         return Err(AddressEncodeErrorKind::InternationalLocalPart);
     }
     // Compatibility parsing can retain consecutive/trailing local-part dots.
@@ -151,15 +172,27 @@ fn append_mailbox(
     let ascii = address
         .with_ascii_domain()
         .map_err(AddressEncodeErrorKind::Domain)?;
+    // International formatting retains the stored addr-spec rather than
+    // converting its domain. Still validate it before emitting raw text.
+    let formatted = if international {
+        address.as_str()
+    } else {
+        &ascii
+    };
     let route = mailbox
         .route()
-        .to_ascii()
+        .encode(international)
         .map_err(AddressEncodeErrorKind::Route)?;
     let named = !mailbox.display_name().is_empty();
     if named {
         output.push_str(
-            &rfc2047::encode_phrase_with_options(mailbox.display_name(), options)
-                .map_err(AddressEncodeErrorKind::Name)?,
+            &encode_name(
+                mailbox.display_name(),
+                options,
+                international,
+                max_name_length,
+            )
+            .map_err(AddressEncodeErrorKind::Name)?,
         );
         output.push(' ');
     }
@@ -173,7 +206,7 @@ fn append_mailbox(
         output.push_str(&route);
         output.push(':');
     }
-    output.push_str(&ascii);
+    output.push_str(formatted);
     if angled {
         output.push('>');
     }
@@ -183,13 +216,21 @@ fn append_mailbox(
 fn append_group_name(
     group: &GroupAddress,
     options: &EncodeOptions,
+    international: bool,
+    max_name_length: usize,
     output: &mut String,
 ) -> Result<(), AddressEncodeErrorKind> {
-    // An empty quoted name is significant: consecutive bare colons would be
-    // treated as compatibility noise rather than nested unnamed groups.
+    // RFC 5322 requires a group display name, so quote even an empty name.
+    // Consecutive bare colons would be treated as compatibility noise rather
+    // than nested unnamed groups.
     output.push_str(
-        &rfc2047::encode_phrase_with_options(group.display_name(), options)
-            .map_err(AddressEncodeErrorKind::Name)?,
+        &encode_name(
+            group.display_name(),
+            options,
+            international,
+            max_name_length,
+        )
+        .map_err(AddressEncodeErrorKind::Name)?,
     );
     output.push_str(": ");
     Ok(())
@@ -198,6 +239,8 @@ fn append_group_name(
 fn append_members(
     list: &AddressList,
     options: &EncodeOptions,
+    international: bool,
+    max_name_length: usize,
     output: &mut String,
 ) -> Result<(), AddressEncodeError> {
     let mut stack = vec![list.as_slice().iter().enumerate()];
@@ -216,8 +259,12 @@ fn append_members(
         }
         path.push(index);
         let result = match address {
-            Address::Mailbox(mailbox) => append_mailbox(mailbox, options, output),
-            Address::Group(group) => append_group_name(group, options, output),
+            Address::Mailbox(mailbox) => {
+                append_mailbox(mailbox, options, international, max_name_length, output)
+            }
+            Address::Group(group) => {
+                append_group_name(group, options, international, max_name_length, output)
+            }
         };
         result.map_err(|kind| AddressEncodeError {
             path: path.clone(),
@@ -230,4 +277,35 @@ fn append_members(
         }
     }
     Ok(())
+}
+
+fn encode_name(
+    name: &str,
+    options: &EncodeOptions,
+    international: bool,
+    max_length: usize,
+) -> Result<String, rfc2047::EncodeError> {
+    if international && !name.bytes().any(|byte| byte.is_ascii_control()) && !name.contains("=?") {
+        // Quote phrase specials as in EncodeInternationalizedPhrase. Also quote
+        // repeated spaces so folding cannot collapse significant whitespace.
+        let atoms = !name.is_empty()
+            && name.split(' ').all(|word| {
+                !word.is_empty()
+                    && word
+                        .bytes()
+                        .all(|byte| !byte.is_ascii() || is_ascii_atom(byte))
+            });
+        let raw = if atoms { name.to_owned() } else { quote(name) };
+        let fits = if atoms {
+            raw.split(' ').all(|word| word.len() <= max_length)
+        } else {
+            raw.len() <= max_length
+        };
+        if fits {
+            return Ok(raw);
+        }
+    }
+    // Breaking a name must not insert whitespace into a word or quoted string.
+    // Keep the whole name encoded so its original whitespace stays in payloads.
+    rfc2047::encode_phrase_with_options(name, options)
 }

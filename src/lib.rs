@@ -294,6 +294,9 @@
 //! provide checked ASCII value encoding via [`AddressList::to_ascii`] and
 //! corresponding mailbox/group methods. [`AddressList::to_header_string`] adds
 //! checked field names and hard-bounded folding using [`AddressHeaderFormatOptions`].
+//! Its opt-in [`AddressHeaderFormatOptions::international`] supports UTF-8 names
+//! and local parts with validated, stored domain/route spelling; callers must
+//! ensure the destination accepts internationalized headers and addresses.
 //! Encoded name controls are preserved, not sanitized.
 //! Address equality and hashing compare exact names/address text and ordered
 //! members, excluding source routes and decoding diagnostics.

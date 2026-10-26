@@ -10,10 +10,11 @@ use crate::{
     rfc2047::EncodeOptions,
 };
 
-/// Options for folded ASCII address headers.
+/// Options for folded address headers.
 ///
 /// Defaults to 78-byte physical lines, CRLF endings, and UTF-8 encoded names.
 /// Unlike MimeKit's soft wrapping target, the line limit is enforced.
+/// Output is ASCII unless [`Self::international`] is enabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressHeaderFormatOptions {
     /// Maximum bytes per physical line, excluding its newline, in `60..=998`.
@@ -28,7 +29,36 @@ pub struct AddressHeaderFormatOptions {
     /// The word limit is additionally capped at `max_line_length - 2`, leaving
     /// room for a continuation tab and a group's colon. Invalid options are
     /// rejected before applying this cap.
+    /// In international mode, the charset is used only for names requiring
+    /// encoding; raw names are UTF-8. The word limit is always validated.
     pub name_encoding: EncodeOptions,
+    /// Allow UTF-8 names and local parts, defaulting to false.
+    ///
+    /// Retains stored domain and route spelling, including ACE labels, after
+    /// the same domain validation used for ASCII output. Domain literals retain
+    /// the existing whitespace normalization; no DNS or delivery checks occur.
+    /// Raw name pieces must fit with a continuation tab and a group's colon.
+    /// Oversized pieces, controls, or literal encoded-word lookalikes cause the
+    /// whole name to use the selected encoding, preserving its decoded text.
+    ///
+    /// Addr-specs and source routes remain indivisible; oversized pieces fail.
+    /// This does not negotiate SMTPUTF8 or change the ASCII-only value APIs.
+    /// Callers must ensure the destination accepts internationalized headers
+    /// and addresses.
+    ///
+    /// ```
+    /// use mimecraft::{AddressList, AddressHeaderFormatOptions};
+    ///
+    /// let list: AddressList = "Ren\u{e9}e <caf\u{e9}@example.com>".parse()?;
+    /// let options = AddressHeaderFormatOptions {
+    ///     international: true,
+    ///     ..Default::default()
+    /// };
+    /// assert_eq!(list.to_header_string_with_options("To", &options)?,
+    ///     "To: Ren\u{e9}e <caf\u{e9}@example.com>\r\n");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub international: bool,
 }
 
 impl Default for AddressHeaderFormatOptions {
@@ -37,6 +67,7 @@ impl Default for AddressHeaderFormatOptions {
             max_line_length: 78,
             new_line_format: NewLineFormat::Dos,
             name_encoding: EncodeOptions::default(),
+            international: false,
         }
     }
 }
@@ -142,9 +173,13 @@ pub(crate) fn format_header(
             .min(options.max_line_length - 2),
         ..options.name_encoding
     };
-    let value = list
-        .to_ascii_with_options(&encoding)
-        .map_err(AddressHeaderFormatError::Address)?;
+    let value = crate::address_encode::encode_list(
+        list,
+        &encoding,
+        options.international,
+        options.max_line_length - 2,
+    )
+    .map_err(AddressHeaderFormatError::Address)?;
     if !value.is_empty() {
         append_value(&value, &mut writer)?;
     }
@@ -175,6 +210,7 @@ impl HeaderWriter {
         let required = 1 + piece.len();
         self.check_length(required)?;
         if self.column + required > self.limit {
+            // The piece fits on a line of its own, but not on the current line.
             self.output.push_str(self.newline);
             self.output.push('\t');
             self.column = required;

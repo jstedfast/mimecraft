@@ -595,6 +595,103 @@ fn checked_formatting_encodes_names_domains_and_injection_with_exact_limits() {
 }
 
 #[test]
+fn international_assignments_replace_duplicates_and_keep_failures_atomic_without_io() {
+    let mailbox = MailboxAddress::new(
+        "Ren\u{e9}e",
+        "caf\u{e9}@B\u{dc}CHER.Example".parse().unwrap(),
+    );
+    let value: AddressList = vec![mailbox.clone().into()].into();
+    let options = AddressHeaderFormatOptions {
+        international: true,
+        max_line_length: 60,
+        new_line_format: NewLineFormat::Unix,
+        ..Default::default()
+    };
+    let mut invalid_route = mailbox.clone();
+    *invalid_route.route_mut() = ["relay.example", "bad\r\nBcc: injected@example.com"]
+        .into_iter()
+        .collect();
+    let long_address = MailboxAddress::new(
+        "",
+        format!("{}@example.com", "\u{e9}".repeat(40))
+            .parse()
+            .unwrap(),
+    );
+    let long_name = MailboxAddress::new(
+        &"\u{1f600}".repeat(30),
+        "caf\u{e9}@example.com".parse().unwrap(),
+    );
+    let ascii_fallback = AddressHeaderFormatOptions {
+        name_encoding: mimecraft::rfc2047::EncodeOptions {
+            charset: mimecraft::charsets::Charset::ASCII,
+            ..Default::default()
+        },
+        ..options
+    };
+    for field in FIELDS {
+        let part = MimePart::from_parts(HeaderList::new(), MimeContent::new(NoIo));
+        let mut message = MimeMessage::from_parts(
+            headers(format!(
+                "X-Before: keep\r\n{field}: old@example.com\r\nX-After: keep\r\n{field}: duplicate@example.com\r\n"
+            ).as_bytes()),
+            Some(part.into()),
+        );
+        set_with_options(&mut message, field, &value, &options).unwrap();
+        assert_eq!(
+            snapshot(&message),
+            [
+                b"X-Before: keep\r\n".to_vec(),
+                value
+                    .to_header_with_options(field, &options)
+                    .unwrap()
+                    .raw()
+                    .to_vec(),
+                b"X-After: keep\r\n".to_vec(),
+            ]
+        );
+        let parsed = get(&message, field);
+        assert!(parsed.issues.is_empty());
+        assert_eq!(parsed.addresses, value);
+        let before = snapshot(&message);
+        assert!(set(&mut message, field, &value).is_err());
+        assert_eq!(snapshot(&message), before);
+        for (invalid, formatting) in [
+            (&invalid_route, &options),
+            (&long_address, &options),
+            (&long_name, &ascii_fallback),
+        ] {
+            let list: AddressList = vec![mailbox.clone().into(), invalid.clone().into()].into();
+            assert!(set_with_options(&mut message, field, &list, formatting).is_err());
+            assert_eq!(snapshot(&message), before);
+        }
+        assert!(message.body().unwrap().headers().is_empty());
+    }
+    for resent in [false, true] {
+        let part = MimePart::from_parts(HeaderList::new(), MimeContent::new(NoIo));
+        let mut message = MimeMessage::with_body(part.into());
+        if resent {
+            message
+                .set_resent_sender_with_options(Some(&mailbox), &options)
+                .unwrap();
+            assert_eq!(message.resent_sender().unwrap(), Some(mailbox.clone()));
+        } else {
+            message
+                .set_sender_with_options(Some(&mailbox), &options)
+                .unwrap();
+            assert_eq!(message.sender().unwrap(), Some(mailbox.clone()));
+        }
+        let before = snapshot(&message);
+        let result = if resent {
+            message.set_resent_sender_with_options(Some(&long_name), &ascii_fallback)
+        } else {
+            message.set_sender_with_options(Some(&long_name), &ascii_fallback)
+        };
+        assert!(result.is_err());
+        assert_eq!(snapshot(&message), before);
+    }
+}
+
+#[test]
 fn all_fields_are_independent_and_bcc_is_not_hidden_when_writing() {
     let mut message = MimeMessage::with_body(TextPart::new("plain", "hello").unwrap().into());
     for (index, field) in FIELDS.iter().enumerate() {

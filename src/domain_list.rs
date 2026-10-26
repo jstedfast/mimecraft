@@ -100,12 +100,16 @@ impl DomainList {
     /// first invalid domain. No partial output is returned, and Unicode is never
     /// silently passed through when conversion fails.
     pub fn to_ascii(&self) -> Result<String, DomainListEncodeError> {
+        self.encode(false)
+    }
+
+    pub(crate) fn encode(&self, international: bool) -> Result<String, DomainListEncodeError> {
         let mut output = String::new();
         for (index, domain) in self.domains.iter().enumerate() {
             if domain.trim().is_empty() {
                 continue;
             }
-            let ascii = if domain.starts_with('[') {
+            let formatted = if domain.starts_with('[') {
                 let mut literal = String::new();
                 let mut consumed = 0;
                 parse_utils::parse_domain(domain.as_bytes(), &mut consumed, b"", &mut literal)
@@ -115,14 +119,21 @@ impl DomainList {
                 }
                 std::borrow::Cow::Owned(literal)
             } else {
-                crate::idna::to_ascii(domain)
-                    .map_err(|source| DomainListEncodeError::Idna { index, source })?
+                let ascii = crate::idna::to_ascii(domain)
+                    .map_err(|source| DomainListEncodeError::Idna { index, source })?;
+                // MimeKit retains domain spelling in international mode. Unlike
+                // unchecked display output, validate freely edited route entries.
+                if international {
+                    std::borrow::Cow::Borrowed(domain.as_str())
+                } else {
+                    ascii
+                }
             };
             if !output.is_empty() {
                 output.push(',');
             }
             output.push('@');
-            output.push_str(&ascii);
+            output.push_str(&formatted);
         }
         Ok(output)
     }

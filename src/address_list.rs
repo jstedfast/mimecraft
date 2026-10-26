@@ -108,12 +108,14 @@ impl AddressList {
         self.to_header_string_with_options(field, &crate::AddressHeaderFormatOptions::default())
     }
 
-    /// Serializes a complete ASCII header with explicit folding and name options.
+    /// Serializes a complete header with explicit folding and name options.
     ///
     /// Folds use a continuation tab, without splitting quoted strings,
     /// addr-specs, source routes, or attached punctuation. Long display names
     /// use bounded encoded words. Values and diagnostics remain unchanged.
-    /// Name controls are encoded, not sanitized; SMTPUTF8 output is not supported.
+    /// Name controls are encoded, not sanitized.
+    /// [`crate::AddressHeaderFormatOptions::international`] enables UTF-8 names
+    /// and local parts; callers must ensure compatible transport support.
     ///
     /// # Errors
     ///
@@ -161,7 +163,7 @@ impl AddressList {
         &self,
         options: &crate::rfc2047::EncodeOptions,
     ) -> Result<String, crate::AddressEncodeError> {
-        crate::address_encode::encode_list(self, options)
+        crate::address_encode::encode_list(self, options, false, options.max_word_length)
     }
 
     /// Creates an empty list without allocating.
