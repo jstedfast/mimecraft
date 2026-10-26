@@ -6,7 +6,7 @@ use std::{error::Error, fmt, iter::Peekable, str::Chars};
 
 use crate::{
     Parameter, ParameterEncodingMethod, ParameterList,
-    charsets::Charset,
+    charsets::{Charset, CharsetError},
     encodings::{InvalidLineLength, NewLineFormat, Rfc2231Encoder},
     parse_utils::is_attribute,
     rfc2047,
@@ -18,8 +18,8 @@ use crate::{
 /// Defaults to 78-byte lines, CRLF endings, and quoting only when necessary.
 /// RFC 2231 is the default for non-ASCII text, controls, encoded-word lookalikes,
 /// and long values. RFC 2047 output is opt-in for legacy compatibility. Output
-/// charset selection is automatic: ASCII, Latin-1, or UTF-8. Raw internationalized
-/// headers and explicit charset preferences are not supported.
+/// charset selection prefers ASCII and Latin-1, then the configured charset
+/// (UTF-8 by default). Raw internationalized headers are not supported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderFormatOptions {
     /// Maximum bytes per physical line, excluding the newline, in `60..=998`.
@@ -39,6 +39,14 @@ pub struct HeaderFormatOptions {
     /// syntax. Both methods enforce the physical-line limit and preserve literal
     /// values rather than interpreting existing encoded words.
     pub parameter_encoding_method: ParameterEncodingMethod,
+    /// Preferred charset for parameter text containing characters above U+00FF.
+    ///
+    /// Defaults to UTF-8. A parameter's charset preference takes precedence.
+    /// Printable ASCII still selects ASCII; other text entirely within U+00FF
+    /// selects Latin-1. If the preference cannot represent the entire value,
+    /// UTF-8 is used instead, never replacement text or mixed charsets.
+    /// This is independent of a Content-Type charset describing the message body.
+    pub parameter_charset: Charset,
 }
 
 impl Default for HeaderFormatOptions {
@@ -48,6 +56,7 @@ impl Default for HeaderFormatOptions {
             new_line_format: NewLineFormat::Dos,
             always_quote_parameters: false,
             parameter_encoding_method: ParameterEncodingMethod::Rfc2231,
+            parameter_charset: Charset::UTF8,
         }
     }
 }
@@ -72,6 +81,8 @@ pub enum HeaderFormatError {
     TooManyContinuations,
     /// Encoding a parameter as RFC 2047 encoded words failed.
     Encoding(rfc2047::EncodeError),
+    /// A selected charset could not encode a complete RFC 2231 chunk.
+    Charset(CharsetError),
 }
 
 impl fmt::Display for HeaderFormatError {
@@ -92,6 +103,7 @@ impl fmt::Display for HeaderFormatError {
             }
             Self::TooManyContinuations => f.write_str("parameter section number exceeds i32::MAX"),
             Self::Encoding(error) => error.fmt(f),
+            Self::Charset(error) => error.fmt(f),
         }
     }
 }
@@ -101,6 +113,7 @@ impl Error for HeaderFormatError {
         match self {
             Self::InvalidLineLength(error) => Some(error),
             Self::Encoding(error) => Some(error),
+            Self::Charset(error) => Some(error),
             _ => None,
         }
     }
@@ -243,6 +256,8 @@ impl HeaderWriter<'_> {
 
         // Use one charset for the entire value. Choose it before
         // splitting so no later section loses unrepresentable characters.
+        // An explicit charset is still a preference, not an override of
+        // the automatic ASCII/Latin-1 selection.
         let charset = if value
             .bytes()
             .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
@@ -251,7 +266,18 @@ impl HeaderWriter<'_> {
         } else if value.chars().all(|ch| u32::from(ch) <= 255) {
             Charset::LATIN1
         } else {
-            Charset::UTF8
+            let preferred = parameter
+                .charset()
+                .unwrap_or(self.options.parameter_charset);
+            // RFC 2231 allows only one charset for the entire value. Fall back
+            // to UTF-8 if any character is unrepresentable instead of replacing
+            // it with '?'. RFC 2047 also keeps one charset so re-encoding does
+            // not drift when a reader remembers only the first word's charset.
+            match preferred.encode(value) {
+                Ok(_) => preferred,
+                Err(CharsetError::UnmappableText(_)) => Charset::UTF8,
+                Err(error) => return Err(HeaderFormatError::Charset(error)),
+            }
         };
         if parameter
             .encoding_method()
@@ -260,6 +286,8 @@ impl HeaderWriter<'_> {
         {
             return self.encoded_words(name, value, charset, more);
         }
+        let simple_charset =
+            charset == Charset::ASCII || charset == Charset::LATIN1 || charset == Charset::UTF8;
         let mut chars = value.chars().peekable();
         let mut section = 0usize;
         while chars.peek().is_some() {
@@ -281,7 +309,16 @@ impl HeaderWriter<'_> {
             };
             let next = *chars.peek().expect("nonempty remainder");
             let minimum = if extended {
-                prefix.len() + encoded_length(next, charset)
+                prefix.len()
+                    + if simple_charset {
+                        encoded_length(next, charset)
+                    } else {
+                        let mut buffer = [0; 4];
+                        let bytes = charset
+                            .encode(next.encode_utf8(&mut buffer))
+                            .map_err(HeaderFormatError::Charset)?;
+                        percent_encoded_length(&bytes)
+                    }
             } else {
                 raw_length(next)
                     + if always_quote || !is_attribute(next as u8) {
@@ -299,11 +336,16 @@ impl HeaderWriter<'_> {
                 .max(minimum);
             let available = self.options.max_line_length.saturating_sub(overhead);
             let budget = preferred.min(available);
-            let chunk = next_chunk(&mut chars, charset, extended, &prefix, budget, always_quote)
-                .ok_or(HeaderFormatError::LineTooLong {
-                    required: overhead + minimum,
-                    limit: self.options.max_line_length,
-                })?;
+            let chunk = if extended && !simple_charset {
+                next_charset_chunk(&mut chars, charset, &prefix, budget)
+                    .map_err(HeaderFormatError::Charset)?
+            } else {
+                next_chunk(&mut chars, charset, extended, &prefix, budget, always_quote)
+            }
+            .ok_or(HeaderFormatError::LineTooLong {
+                required: overhead + minimum,
+                limit: self.options.max_line_length,
+            })?;
             if section == 0 && chars.peek().is_none() {
                 return self.assignment(&format!("{name}{suffix}"), &chunk, false, more);
             }
@@ -385,10 +427,53 @@ fn character_bytes(ch: char, charset: Charset, buffer: &mut [u8; 4]) -> &[u8] {
 }
 
 fn encoded_length(ch: char, charset: Charset) -> usize {
-    character_bytes(ch, charset, &mut [0; 4])
+    percent_encoded_length(character_bytes(ch, charset, &mut [0; 4]))
+}
+
+fn percent_encoded_length(bytes: &[u8]) -> usize {
+    bytes
         .iter()
         .map(|&byte| if is_attribute(byte) { 1 } else { 3 })
         .sum()
+}
+
+fn next_charset_chunk(
+    chars: &mut Peekable<Chars<'_>>,
+    charset: Charset,
+    prefix: &str,
+    budget: usize,
+) -> Result<Option<String>, CharsetError> {
+    if prefix.len() > budget {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    let mut count = 0;
+    for ch in chars.clone() {
+        text.push(ch);
+        // Never split a Unicode scalar (including a UTF-16 surrogate pair).
+        // Convert each candidate as a complete chunk, accounting for any
+        // state-reset bytes as well as percent escapes in the physical limit.
+        // Encoding scalars separately would repeatedly shift ISO-2022 state.
+        let bytes = charset.encode(&text)?;
+        if prefix.len() + percent_encoded_length(&bytes) > budget {
+            text.pop();
+            break;
+        }
+        count += 1;
+    }
+    if count == 0 {
+        // A charset-only first section can leave room for a complete character
+        // on the next line. Later sections must consume at least one scalar.
+        return Ok((!prefix.is_empty()).then(|| prefix.to_owned()));
+    }
+    let mut output = prefix.as_bytes().to_vec();
+    Rfc2231Encoder::new().encode(&charset.encode(&text)?, &mut output);
+    for _ in 0..count {
+        chars.next();
+    }
+    Ok(Some(
+        String::from_utf8(output).expect("percent output is ASCII"),
+    ))
 }
 
 fn raw_length(ch: char) -> usize {

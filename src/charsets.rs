@@ -39,6 +39,14 @@ pub(crate) enum Codec {
 pub struct Charset(Codec);
 
 impl Charset {
+    pub(crate) fn ends_in_iso2022_ascii_reset(self, bytes: &[u8]) -> bool {
+        // Independently encoded MIME chunks may end in ESC ( B and start with
+        // another designation. encoding_rs rejects adjacent designations when
+        // concatenated. At this explicit ASCII reset, character decoding can
+        // restart at the MIME boundary without losing shift or character state.
+        self.name() == "iso-2022-jp" && bytes.ends_with(b"\x1b(B")
+    }
+
     pub(crate) fn codec(self) -> Codec {
         self.0
     }

@@ -198,6 +198,14 @@ impl<'a> Writer<'a> {
         {
             self.flush();
         }
+        if self.run.as_ref().is_some_and(|run| {
+            run.charset
+                .is_some_and(|charset| charset.ends_in_iso2022_ascii_reset(&self.scratch))
+        }) {
+            self.flush_text();
+            // Keep B/Q state: a broken sender may split a transfer-encoded
+            // sequence even when the decoded bytes end in a charset reset.
+        }
         if let Some(run) = &mut self.run {
             run.range.end = range.end;
         } else {
@@ -236,11 +244,15 @@ impl<'a> Writer<'a> {
     }
 
     fn flush(&mut self) {
+        self.flush_text();
+        self.base64.reset();
+        self.quoted.reset();
+    }
+
+    fn flush_text(&mut self) {
         let Some(run) = self.run.take() else {
             return;
         };
-        self.base64.reset();
-        self.quoted.reset();
         match run.charset {
             Some(charset) => {
                 let (text, had_errors) = charset.decode_lossy(&self.scratch);

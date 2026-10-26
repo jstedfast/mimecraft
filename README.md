@@ -6411,14 +6411,25 @@ Long values use numbered continuations. Escaped quotes, whitespace, complete
 percent triplets, and Unicode scalar boundaries are preserved. Encoding does
 not remove controls from the decoded value or make a filename safe to use.
 
-Charset selection follows MimeKit's automatic choice with UTF-8 as its Unicode
-default: printable ASCII uses `us-ascii`, controls and characters through U+00FF
-use `iso-8859-1`, and other Unicode uses `utf-8`. The selection considers the
-entire parameter value and never substitutes unrepresentable characters.
-It is independent of a Content-Type `charset` parameter, which describes the
-body rather than parameter text. Extended continuations consistently use
-percent encoding; long ordinary ASCII values use unencoded, optionally quoted
-sections. Original language tags and declared charsets are not reproduced.
+Charset selection follows MimeKit's automatic choice: printable ASCII uses
+`us-ascii`, controls and text entirely within U+00FF use `iso-8859-1`, and other
+Unicode uses `HeaderFormatOptions::parameter_charset` (UTF-8 by default).
+`Parameter::set_charset(Some(charset))` overrides that preference; `None`
+restores inheritance. These are preferences, not forced encodings: ASCII and
+Latin-1 selection still takes precedence, and a preferred charset that cannot
+represent every character falls back to UTF-8 for the **entire value**, never
+replacement characters or mixed charsets. Supported encodings and legacy
+mapping limitations are those of `charsets::Charset`.
+
+This selection is independent of a Content-Type `charset` parameter, which
+describes the body rather than parameter text. Extended continuations
+consistently use percent encoding; long ordinary ASCII values use unencoded,
+optionally quoted sections. Legacy/stateful and UTF-16 chunks are encoded as
+complete strings, preserving scalar boundaries and including state-reset bytes
+in their line budgets. Parameter and encoded-word decoding restart character
+conversion at explicit ISO-2022-JP ASCII-reset boundaries, while preserving
+split transfer escapes and charset state elsewhere. Original language tags and
+declared charsets are not recovered when parsing.
 
 Set `HeaderFormatOptions::parameter_encoding_method` to
 `ParameterEncodingMethod::Rfc2047` for legacy clients that require encoded words
@@ -6432,7 +6443,8 @@ the decoded value. Short ASCII values still use ordinary tokens or quoted string
 `None` restores inheritance. `Parameter::set_always_quote(true)` requests quoting
 of that parameter's ordinary values and unencoded continuation sections, even
 when header-wide quoting is disabled. False does not override header-wide quoting.
-These preferences survive cloning and value edits, including `ParameterList::set`
+Charset, encoding-method, and quoting preferences survive cloning and value
+edits, including `ParameterList::set`
 and `ContentDisposition::set_file_name`. Add an authored `Parameter` with
 `ParameterList::add` or replace an existing entry with `ParameterList::replace`;
 names remain checked for case-insensitive uniqueness. Parsing continues to use
@@ -6451,8 +6463,8 @@ declaration fits but the first character must go in the following section.
 Serialization preserves parameter order and spelling without mutating values,
 historical diagnostics, or separately stored raw headers. Failures return no
 partial output. These APIs normalize headers, not reproduce their original
-bytes; use `Header::raw()` for the latter. Raw internationalized headers, explicit
-charset preferences, and recovery of parsed encoding preferences remain unported.
+bytes; use `Header::raw()` for the latter. Raw internationalized headers and
+recovery of parsed encoding preferences remain unported.
 
 ## Scope and compatibility
 
@@ -7244,8 +7256,13 @@ extended sections consistently use percent encoding. Global/per-parameter
 encoding-method selection, per-parameter quoting, and RFC 2047 compatibility
 output adapt `GetEncodeMethod` and `EncodeRfc2047` from `Parameter.cs`, reusing the
 shared complete-word B/Q encoder rather than the source's size estimates.
-Explicit charset preferences and recovery of parsed encoding preferences
-are not yet ported.
+Global/per-parameter charset preferences adapt `GetBestEncoding`, `CanEncode`,
+and `Rfc2231GetNextValue`, including whole-value UTF-8 fallback and complete
+legacy/stateful chunks. ASCII, Latin-1, and UTF-8 keep their scalar fast path.
+GB18030 and unmappable-charset vectors come from `UnitTests/ParameterTests.cs`;
+Rust additionally checks UTF-16 surrogate boundaries, independent state resets,
+and exact physical-line budgets. Recovery of parsed encoding preferences is
+not yet ported.
 Typed content-header parsing and accessors follow `ContentType.cs` and
 `ContentDisposition.cs`, with vectors from their corresponding unit tests.
 Their parameter parser shares original-input positions with standalone parameter

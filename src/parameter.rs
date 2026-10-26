@@ -18,13 +18,14 @@ use crate::{
 /// Names cannot be changed in place. Parsed names retain their first encountered
 /// spelling with continuation suffixes removed. Values are Unicode strings,
 /// not raw header syntax. Authored parameters may override the output encoding
-/// method and request quoting. Parsing does not recover those preferences,
-/// language tags, or an explicit output charset.
+/// method, prefer a charset, and request quoting. Parsing does not recover those
+/// preferences or language tags.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
     name: String,
     value: String,
     encoding_method: Option<ParameterEncodingMethod>,
+    charset: Option<Charset>,
     always_quote: bool,
 }
 
@@ -60,6 +61,7 @@ impl Parameter {
             name: name.to_owned(),
             value: value.into(),
             encoding_method: None,
+            charset: None,
             always_quote: false,
         })
     }
@@ -102,6 +104,35 @@ impl Parameter {
     /// ```
     pub fn set_encoding_method(&mut self, method: Option<ParameterEncodingMethod>) {
         self.encoding_method = method;
+    }
+
+    /// Returns the preferred output charset, or `None` to inherit header options.
+    ///
+    /// This is not the charset declared in a parsed parameter.
+    pub fn charset(&self) -> Option<Charset> {
+        self.charset
+    }
+
+    /// Sets the preferred output charset, or restores inheritance with `None`.
+    ///
+    /// Like MimeKit, formatting still selects ASCII for printable ASCII and
+    /// Latin-1 for controls and text entirely within U+00FF. Other text uses this
+    /// preference if representable, or UTF-8 for the entire value otherwise.
+    /// This never enables lossy substitution or forces a charset on plain tokens.
+    /// Mapping limitations are those of [`Charset::encode`].
+    ///
+    /// ```
+    /// use mimecraft::{ContentDisposition, Parameter, charsets::Charset};
+    ///
+    /// let mut parameter = Parameter::new("filename", "\u{6d4b}\u{8bd5}.txt")?;
+    /// parameter.set_charset(Some(Charset::from_label("gb18030")?));
+    /// let mut disposition = ContentDisposition::default();
+    /// disposition.parameters_mut().add(parameter)?;
+    /// assert!(disposition.to_header_string()?.contains("gb18030''"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_charset(&mut self, charset: Option<Charset>) {
+        self.charset = charset;
     }
 
     /// Returns whether this parameter requests quoting, initially false.
@@ -220,6 +251,7 @@ impl ParameterList {
             name: name.to_owned(),
             value,
             encoding_method: None,
+            charset: None,
             always_quote: false,
         });
         Ok(None)
@@ -422,6 +454,7 @@ impl ParameterList {
                     name: name.to_owned(),
                     value,
                     encoding_method: None,
+                    charset: None,
                     always_quote: false,
                 });
             }
@@ -908,7 +941,7 @@ fn decode_extended(
 ) -> String {
     let mut output = String::new();
     let mut hex = Rfc2231Decoder::new();
-    let mut charset = None;
+    let mut charset: Option<Charset> = None;
     let mut bytes = Vec::new();
     let mut run_range: Option<Range<usize>> = None;
     let group_range = parts
@@ -937,6 +970,15 @@ fn decode_extended(
                 charset = Some(selected);
                 payload = remaining;
             }
+            if charset.is_some_and(|charset| charset.ends_in_iso2022_ascii_reset(&bytes)) {
+                flush_extended_bytes(
+                    &mut output,
+                    &mut bytes,
+                    charset.expect("selected charset"),
+                    &mut run_range,
+                    issues,
+                );
+            }
             // Carry percent-escape state and decoded bytes across adjacent
             // encoded sections: a boundary can fall inside a multibyte character.
             hex.decode(payload, &mut bytes);
@@ -947,17 +989,13 @@ fn decode_extended(
                 run_range = Some(part.value_range.clone());
             }
             if !parts.get(index + 1).is_some_and(|next| next.encoded) {
-                let charset = charset.expect("encoded segment selected a charset");
-                let (text, had_errors) = charset.decode_lossy(&bytes);
-                output.push_str(&text);
-                if had_errors {
-                    issues.push(ParameterIssue {
-                        range: run_range.clone().expect("encoded run"),
-                        kind: ParameterIssueKind::InvalidBytes { charset },
-                    });
-                }
-                bytes.clear();
-                run_range = None;
+                flush_extended_bytes(
+                    &mut output,
+                    &mut bytes,
+                    charset.expect("encoded segment selected a charset"),
+                    &mut run_range,
+                    issues,
+                );
             }
         } else if !part.value.is_empty() {
             let (text, selected) = decode_best(&part.value, options.fallback_charset);
@@ -990,4 +1028,23 @@ fn decode_extended(
         });
     }
     output
+}
+
+fn flush_extended_bytes(
+    output: &mut String,
+    bytes: &mut Vec<u8>,
+    charset: Charset,
+    run_range: &mut Option<Range<usize>>,
+    issues: &mut Vec<ParameterIssue>,
+) {
+    let range = run_range.take().expect("encoded run");
+    let (text, had_errors) = charset.decode_lossy(bytes);
+    output.push_str(&text);
+    if had_errors {
+        issues.push(ParameterIssue {
+            range,
+            kind: ParameterIssueKind::InvalidBytes { charset },
+        });
+    }
+    bytes.clear();
 }
