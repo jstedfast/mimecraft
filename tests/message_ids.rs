@@ -8,6 +8,22 @@ use mimecraft::{
 };
 
 #[test]
+fn local_identifiers_use_the_os_hostname_and_round_trip() {
+    let hostname = hostname::get().unwrap();
+    let expected = mimecraft::idna::to_ascii(hostname.to_str().unwrap()).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let id = MessageId::generate().unwrap();
+        assert_eq!(
+            id.as_str().split_once('@').unwrap().1,
+            expected.trim_end_matches('.')
+        );
+        assert_eq!(MessageId::from_value(id.as_str()).unwrap(), id);
+        assert!(seen.insert(id));
+    }
+}
+
+#[test]
 fn generated_identifiers_normalize_domains_and_round_trip_through_headers() {
     let longest = format!(
         "{}.{}.{}.{}",
@@ -26,7 +42,7 @@ fn generated_identifiers_normalize_domains_and_round_trip_through_headers() {
         ("example.com\u{ff0e}", "example.com"),
         (longest.as_str(), longest.as_str()),
     ] {
-        let id = MessageId::generate(domain).unwrap();
+        let id = MessageId::generate_with_domain(domain).unwrap();
         assert_eq!(id.as_str().split_once('@').unwrap().1, expected);
         assert_eq!(MessageId::parse(id.as_str().as_bytes()).unwrap(), id);
         assert_eq!(MessageId::from_value(id.as_str()).unwrap(), id);
@@ -63,14 +79,14 @@ fn generated_identifiers_reject_invalid_or_unsafe_domains() {
     ] {
         assert!(
             matches!(
-                MessageId::generate(domain),
+                MessageId::generate_with_domain(domain),
                 Err(MessageIdGenerationError::InvalidDomain(_))
             ),
             "{domain:?}"
         );
     }
-    assert!(MessageId::generate(&"x".repeat(64)).is_err());
-    assert!(MessageId::generate(&format!("{}.com", "x.".repeat(126))).is_err());
+    assert!(MessageId::generate_with_domain(&"x".repeat(64)).is_err());
+    assert!(MessageId::generate_with_domain(&format!("{}.com", "x.".repeat(126))).is_err());
 }
 
 #[test]
@@ -80,7 +96,7 @@ fn generated_identifiers_have_expected_shape_across_concurrent_calls() {
             .map(|_| {
                 scope.spawn(|| {
                     (0..128)
-                        .map(|_| MessageId::generate("example.com").unwrap())
+                        .map(|_| MessageId::generate_with_domain("example.com").unwrap())
                         .collect::<Vec<_>>()
                 })
             })

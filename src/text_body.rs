@@ -64,12 +64,13 @@ struct Frame<'a, R> {
 pub(crate) fn select<R>(
     root: &MimeEntity<R>,
     format: TextFormat,
+    filter_attachment: bool,
 ) -> Result<Option<Vec<usize>>, TextBodyError> {
     let mut stack = vec![Frame {
         children: slice::from_ref(root),
         remaining: 0..1,
         depth: 0,
-        filter_attachment: true,
+        filter_attachment,
         default_message: false,
     }];
     let mut path = Vec::new();
@@ -184,15 +185,7 @@ pub(crate) fn related_root_match<R>(
             .transpose()
             .map_err(TextBodyError::RelatedStart)?;
         let start = reference.as_ref().map_or(start, MessageId::as_str);
-        for (index, child) in part.children().iter().enumerate() {
-            if child
-                .content_id()
-                .map_err(TextBodyError::ContentId)?
-                .is_some_and(|id| id.as_str() == start)
-            {
-                return Ok(Some(index));
-            }
-        }
+        return related_content_id_index(part, start).map_err(TextBodyError::ContentId);
     } else if let Some(media_type) = content_type.parameters().get("type") {
         for (index, child) in part.children().iter().enumerate() {
             if effective_type(child, false)?
@@ -201,6 +194,21 @@ pub(crate) fn related_root_match<R>(
             {
                 return Ok(Some(index));
             }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn related_content_id_index<R>(
+    part: &Multipart<R>,
+    id: &str,
+) -> Result<Option<usize>, MessageIdParseError> {
+    for (index, child) in part.children().iter().enumerate() {
+        if child
+            .content_id()?
+            .is_some_and(|value| value.as_str() == id)
+        {
+            return Ok(Some(index));
         }
     }
     Ok(None)

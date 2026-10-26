@@ -2675,24 +2675,96 @@ operation copies or reads body streams.
 The new root must have an explicit valid first Content-Type, whose media type
 becomes the parent's type parameter. A first-child root removes start to
 preserve MimeKit's Thunderbird compatibility workaround, without inspecting
-the new root's Content-Id. A non-first replacement requires a valid existing
-Content-Id and stores its bracketed ID in start. Unlike MimeKit, missing IDs
-are errors rather than automatically generated values. Child headers are
-unchanged; duplicate IDs are not rejected, and subsequent lookup picks the
-first matching child.
+the new root's Content-Id. A non-first replacement uses its valid existing
+Content-Id or generates and assigns one with `MessageId::generate()`, storing
+its bracketed ID in start. Set an ID beforehand to choose an explicit domain.
+Malformed existing IDs are errors, not reasons to generate replacements.
+Other child headers are unchanged; duplicate IDs are not rejected, and subsequent
+lookup picks the first matching child.
 
 `set_root_with_options` accepts `HeaderFormatOptions`. Both setters validate
 the existing boundary and serialize the complete parent Content-Type before
-editing headers or children. They collapse Content-Type duplicates at the
+editing container headers or children. They collapse Content-Type duplicates at the
 first slot while preserving other parameters, unrelated headers, other
-children, preamble, epilogue, and source positions. Metadata and formatting
-errors leave the container unchanged; the supplied root is dropped on failure,
+children, preamble, epilogue, and source positions. Metadata, ID generation, and
+formatting errors leave the container unchanged; the supplied root is dropped on failure,
 following ownership-taking API conventions. Borrowed sources stay open.
 
-URI resource lookup, Content-Location/base resolution, resource opening, and
-automatic Content-Id generation remain deferred. Body selection continues to
-follow nested multipart roots, including alternatives, through the existing
-`MimeEntity` and `MimeMessage` APIs.
+`index_of_content_id(&MessageId)` returns the first matching immediate-child
+index; `get_by_content_id(&MessageId)` borrows that child. Both return `None`
+when no child matches and perform no source I/O. These port the Content-Id
+branch of MimeKit's resource lookup using a parsed ID, not a `cid:` URI.
+Matching is case-sensitive and shares root selection's first-header parser.
+Missing IDs are skipped; malformed visited IDs return
+`MultipartRelatedError::ContentId`, without falling back to duplicate headers
+or later children. Children after a match are not examined.
+
+Lookup checks the container's first Content-Type but does not interpret root
+selectors, validate boundaries, inspect child media types or dispositions, or
+descend into children. Matches may be leaf parts, multiparts, or attached-message
+wrappers. Headers, parsed framing, and source positions are preserved.
+
+`open_by_content_id(&MessageId)` opens an incremental decoded `Read`/`BufRead`
+view of the first matching leaf resource. It ports MimeKit's resource `Open`
+without URI parsing. Missing IDs and first matches that are multipart or
+attached-message wrappers return `MultipartRelatedError::ResourceNotFound`;
+a later matching leaf does not replace that first match. Empty leaf bodies
+open successfully. Lookup errors occur before any source I/O.
+
+Opening rewinds only the selected source and delegates to `MimeContent::open`,
+using its stored transfer encoding rather than the current header. It does
+not parse the leaf's Content-Type, convert charsets, normalize newlines, or
+buffer the entire body. Use `open_by_content_id_with_metadata` when media-type
+or charset metadata is needed together with the reader. The returned reader
+exclusively borrows the container; dropping it does not rewind, and opening
+again restarts with fresh decoder state. Initial rewind errors are wrapped in
+`MultipartRelatedError::Io`; later read errors come from the reader.
+Headers, encoded bytes, parsed boundaries, and missing separators are preserved.
+
+`index_of_uri(&str)`, `get_by_uri(&str)`, and `open_by_uri(&str)` provide the
+corresponding URI-based operations, using `fluent-uri` internally rather than
+requiring a public URI type. A case-insensitive `cid:` scheme matches Content-Id
+only: the path is percent-decoded once (without converting `+` to space),
+validated as a bare `MessageId` without header normalization, and compared
+case-sensitively. CID references with an authority, query, or fragment are
+rejected; escape ID characters instead.
+
+Other references match the first Content-Location header after ordinary header
+decoding and unfolding. Relative references match relative locations literally.
+For absolute references, relative locations are resolved against the child's
+first Content-Base or, when absent, the container's first Content-Base. Without
+either base, that relative location cannot match. Absolute locations and
+relative-only comparisons do not consult Content-Base. Bases must be absolute
+URIs without fragments.
+
+Location comparison is byte-for-byte, not .NET's URI equality: scheme/host case,
+explicit ports, percent-escape spelling, queries, and fragments are significant.
+Resolution uses `fluent-uri`'s dot-segment handling, including encoded dot
+segments, without additional normalization. This ports MimeKit's lookup/base
+precedence, not every .NET URI equivalence or the full MHTML base-discovery
+algorithm. Raw headers remain authoritative; author Content-Location and
+Content-Base through the existing `HeaderList` API.
+
+Malformed input, visited locations, and required bases return explicit
+`MultipartRelatedError` variants. Invalid first headers never fall back to
+duplicate headers or later matches. URI opening preserves the same lazy decoding
+and parsed framing as ID opening; missing or non-leaf matches return
+`MultipartRelatedError::UriResourceNotFound` containing the requested reference.
+No HTML base discovery, network fetching, or recursive resource search occurs.
+
+`contains_uri(&str)` and `contains_content_id(&MessageId)` expose the same lookup
+as a boolean, including non-leaf matches. Errors remain errors, not false results.
+`open_by_uri_with_metadata` and `open_by_content_id_with_metadata` return
+`RelatedResource`, pairing an owned `content_type` with a borrowed decoded
+`reader`. Use `content_type.mime_type()` and `content_type.charset()` for MimeKit's
+metadata outputs. Missing Content-Type defaults to text/plain without inserting
+a header. Malformed first Content-Type values fail before source I/O; declared
+charsets, even unknown or empty ones, are returned without conversion.
+
+`MultipartRelated::text_body_part(format)` searches only the selected root,
+including an attached text root, and follows nested multipart roots and
+alternatives using the shared body selector. Missing formats return `None`;
+visited metadata errors propagate. This requires no source traits or source I/O.
 
 ### Decoded body text and flowed conversion
 
@@ -4124,7 +4196,7 @@ therefore emit combined message headers before root-body Content-* headers.
 Descendant offsets and embedded-message header interleaving remain intact;
 the enclosing and input fragment headers are unchanged.
 Automatic splitting remains deferred. Explicit-domain IDs can be created with
-`MessageId::generate`. Fragment leaves can use
+`MessageId::generate_with_domain`. Fragment leaves can use
 ordinary part/tree transport preparation; no splitting-specific preparation
 is performed.
 
@@ -5010,8 +5082,11 @@ opt into assignment validation.
 `MimeMessage`'s identifier and reference setters use this assignment validation
 before formatting complete headers; standalone `MessageId` remains a value type.
 
-`MessageId::generate(domain)` ports MimeKit's explicit-domain message/content-ID
-generator. It combines UTC ticks since year 1 and eight OS-random bytes, using
+`MessageId::generate()` uses the operating system's local hostname, without DNS
+resolution or caching. The name may be unqualified. Use
+`MessageId::generate_with_domain(domain)` to supply a domain instead of exposing
+the machine's hostname. Generation combines UTC ticks since year 1 and eight
+OS-random bytes, using
 MimeKit's uppercase, least-significant-digit-first base36 representation and
 big-endian random integer interpretation. It returns a `MessageId` without angle
 brackets; callers explicitly assign the result to Message-Id or Content-Id.
@@ -5019,22 +5094,24 @@ brackets; callers explicitly assign the result to Message-Id or Content-Id.
 ```rust
 use mimecraft::{MessageId, MimeMessage};
 
-let id = MessageId::generate("example.com").unwrap();
+let id = MessageId::generate_with_domain("example.com").unwrap();
 let mut message: MimeMessage = MimeMessage::new();
 message.set_message_id(id.as_str()).unwrap();
 ```
 
 Generation uses `getrandom` for OS entropy, not a time-seeded PRNG. Uniqueness
 is probabilistic; these identifiers are not authentication tokens.
-`MessageIdGenerationError` distinguishes invalid domains, clock values outside
-years 1 through 9999, and entropy failures, retaining underlying error sources.
+`MessageIdGenerationError` distinguishes hostname discovery/Unicode errors,
+invalid domains, clock values outside years 1 through 9999, and entropy failures,
+retaining underlying error sources.
 Domain and clock checks precede the entropy request; failures never substitute
 a weak random source or fallback identifier. Unlike MimeKit's platform IDN
 wrapper, generation uses the existing MIME-safe IDNA validation, lowercases
-ASCII domains, and removes an optional final DNS root dot. Hostname discovery
-and automatic constructor/header assignment remain deferred.
-Build targets must support a `getrandom` backend; targets without a default
-backend require its explicit platform-specific configuration.
+ASCII domains, and removes an optional final DNS root dot. Unlike MimeKit,
+hostname discovery failures do not silently substitute `localhost.localdomain`.
+Build targets must support `hostname` (Windows or supported POSIX-like systems)
+and a `getrandom` backend; targets without a default randomness backend require
+its explicit platform-specific configuration.
 
 ### References and In-Reply-To
 
@@ -6521,7 +6598,7 @@ intermediate concatenated message buffer is required. As in MimeKit, combined
 message and root-body offsets are cleared without changing descendant offsets.
 Visitor dispatch and disposal comments do not apply to the Rust model.
 Automatic splitting is not yet ported; explicit-domain ID generation is available
-through `MessageId::generate`.
+through `MessageId::generate_with_domain`.
 `MimeReader.cs`'s multipart/digest default is scoped to the immediate parent
 and resets at embedded message roots. Unlike cached effective metadata, the
 raw API keeps missing headers absent; the writer uses its parent frame to
@@ -6749,11 +6826,23 @@ Related multipart root management adapts `MultipartRelated.cs` and
 `UnitTests/MultipartRelatedTests.cs`. Root reads share the existing text-body
 selection helper; root replacement distinguishes an actual selector match
 from the getter's first-child fallback. The source's Thunderbird bug 471402
-comment is retained/adapted where first-child roots remove start. Explicit
-Content-Ids replace automatic generation, atomic checked metadata edits replace
+comment is retained/adapted where first-child roots remove start. Missing
+Content-Ids can be generated from the local hostname; atomic checked metadata
+edits replace
 cached parameter updates, and replaced children are returned to the caller.
-URI-based resource lookup/opening and automatic Content-Id assignment remain deferred;
-visitor dispatch and disposal invariants do not apply to the Rust model.
+Content-Id resource lookup adapts the CID branch of `IndexOf` and the
+`TestReferenceByContentId` regression using typed IDs and shared matching logic.
+Decoded opening adapts `Open` and `TestOpenNonMimePartThrows`, with borrowed
+incremental readers replacing disposable streams. Internal read-only-content
+access preserves parsed framing rather than triggering editing-accessor invalidation.
+URI lookup adapts the remaining `IndexOf` cases with `fluent-uri` resolution
+and literal comparison instead of .NET URI equality. Contains helpers, direct
+preferred-body lookup, and metadata-returning opening adapt `Contains`,
+`TryGetValue`, and the metadata `Open` overload. Tests include the upstream
+MHTML fixture, generated root IDs, lookup/base cases, and media-type/charset
+outputs. Visitor dispatch, dynamic constructor arguments, and disposal invariants
+are represented by enum dispatch, typed construction, and ownership rather than
+additional runtime APIs.
 Bounded stream views follow `IO/BoundedStream.cs`, with range and seek cases
 adapted from `UnitTests/IO/BoundedStreamTests.cs`. Relative positions, source
 cursor resynchronization, and whole-request write boundary checks are retained,

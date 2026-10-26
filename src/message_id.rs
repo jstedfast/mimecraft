@@ -3,7 +3,8 @@
 
 use std::{
     error::Error,
-    fmt,
+    ffi::OsString,
+    fmt, io,
     iter::FusedIterator,
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
@@ -47,6 +48,39 @@ pub struct MessageId {
 }
 
 impl MessageId {
+    /// Generates a Message-Id or Content-Id using the local machine's hostname.
+    ///
+    /// Adapts MimeKit's parameterless `MimeUtils.GenerateMessageId`. Queries
+    /// the operating system on each call, without DNS resolution; the name may
+    /// be unqualified. It undergoes the same validation and normalization as
+    /// [`Self::generate_with_domain`]. Use that method to choose a public domain
+    /// instead of exposing the machine's hostname.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageIdGenerationError::HostName`] when discovery fails or
+    /// the name is not Unicode, and the validation, clock, and randomness errors
+    /// of [`Self::generate_with_domain`]. Unlike MimeKit, discovery failures do
+    /// not silently substitute `localhost.localdomain`.
+    pub fn generate() -> Result<Self, MessageIdGenerationError> {
+        Self::generate_local_with(hostname::get, SystemTime::now(), getrandom::fill)
+    }
+
+    fn generate_local_with(
+        get_hostname: impl FnOnce() -> io::Result<OsString>,
+        now: SystemTime,
+        fill: impl FnOnce(&mut [u8]) -> Result<(), getrandom::Error>,
+    ) -> Result<Self, MessageIdGenerationError> {
+        let hostname = get_hostname().map_err(MessageIdGenerationError::HostName)?;
+        let domain = hostname.to_str().ok_or_else(|| {
+            MessageIdGenerationError::HostName(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "local hostname is not valid Unicode",
+            ))
+        })?;
+        Self::generate_with(domain, now, fill)
+    }
+
     /// Generates a new Message-Id or Content-Id using an explicit domain.
     ///
     /// Ports MimeKit's `MimeUtils.GenerateMessageId(domain)`: a UTC timestamp
@@ -58,13 +92,12 @@ impl MessageId {
     /// Unlike the loose parsing APIs, domains undergo [`crate::idna::to_ascii`]
     /// validation and lowercase ASCII normalization. An optional final DNS root
     /// dot is omitted, matching this type's normalized representation.
-    /// Hostname discovery, fallback domains, and automatic header assignment
-    /// are deliberately not performed.
+    /// No hostname discovery, fallback domain, or header assignment is performed.
     ///
     /// ```
     /// use mimecraft::{MessageId, MimeMessage};
     ///
-    /// let id = MessageId::generate("example.com")?;
+    /// let id = MessageId::generate_with_domain("example.com")?;
     /// let mut message: MimeMessage = MimeMessage::new();
     /// message.set_message_id(id.as_str())?;
     /// assert!(id.as_str().ends_with("@example.com"));
@@ -77,7 +110,7 @@ impl MessageId {
     /// outside years 1 through 9999, or failure to obtain OS randomness.
     /// Domain and clock validation precede the entropy request. No weak random
     /// source or substitute identifier is used on failure.
-    pub fn generate(domain: &str) -> Result<Self, MessageIdGenerationError> {
+    pub fn generate_with_domain(domain: &str) -> Result<Self, MessageIdGenerationError> {
         Self::generate_with(domain, SystemTime::now(), getrandom::fill)
     }
 
@@ -428,8 +461,10 @@ fn append_base36(output: &mut String, mut value: u64) {
 }
 
 /// A new message or content identifier could not be generated.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum MessageIdGenerationError {
+    /// The local hostname could not be obtained or is not Unicode.
+    HostName(io::Error),
     /// The domain failed IDNA or MIME-safe ASCII validation.
     InvalidDomain(crate::idna::IdnaError),
     /// The OS clock lies outside MimeKit's supported years 1 through 9999.
@@ -441,6 +476,9 @@ pub enum MessageIdGenerationError {
 impl fmt::Display for MessageIdGenerationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HostName(error) => {
+                write!(f, "message identifier hostname discovery failed: {error}")
+            }
             Self::InvalidDomain(error) => write!(f, "invalid message identifier domain: {error}"),
             Self::ClockOutOfRange => {
                 f.write_str("message identifier clock is outside years 1 through 9999")
@@ -453,6 +491,7 @@ impl fmt::Display for MessageIdGenerationError {
 impl Error for MessageIdGenerationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::HostName(error) => Some(error),
             Self::InvalidDomain(error) => Some(error),
             Self::Random(error) => Some(error),
             Self::ClockOutOfRange => None,
@@ -733,7 +772,7 @@ mod generation_tests {
             if now.duration_since(UNIX_EPOCH).unwrap() != duration {
                 continue;
             }
-            assert_eq!(message_id_ticks(now), Ok(epoch + ticks));
+            assert_eq!(message_id_ticks(now).unwrap(), epoch + ticks);
         }
         for (nanoseconds, ticks) in [(1, 1), (99, 1), (100, 1), (101, 2)] {
             let duration = Duration::from_nanos(nanoseconds);
@@ -741,25 +780,25 @@ mod generation_tests {
             if UNIX_EPOCH.duration_since(now).unwrap() != duration {
                 continue;
             }
-            assert_eq!(message_id_ticks(now), Ok(epoch - ticks));
+            assert_eq!(message_id_ticks(now).unwrap(), epoch - ticks);
         }
         let end = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
         assert_eq!(
-            message_id_ticks(end - Duration::from_nanos(100)),
-            Ok(3_155_378_975_999_999_999)
+            message_id_ticks(end - Duration::from_nanos(100)).unwrap(),
+            3_155_378_975_999_999_999
         );
-        assert_eq!(
+        assert!(matches!(
             message_id_ticks(end),
             Err(MessageIdGenerationError::ClockOutOfRange)
-        );
+        ));
         // Some platforms cannot represent year 1 as a SystemTime.
         if let Some(start) = UNIX_EPOCH.checked_sub(Duration::from_secs(62_135_596_800)) {
-            assert_eq!(message_id_ticks(start), Ok(0));
+            assert_eq!(message_id_ticks(start).unwrap(), 0);
             if let Some(before) = start.checked_sub(Duration::from_nanos(100)) {
-                assert_eq!(
+                assert!(matches!(
                     message_id_ticks(before),
                     Err(MessageIdGenerationError::ClockOutOfRange)
-                );
+                ));
             }
         }
     }
@@ -800,7 +839,7 @@ mod generation_tests {
 
         let end = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
         let error = MessageId::generate_with("example.com", end, no_entropy).unwrap_err();
-        assert_eq!(error, MessageIdGenerationError::ClockOutOfRange);
+        assert!(matches!(error, MessageIdGenerationError::ClockOutOfRange));
         assert!(error.source().is_none());
         assert!(error.to_string().contains("clock"));
 
@@ -809,14 +848,92 @@ mod generation_tests {
             Err(getrandom::Error::UNSUPPORTED)
         })
         .unwrap_err();
-        assert_eq!(
-            error,
-            MessageIdGenerationError::Random(getrandom::Error::UNSUPPORTED)
-        );
+        assert!(matches!(error, MessageIdGenerationError::Random(_)));
         assert_eq!(
             error.source().unwrap().downcast_ref::<getrandom::Error>(),
             Some(&getrandom::Error::UNSUPPORTED)
         );
         assert!(error.to_string().contains("randomness"));
+    }
+
+    #[test]
+    fn local_generation_normalizes_the_os_name_without_dns_resolution() {
+        for (hostname, expected) in [
+            ("LOCALHOST", "localhost"),
+            ("Host.EXAMPLE.COM.", "host.example.com"),
+            ("Mj\u{f6}lnir", "xn--mjlnir-xxa"),
+        ] {
+            let id = MessageId::generate_local_with(
+                || Ok(OsString::from(hostname)),
+                UNIX_EPOCH,
+                |bytes| {
+                    bytes.fill(0);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(id.as_str().split_once('@').unwrap().1, expected);
+            assert_eq!(MessageId::from_value(id.as_str()).unwrap(), id);
+        }
+    }
+
+    #[test]
+    fn hostname_failures_precede_entropy_and_do_not_use_fallback_domains() {
+        let no_entropy = |_: &mut [u8]| -> Result<(), getrandom::Error> {
+            panic!("hostname failures must precede entropy");
+        };
+        let error = MessageId::generate_local_with(
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test discovery failure",
+                ))
+            },
+            UNIX_EPOCH,
+            no_entropy,
+        )
+        .unwrap_err();
+        assert!(matches!(error, MessageIdGenerationError::HostName(_)));
+        assert_eq!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(error.to_string().contains("test discovery failure"));
+        for name in ["", "invalid host", "host\r\nBcc: victim@example.com"] {
+            assert!(matches!(
+                MessageId::generate_local_with(|| Ok(name.into()), UNIX_EPOCH, no_entropy),
+                Err(MessageIdGenerationError::InvalidDomain(_))
+            ));
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn non_unicode_hostnames_are_not_lossily_converted() {
+        #[cfg(unix)]
+        let hostname = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let hostname = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0xd800])
+        };
+        let error = MessageId::generate_local_with(
+            || Ok(hostname),
+            UNIX_EPOCH,
+            |_| panic!("invalid hostname must precede entropy"),
+        )
+        .unwrap_err();
+        let MessageIdGenerationError::HostName(error) = error else {
+            panic!("expected hostname encoding error");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

@@ -87,7 +87,17 @@
 //! [`MultipartReport`] adds checked report-type metadata to ordinary multipart
 //! containers without imposing a report layout or accessing child sources.
 //! [`MultipartRelated`] shares text-body root selection and adds atomic root
-//! replacement with checked type/start parameters, without generating IDs.
+//! replacement with checked type/start parameters and automatic missing IDs
+//! for non-first roots. It also exposes direct preferred-text-body selection.
+//! Its Content-Id lookup finds immediate children without URI resolution or
+//! source I/O, using the same matching rules as related-root selection.
+//! [`MultipartRelated::open_by_content_id`] opens a borrowed decoded resource
+//! reader without changing headers, stored bytes, or parsed framing.
+//! [`MultipartRelated::index_of_uri`], [`MultipartRelated::get_by_uri`], and
+//! [`MultipartRelated::open_by_uri`] accept string URI references, with internal
+//! `fluent-uri` parsing, CID decoding, and Content-Location/base resolution.
+//! Its contains helpers use the same lookup rules; metadata-returning opening
+//! pairs a decoded reader with an owned [`ContentType`] in [`RelatedResource`].
 //! [`MimeEntity`] and [`Multipart`] own nested MIME trees, with checked boundary
 //! edits, raw preamble/epilogue bytes, and iterative [`LeafParts`] traversal.
 //! [`Multipart::new`] generates a MimeKit-style random boundary;
@@ -140,8 +150,9 @@
 //! independent typed header access with checked parsing and canonical setters.
 //! Message identifiers and reply references also have raw-header-backed accessors,
 //! assignment-validated setters, and explicit parsing and recovery errors.
-//! [`MessageId::generate`] creates explicit-domain message or content identifiers
-//! using OS randomness, without assigning headers or discovering a hostname.
+//! [`MessageId::generate`] creates message or content identifiers using the local
+//! hostname and OS randomness; [`MessageId::generate_with_domain`] accepts an
+//! explicit domain instead. Neither method assigns headers.
 //! Date, Resent-Date, and MIME-Version accessors reuse the existing value types,
 //! with explicit absence, parse errors, and independent canonical setters.
 //! Sender accessors return owned mailbox prefixes and provide atomic, checked
@@ -451,7 +462,7 @@ pub use mime_reader::{
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};
 pub use mime_version::{MimeVersion, MimeVersionParseError, MimeVersionParseErrorKind};
 pub use multipart::{Multipart, MultipartError};
-pub use multipart_related::{MultipartRelated, MultipartRelatedError};
+pub use multipart_related::{MultipartRelated, MultipartRelatedError, RelatedResource};
 pub use multipart_report::{MultipartReport, MultipartReportError};
 pub use parameter::{
     Parameter, ParameterComplianceMode, ParameterIssue, ParameterIssueKind, ParameterList,

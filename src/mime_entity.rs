@@ -341,7 +341,15 @@ impl<R> MimeEntity<R> {
         &self,
         format: TextFormat,
     ) -> Result<Option<&MimePart<R>>, TextBodyError> {
-        let Some(path) = crate::text_body::select(self, format)? else {
+        self.text_body_part_with_attachment_filter(format, true)
+    }
+
+    pub(crate) fn text_body_part_with_attachment_filter(
+        &self,
+        format: TextFormat,
+        filter_attachment: bool,
+    ) -> Result<Option<&MimePart<R>>, TextBodyError> {
+        let Some(path) = crate::text_body::select(self, format, filter_attachment)? else {
             return Ok(None);
         };
         let mut entity = self;
@@ -370,7 +378,7 @@ impl<R> MimeEntity<R> {
         &mut self,
         format: TextFormat,
     ) -> Result<Option<&mut MimePart<R>>, TextBodyError> {
-        let Some(path) = crate::text_body::select(self, format)? else {
+        let Some(path) = crate::text_body::select(self, format, true)? else {
             return Ok(None);
         };
         let mut entity = self;
