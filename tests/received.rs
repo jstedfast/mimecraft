@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use mimecraft::{
-    DateTimeOffset, Header, Received, ReceivedClauseId as Clause,
-    ReceivedParseErrorKind as ErrorKind, ReceivedParseOptions, charsets::Charset,
+    DateTimeOffset, Header, Received, ReceivedClauseId as Clause, ReceivedFormatError,
+    ReceivedFormatOptions, ReceivedParseErrorKind as ErrorKind, ReceivedParseOptions,
+    charsets::Charset, encodings::NewLineFormat,
 };
 
 type Case = (&'static str, &'static [(&'static str, &'static str)]);
@@ -234,6 +235,45 @@ const VALID: &[Case] = &[
     ),
 ];
 
+// Explicit Reformatted values from ReceivedTests.cs; None uses the original input.
+const REFORMATTED: &[Option<&str>] = &[
+    Some(" from bar.com by foo.com; Thu, 21 May 1998 05:33:29 -0700\r\n"),
+    Some(
+        " from thumper.bellcore.com by greenbush.bellcore.com (4.1/4.7)\r\n\tid <AA01648> for nsb; Fri, 29 Nov 91 07:13:33 EST\r\n",
+    ),
+    Some(
+        " from joyce.cs.su.oz.au by thumper.bellcore.com (4.1/4.7)\r\n\tid <AA11898> for nsb@greenbush; Fri, 29 Nov 91 07:11:57 EST\r\n",
+    ),
+    Some(
+        "\r\n\tfrom Messages.8.5.N.CUILIB.3.45.SNAP.NOT.LINKED.greenbush.galaxy.sun4.41\r\n\tvia MS.5.6.greenbush.galaxy.sun4_41; Fri, 12 Jun 1992 13:29:05 -0400 (EDT)\r\n",
+    ),
+    None,
+    None,
+    Some(
+        " from smtp.domain.com (smtp.domain.com. [207.54.68.120])\r\n\tby mx.google.com with ESMTPS\r\n\tid 4fb4d7f45d1cf-659329877a1si67605a12.45.2026.02.02.09.25.54\r\n\tfor <user@gmail.com>\r\n\t(version=TLS1_2 cipher=ECDHE-ECDSA-CHACHA20-POLY1305 bits=256/256);\r\n\tMon, 02 Feb 2026 09:25:55 -0800 (PST)\r\n",
+    ),
+    None,
+    None,
+    None,
+    Some(
+        " by 2002:aa6:d946:0:b0:32a:1941:595b with SMTP id w6csp1900485lkc;\r\n\tMon, 2 Feb 2026 09:25:55 -0800 (PST)\r\n",
+    ),
+    Some(
+        " from us-smtp-delivery-105.mimecast.com (216.205.24.105)\r\n\tby BN3NAM04FT018.mail.protection.outlook.com (10.152.92.162)\r\n\twith Microsoft SMTP Server\r\n\t(version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384)\r\n\tid 15.20.1835.13 via Frontend Transport; Tue, 30 Apr 2019 19:10:19 +0000\r\n",
+    ),
+    Some(
+        " from [67.219.246.196]\r\n\t(using TLSv1.2 with cipher DHE-RSA-AES256-GCM-SHA384 (256 bits))\r\n\tby server-2.bemta.az-c.us-east-1.aws.symcld.net id 11/DD-19573-41C55BC5;\r\n\tTue, 16 Apr 2019 04:37:40 +0000\r\n",
+    ),
+    None,
+    None,
+    Some(
+        " from relay301.mycloudmailbox.com (unknown [207.126.101.249])\r\n\t(using TLSv1.2 with cipher ECDHE-RSA-AES128-SHA256 (128/128 bits))\r\n\t(No client certificate requested) by S15-GW103.mycloudmailbox.com (Postfix)\r\n\twith ESMTPS id 44th580QHjz2SnDr for <unit-tests@mimekit.net>;\r\n\tTue, 30 Apr 2019 08:42:52 -0400 (EDT)\r\n",
+    ),
+    None,
+    None,
+    Some(" from smtp.domain.com by mx.google.com with ESMTPS\r\n"),
+];
+
 fn check_fields(received: &Received, expected: &[(&str, &str)]) {
     let date = received.date_time().map(|date| date.to_string());
     for (name, actual) in [
@@ -273,6 +313,55 @@ fn upstream_valid_header_values() {
             Received::parse(&framed.as_bytes()[7..framed.len() - 7]).unwrap(),
             received
         );
+    }
+}
+
+#[test]
+fn upstream_formatted_header_values() {
+    assert_eq!(REFORMATTED.len(), VALID.len());
+    for (index, ((input, fields), reformatted)) in VALID.iter().zip(REFORMATTED).enumerate() {
+        let received = Received::parse(input.as_bytes()).unwrap();
+        let before = received.clone();
+        for (new_line_format, newline) in
+            [(NewLineFormat::Dos, "\r\n"), (NewLineFormat::Unix, "\n")]
+        {
+            let mut options = ReceivedFormatOptions {
+                new_line_format,
+                ..Default::default()
+            };
+            let expected =
+                format!("Received:{}", reformatted.unwrap_or(input)).replace("\r\n", newline);
+            let oversized = matches!(index, 8 | 9);
+            if oversized {
+                // MimeKit's soft target permits these 80-byte identifiers.
+                // Our hard limit needs 81 bytes including continuation indentation.
+                assert!(expected.split(newline).any(|line| line.len() == 81));
+                assert_eq!(
+                    received.to_header_string_with_options(&options),
+                    Err(ReceivedFormatError::LineTooLong {
+                        required: 81,
+                        limit: 78
+                    })
+                );
+                options.max_line_length = 81;
+            }
+            let output = received
+                .to_header_string_with_options(&options)
+                .unwrap_or_else(|error| panic!("{input:?}: {error}"));
+            if !oversized {
+                assert_eq!(output, expected, "{input}");
+            }
+            assert!(
+                output
+                    .split(newline)
+                    .all(|line| line.len() <= options.max_line_length)
+            );
+            let header = Header::parse(output.as_bytes()).unwrap();
+            let parsed = Received::parse(header.raw_value()).unwrap();
+            check_fields(&parsed, fields);
+            assert_eq!(parsed, received);
+            assert_eq!(received, before);
+        }
     }
 }
 

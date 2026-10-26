@@ -318,7 +318,10 @@
 //! with checked calendar components and a fixed numeric UTC offset.
 //! [`Received`] parses trace-header values into ordered clauses, nested comments,
 //! and dates, retaining original keyword/date spelling with explicit parse errors
-//! and charset-recovery reporting. It does not validate or authenticate the hops.
+//! and charset-recovery reporting. Construction and editing use clause-specific
+//! assignment checks without changing tolerant parsing. Complete-header formatting
+//! preserves clause/date spelling, bounds physical lines, protects comment wrapping,
+//! and requires explicit UTF-8 opt-in. It does not authenticate hops.
 //! [`charsets`] resolves MIME charset labels and converts complete text buffers,
 //! with explicit conversion errors and legacy codecs supplied by `encoding_rs`.
 //! [`filters::CharsetFilter`] converts between charsets incrementally, retaining
@@ -424,6 +427,7 @@ mod multipart_report;
 mod parameter;
 mod parse_utils;
 mod received;
+mod received_format;
 mod report_fields;
 pub mod rfc2047;
 mod smtp_address;
@@ -514,9 +518,10 @@ pub use parameter::{
     ParameterParseErrorKind, ParameterParseOptions,
 };
 pub use received::{
-    Received, ReceivedClause, ReceivedClauseId, ReceivedParseError, ReceivedParseErrorKind,
-    ReceivedParseOptions,
+    Received, ReceivedClause, ReceivedClauseId, ReceivedEditError, ReceivedParseError,
+    ReceivedParseErrorKind, ReceivedParseOptions,
 };
+pub use received_format::{ReceivedFormatError, ReceivedFormatOptions, ReceivedFormatPart};
 pub use smtp_address::{SmtpAddressError, SmtpAddressValidationOptions};
 pub use smtp_utf8_address::{SmtpUtf8AddressError, SmtpUtf8AddressValidationOptions};
 pub use smtp_utf8_data::UNICODE_VERSION as SMTP_UTF8_UNICODE_VERSION;

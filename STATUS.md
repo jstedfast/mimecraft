@@ -64,9 +64,11 @@ MimeKit. The crate is not configured for publication.
   use in filtering pipelines rather than automatic message anonymization.
 - Raw address, unstructured, content-header, and Received masking with preserved
   syntax, parameters, trace keywords, and recognized date suffixes for inspection.
-- Read-only Received-header parsing with ordered clauses, nested comments,
+- Received-header parsing with ordered clauses, nested comments,
   multi-word values, preserved date spelling, charset recovery reporting, and
-  typed syntax errors with source byte offsets.
+  typed syntax errors with source byte offsets; checked construction and
+  convenience setters, editable clauses/comments, date-cache invalidation,
+  and complete-header formatting with enforced line limits and UTF-8 opt-in.
 - Field-aware masking of complete raw header records, including byte masking of
   malformed records, default metadata preservation, and configurable preserved
   fields, plus masked header-list output with CRLF/LF conversion.
@@ -6214,7 +6216,7 @@ comparing instants. This is not date arithmetic or strict RFC syntax validation.
 `Received::parse(&[u8])` and `"value".parse::<Received>()` interpret a raw
 Received field value, excluding its field name. Use `Header::raw_value()` when
 starting from a parsed header; no preliminary unfolding or encoded-word decoding
-is required. The result is detached and read-only.
+is required. The result is detached; edits do not change the original header.
 
 ```rust
 use mimecraft::Received;
@@ -6237,8 +6239,8 @@ as `Unknown`. `clause(id)` returns the first match. Convenience accessors includ
 `from`, `by`, `via`, `with`, `id`, and `for_recipient`; `from_tcp_info` and
 `by_tcp_info` return the corresponding clause's first comment.
 
-Known clauses are ASCII case-insensitive, may appear in any order, and cannot
-repeat. Keyword spelling is preserved. Unknown clauses may repeat. Values may
+During parsing, known clauses are ASCII case-insensitive, may appear in any order,
+and cannot repeat. Keyword spelling is preserved. Unknown clauses may repeat. Values may
 be empty or contain multiple tokens joined with single spaces, retaining
 MimeKit's compatibility with `Microsoft SMTP Server` and `Frontend Transport`.
 A recognized keyword starts a new clause even where a value might be expected.
@@ -6264,15 +6266,133 @@ the offending token's start; `offset()` marks EOF, the duplicate keyword's end,
 or the invalid date's trimmed end. Offsets are zero-based bytes relative to the
 supplied slice, including when parsing a subslice of a larger buffer.
 
-This is a compatibility inspection API, not strict RFC validation or a trust
-decision. Host, protocol, message-ID, and recipient values are not validated;
+Parsing is a compatibility inspection API, not strict RFC validation or a trust
+decision. Parsed host, protocol, message-ID, and recipient values are not validated;
 quotes and address literals do not shield comment/date delimiters.
 Other control bytes can survive parsing, so these strings must not be inserted
 directly into authored headers. The underlying date parser may recover dates
 from nonstandard suffixes, including an unterminated trailing date comment.
 Comment nesting is iterative and allocation is proportional to input size.
-Authoring, editing, folding/serialization, and automatic message integration
-remain deferred; raw header storage and serialization are unchanged.
+Complete-header formatting is explicit; automatic message integration remains
+deferred. Existing raw header storage and serialization are unchanged.
+
+#### Constructing and editing Received values
+
+`Received::new()` / `Default` creates an empty value. `with_hosts(from, from_ip,
+by, by_ip, date_time)` creates checked `from`/`by` clauses with bracketed
+`std::net::IpAddr` comments and a checked `DateTimeOffset`.
+
+```rust
+use mimecraft::{DateTimeOffset, Received};
+
+let mut received = Received::new();
+received.set_from(Some("smtp.source.com")).unwrap();
+received.set_from_tcp_info(Some("[192.168.1.1]"));
+received.set_by(Some("smtp.target.com")).unwrap();
+received.set_with(Some("ESMTPS")).unwrap();
+received.set_for_recipient(Some("unit-tests@mimekit.net")).unwrap();
+received.set_date_time(Some(
+    DateTimeOffset::new(2026, 4, 18, 20, 5, 38, -240).unwrap()
+));
+assert_eq!(received.from_tcp_info(), Some("[192.168.1.1]"));
+```
+
+`set_from`, `set_by`, `set_via`, `set_with`, `set_id`, and `set_for_recipient`
+accept `Option<&str>`. `Some` validates and updates the first matching clause,
+retaining keyword spelling and comments; `None` removes that clause and its
+comments. A new clause uses a lowercase keyword and sorts the collection in
+`None` / `From` / `By` / `Via` / `With` / `Id` / `For` / `Unknown` order.
+Equal classifications keep their relative order. Updating/removing an existing
+clause does not sort. Failed assignments leave the whole object unchanged.
+
+`ReceivedClause::new(keyword, value)` accepts ASCII-letter/hyphen keywords
+beginning with a letter. `with_comment` adds one unmodified comment.
+`set_value` applies the same clause-specific checks as the convenience setters.
+Values retain their exact spelling and must be nonempty with no ASCII controls.
+Host checks follow MimeKit's permissive hostname rules, not DNS/IDNA validation;
+bracketed literals use Rust's `IpAddr` grammar, excluding legacy abbreviated or
+octal/hex IPv4 forms and scoped IPv6 addresses accepted by .NET.
+Identifiers use the existing complete, tolerant `MessageId` parser; recipients
+use `MailboxAddress`. Unlike MimeKit's recipient setter, controls and folds are
+rejected before parsing, because the original mailbox spelling is retained.
+Other clause values reject parentheses and semicolons but allow spaces and
+Unicode, including multi-word transport/protocol descriptions.
+`ReceivedEditError` distinguishes invalid keywords, empty values, invalid
+hosts, illegal value bytes, and wrapped identifier/mailbox parser failures.
+
+`set_from_tcp_info` and `set_by_tcp_info` replace all comments on the first
+matching host clause. They remove CR/LF and replace tabs with spaces without
+trimming or validating comment syntax. `Some` creates a missing clause with an
+empty host value; `None` clears comments without creating or removing a clause.
+`clauses_mut()` and `comments_mut()` expose ordinary vector edits, including
+duplicates and unvalidated comments. Convenience getters/setters/removals act
+on the first matching clause if direct edits introduce duplicates.
+
+`set_date_time` always clears `date_time_text`, even when assigning the same
+date. Other edits retain the cached date spelling. `had_charset_fallback`
+continues to describe the original parse, not the current edited strings;
+newly constructed objects start with no recovery flag.
+These assignment checks do not make arbitrary parsed or edited values safe
+to insert into headers without the formatter's additional output checks.
+
+#### Formatting Received headers
+
+`to_header_string()` emits a complete `Received:` header with CRLF, an enforced
+78-byte physical-line limit, and ASCII output. `to_header_string_with_options`
+accepts `ReceivedFormatOptions` with `max_line_length` in `60..=998`,
+`new_line_format` (`Dos` or `Unix`, not `Mixed`), and `international`.
+Unlike MimeKit's `ToString`, output includes the field name and colon.
+It always ends with one newline; an empty object becomes `Received:\r\n`.
+
+```rust
+use mimecraft::{Header, Received, ReceivedFormatOptions};
+
+let mut received = Received::new();
+received.set_from(Some("caf\u{e9}.example")).unwrap();
+received.set_by(Some("target.example")).unwrap();
+let options = ReceivedFormatOptions {
+    international: true,
+    ..Default::default()
+};
+let output = received.to_header_string_with_options(&options).unwrap();
+let header = Header::parse(output.as_bytes()).unwrap();
+assert_eq!(Received::parse(header.raw_value()).unwrap().from(),
+    Some("caf\u{e9}.example"));
+```
+
+The formatter ports MimeKit's clause grouping: keep a keyword, value, and first
+comment together when they can fit on a continuation line; otherwise keep the
+keyword/value pair together, or split between them. Other comments and the date
+are appended as separate pieces. Folds use a continuation tab. Complete values,
+comments, and date suffixes are never split internally, even at spaces, so a
+piece that cannot fit fails instead of exceeding the limit. Measurements count
+UTF-8 bytes, indentation, comment parentheses/escapes, and the field prefix.
+A semicolon may move to a continuation line when the preceding line is full.
+
+Current clause order, keyword/value spelling, and cached date spelling survive
+formatting. Authored or reassigned dates use `DateTimeOffset`'s canonical output.
+Leading-comment clauses emit only comments, even if their stored value was
+edited. Missing values and duplicate clauses are not removed or repaired.
+This is not strict SMTP trace validation, and freely edited values are not
+guaranteed to round-trip through the tolerant clause parser.
+
+All emitted components reject ASCII controls. Comments alone normalize CR/LF
+away and tabs to spaces, matching MimeKit's protection against injected lines.
+Backslashes are escaped. Balanced nested parentheses are preserved; unlike
+MimeKit, an unbalanced comment escapes all parentheses so edited text cannot
+close the enclosing comment. Normalization and escaping do not mutate the model.
+
+Non-ASCII text fails unless `international` is enabled; no RFC 2047 encoding,
+IDNA conversion, or legacy output charset is selected. For SMTP, generally
+mirror the server's advertised `SMTPUTF8` capability. The option does not
+negotiate transport support, authenticate trace data, or validate hostnames.
+Decoded legacy input is emitted as UTF-8 when international output is enabled.
+
+`ReceivedFormatError` reports invalid options, oversized pieces, controls, or
+non-ASCII text without opt-in. Text errors include a `ReceivedFormatPart`
+(keyword/value clause index, clause/comment indexes, or date) and a UTF-8 byte
+offset in the stored component, before comment normalization. Failure returns
+no partial string and leaves the original object unchanged.
 
 ### Quoted-string utilities
 
@@ -7630,10 +7750,24 @@ comments for missing values, multi-token server strings, nested/escaped comments
 and date spelling. All 19 enabled valid parser fixtures and 11 invalid cases from
 `UnitTests/ReceivedTests.cs` are ported, including original error offsets.
 Additional cases cover clause ordering, charset recovery, subslices, all fixture
-prefixes, arbitrary bytes, and deeply nested comments. The existing charset/date
-helpers are reused; private model fields expose inspection without implying
-authoring validation. Constructor, setter, and formatting tests are deferred
-with those APIs; the upstream disabled malformed-literal case remains excluded.
+prefixes, arbitrary bytes, and deeply nested comments. Construction and editing
+adapt `Received`/`ReceivedClause` constructors and setters from the same source,
+retaining comments about parser bypasses and verbatim identifier validation.
+Constructor, invalid-assignment, valid-ID, property-update/removal, comment
+unfolding, and TCP-info-without-value tests are ported; additional cases verify
+atomic failure, stable ordering, duplicate edits, control rejection, IPv6,
+date-cache invalidation, and persistent parse diagnostics.
+The existing charset/date/message-ID/mailbox helpers are reused.
+Formatting adapts `AppendClause`, comment formatting, and `ToString` from the
+same source, retaining grouping, editable-comment, and cached-date rationale.
+All 19 enabled formatting fixtures are covered in CRLF and LF modes: 17 match
+upstream exactly after adding `Received:`, while two 80-byte identifier cases
+correctly fail the enforced 78-byte limit and round-trip at 81 bytes.
+Constructor/removal/comment formatting expectations also match upstream.
+Additional cases cover every supported line limit, exact group/piece thresholds,
+UTF-8 byte counting, errors with component offsets, unbalanced comments,
+date-cache updates, and deep nesting without recursion.
+The upstream disabled malformed-literal case remains excluded.
 Charset alias resolution and unlabelled-text fallback follow
 `Utils/CharsetUtils.cs`, with compatibility cases from
 `UnitTests/Utils/CharsetUtilsTests.cs`. Legacy conversion uses `encoding_rs`;
