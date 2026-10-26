@@ -72,7 +72,7 @@ pub(crate) fn write_entity_headers<'a, W: std::io::Write + ?Sized>(
 /// An attachment flag could not be changed without losing existing metadata.
 ///
 /// The original header list and content remain unchanged on either failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttachmentEditError {
     /// The first Content-Disposition could not be parsed.
     ContentDisposition(ContentHeaderParseError),

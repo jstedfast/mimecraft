@@ -6394,6 +6394,7 @@ let options = HeaderFormatOptions {
     max_line_length: 78,
     new_line_format: NewLineFormat::Unix,
     always_quote_parameters: true,
+    ..Default::default()
 };
 let header = disposition.to_header_string_with_options(&options)?;
 assert!(header.ends_with('\n'));
@@ -6403,8 +6404,9 @@ assert!(!header.contains('\r'));
 
 Ordinary values are tokens or escaped quoted strings; empty values are `""`.
 Unicode, ASCII controls (including CR, LF, tab, DEL, and NUL), and literal `=?`
-sequences use RFC 2231 percent encoding. This keeps authored encoded-word text
-literal when reparsed instead of accidentally interpreting it as RFC 2047.
+sequences use RFC 2231 percent encoding by default. This keeps authored
+encoded-word text literal when reparsed instead of accidentally interpreting it
+as RFC 2047.
 Long values use numbered continuations. Escaped quotes, whitespace, complete
 percent triplets, and Unicode scalar boundaries are preserved. Encoding does
 not remove controls from the decoded value or make a filename safe to use.
@@ -6417,6 +6419,24 @@ It is independent of a Content-Type `charset` parameter, which describes the
 body rather than parameter text. Extended continuations consistently use
 percent encoding; long ordinary ASCII values use unencoded, optionally quoted
 sections. Original language tags and declared charsets are not reproduced.
+
+Set `HeaderFormatOptions::parameter_encoding_method` to
+`ParameterEncodingMethod::Rfc2047` for legacy clients that require encoded words
+inside quoted parameter values. This compatibility convention is not standard
+MIME parameter encoding; RFC 2231 remains the default. RFC 2047 output uses the
+shared B/Q encoder, with complete characters and words of at most 75 bytes.
+Original whitespace stays inside the encoded payloads, so folding cannot change
+the decoded value. Short ASCII values still use ordinary tokens or quoted strings.
+
+`Parameter::set_encoding_method(Some(method))` overrides the header-wide choice;
+`None` restores inheritance. `Parameter::set_always_quote(true)` requests quoting
+of that parameter's ordinary values and unencoded continuation sections, even
+when header-wide quoting is disabled. False does not override header-wide quoting.
+These preferences survive cloning and value edits, including `ParameterList::set`
+and `ContentDisposition::set_file_name`. Add an authored `Parameter` with
+`ParameterList::add` or replace an existing entry with `ParameterList::replace`;
+names remain checked for case-insensitive uniqueness. Parsing continues to use
+default preferences rather than recovering formatting choices from the wire.
 
 The default line limit is 78 **bytes**, counting the field name, tabs, quotes,
 and separators but excluding newline bytes. Continuation lines start with one
@@ -6431,9 +6451,8 @@ declaration fits but the first character must go in the following section.
 Serialization preserves parameter order and spelling without mutating values,
 historical diagnostics, or separately stored raw headers. Failures return no
 partial output. These APIs normalize headers, not reproduce their original
-bytes; use `Header::raw()` for the latter. RFC 2047 parameter output, raw
-internationalized headers and explicit/per-parameter encoding preferences
-remain unported.
+bytes; use `Header::raw()` for the latter. Raw internationalized headers, explicit
+charset preferences, and recovery of parsed encoding preferences remain unported.
 
 ## Scope and compatibility
 
@@ -7221,8 +7240,12 @@ unit tests. Parameter serialization follows RFC 2231 encoding in `Parameter.cs`
 and the relevant `FormatOptions.cs` defaults, with encoding vectors from
 `UnitTests/ParameterTests.cs` and `UnitTests/ContentTypeTests.cs`. Rust enforces
 the requested physical-line limit and accounts for growing continuation numbers;
-extended sections consistently use percent encoding. Explicit/per-parameter
-encoding preferences and RFC 2047 parameter output are not yet ported.
+extended sections consistently use percent encoding. Global/per-parameter
+encoding-method selection, per-parameter quoting, and RFC 2047 compatibility
+output adapt `GetEncodeMethod` and `EncodeRfc2047` from `Parameter.cs`, reusing the
+shared complete-word B/Q encoder rather than the source's size estimates.
+Explicit charset preferences and recovery of parsed encoding preferences
+are not yet ported.
 Typed content-header parsing and accessors follow `ContentType.cs` and
 `ContentDisposition.cs`, with vectors from their corresponding unit tests.
 Their parameter parser shares original-input positions with standalone parameter

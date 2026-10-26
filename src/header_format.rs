@@ -5,19 +5,21 @@
 use std::{error::Error, fmt, iter::Peekable, str::Chars};
 
 use crate::{
-    Parameter, ParameterList,
+    Parameter, ParameterEncodingMethod, ParameterList,
     charsets::Charset,
     encodings::{InvalidLineLength, NewLineFormat, Rfc2231Encoder},
     parse_utils::is_attribute,
+    rfc2047,
     utils::quote,
 };
 
 /// Options for ASCII Content-Type and Content-Disposition serialization.
 ///
 /// Defaults to 78-byte lines, CRLF endings, and quoting only when necessary.
-/// RFC 2231 is used for non-ASCII text, controls, encoded-word lookalikes, and
-/// long values. Output charset selection is automatic: ASCII, Latin-1, or UTF-8.
-/// RFC 2047 parameter output and raw internationalized headers are not supported.
+/// RFC 2231 is the default for non-ASCII text, controls, encoded-word lookalikes,
+/// and long values. RFC 2047 output is opt-in for legacy compatibility. Output
+/// charset selection is automatic: ASCII, Latin-1, or UTF-8. Raw internationalized
+/// headers and explicit charset preferences are not supported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderFormatOptions {
     /// Maximum bytes per physical line, excluding the newline, in `60..=998`.
@@ -30,6 +32,13 @@ pub struct HeaderFormatOptions {
     /// Quote ordinary values and unencoded continuation sections even if they
     /// contain only attribute characters. Extended values remain percent encoded.
     pub always_quote_parameters: bool,
+    /// Encoding for parameters that cannot use ordinary tokens/quoted strings.
+    ///
+    /// Defaults to RFC 2231. A parameter's explicit override takes precedence.
+    /// RFC 2047 is a legacy compatibility convention, not standard MIME parameter
+    /// syntax. Both methods enforce the physical-line limit and preserve literal
+    /// values rather than interpreting existing encoded words.
+    pub parameter_encoding_method: ParameterEncodingMethod,
 }
 
 impl Default for HeaderFormatOptions {
@@ -38,6 +47,7 @@ impl Default for HeaderFormatOptions {
             max_line_length: 78,
             new_line_format: NewLineFormat::Dos,
             always_quote_parameters: false,
+            parameter_encoding_method: ParameterEncodingMethod::Rfc2231,
         }
     }
 }
@@ -45,7 +55,7 @@ impl Default for HeaderFormatOptions {
 /// A complete MIME content header could not be serialized.
 ///
 /// Formatting returns no partial string on error and does not mutate the header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderFormatError {
     /// The requested line limit is outside `60..=998`.
     InvalidLineLength(InvalidLineLength),
@@ -60,6 +70,8 @@ pub enum HeaderFormatError {
     },
     /// A parameter would need section numbers greater than `i32::MAX`.
     TooManyContinuations,
+    /// Encoding a parameter as RFC 2047 encoded words failed.
+    Encoding(rfc2047::EncodeError),
 }
 
 impl fmt::Display for HeaderFormatError {
@@ -79,6 +91,7 @@ impl fmt::Display for HeaderFormatError {
                 )
             }
             Self::TooManyContinuations => f.write_str("parameter section number exceeds i32::MAX"),
+            Self::Encoding(error) => error.fmt(f),
         }
     }
 }
@@ -87,6 +100,7 @@ impl Error for HeaderFormatError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidLineLength(error) => Some(error),
+            Self::Encoding(error) => Some(error),
             _ => None,
         }
     }
@@ -189,6 +203,7 @@ impl HeaderWriter<'_> {
     fn parameter(&mut self, parameter: &Parameter, more: bool) -> Result<(), HeaderFormatError> {
         let name = parameter.name();
         let value = parameter.value();
+        let always_quote = self.options.always_quote_parameters || parameter.always_quote();
         // Quoting alone does not protect a literal encoded-word wrapper:
         // a tolerant parameter parser could decode it instead of retaining it.
         let extended = value
@@ -198,9 +213,8 @@ impl HeaderWriter<'_> {
         if !extended {
             // Tokens cannot be empty. An empty value must be quoted and cannot
             // be split into continuations to make an oversized name fit.
-            let quoted = self.options.always_quote_parameters
-                || value.is_empty()
-                || value.bytes().any(|byte| !is_attribute(byte));
+            let quoted =
+                always_quote || value.is_empty() || value.bytes().any(|byte| !is_attribute(byte));
             let length = if quoted {
                 value.len()
                     + value
@@ -227,7 +241,7 @@ impl HeaderWriter<'_> {
             }
         }
 
-        // RFC 2231 uses one charset for the entire value. Choose it before
+        // Use one charset for the entire value. Choose it before
         // splitting so no later section loses unrepresentable characters.
         let charset = if value
             .bytes()
@@ -239,6 +253,13 @@ impl HeaderWriter<'_> {
         } else {
             Charset::UTF8
         };
+        if parameter
+            .encoding_method()
+            .unwrap_or(self.options.parameter_encoding_method)
+            == ParameterEncodingMethod::Rfc2047
+        {
+            return self.encoded_words(name, value, charset, more);
+        }
         let mut chars = value.chars().peekable();
         let mut section = 0usize;
         while chars.peek().is_some() {
@@ -263,7 +284,7 @@ impl HeaderWriter<'_> {
                 prefix.len() + encoded_length(next, charset)
             } else {
                 raw_length(next)
-                    + if self.options.always_quote_parameters || !is_attribute(next as u8) {
+                    + if always_quote || !is_attribute(next as u8) {
                         2
                     } else {
                         0
@@ -278,24 +299,77 @@ impl HeaderWriter<'_> {
                 .max(minimum);
             let available = self.options.max_line_length.saturating_sub(overhead);
             let budget = preferred.min(available);
-            let chunk = next_chunk(
-                &mut chars,
-                charset,
-                extended,
-                &prefix,
-                budget,
-                self.options.always_quote_parameters,
-            )
-            .ok_or(HeaderFormatError::LineTooLong {
-                required: overhead + minimum,
-                limit: self.options.max_line_length,
-            })?;
+            let chunk = next_chunk(&mut chars, charset, extended, &prefix, budget, always_quote)
+                .ok_or(HeaderFormatError::LineTooLong {
+                    required: overhead + minimum,
+                    limit: self.options.max_line_length,
+                })?;
             if section == 0 && chars.peek().is_none() {
                 return self.assignment(&format!("{name}{suffix}"), &chunk, false, more);
             }
             self.assignment(&numbered_name, &chunk, true, chars.peek().is_some() || more)?;
             section += 1;
         }
+        Ok(())
+    }
+
+    fn encoded_words(
+        &mut self,
+        name: &str,
+        value: &str,
+        charset: Charset,
+        more: bool,
+    ) -> Result<(), HeaderFormatError> {
+        let reserve = usize::from(more);
+        let overhead = 1 + name.len() + 3 + reserve;
+        self.check_length(overhead + charset.name().len() + 8)?;
+        // Use one representable charset for the entire value, not a mixture
+        // that would change when parsed and re-encoded. Reserve the name,
+        // surrounding quotes, indentation, and any following semicolon. Later
+        // words can use the full continuation line without repeating the name.
+        let words = rfc2047::encode_parameter(
+            value,
+            &rfc2047::EncodeOptions {
+                charset,
+                max_word_length: (self.options.max_line_length - 2 - reserve).min(75),
+            },
+            (self.options.max_line_length - overhead).min(75),
+        )
+        .map_err(|error| match error {
+            rfc2047::EncodeError::WordTooLong {
+                offset, required, ..
+            } => HeaderFormatError::LineTooLong {
+                required: if offset == 0 { overhead } else { 2 + reserve } + required,
+                limit: self.options.max_line_length,
+            },
+            error => HeaderFormatError::Encoding(error),
+        })?;
+        let mut words = words.split(' ');
+        let first = words.next().expect("nonempty encoded parameter");
+        self.output.push(';');
+        self.column += 1;
+        if self.column + overhead + first.len() >= self.options.max_line_length {
+            self.fold();
+        } else {
+            self.output.push(' ');
+            self.column += 1;
+        }
+        self.output.push_str(name);
+        self.output.push_str("=\"");
+        self.output.push_str(first);
+        self.column += name.len() + 2 + first.len();
+        for word in words {
+            if self.column + 1 + word.len() + 1 + reserve > self.options.max_line_length {
+                self.fold();
+            } else {
+                self.output.push(' ');
+                self.column += 1;
+            }
+            self.output.push_str(word);
+            self.column += word.len();
+        }
+        self.output.push('"');
+        self.column += 1;
         Ok(())
     }
 }

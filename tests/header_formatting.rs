@@ -4,7 +4,7 @@
 
 use mimecraft::{
     ContentDisposition, ContentType, HeaderFormatError, HeaderFormatOptions, HeaderParser,
-    ParameterComplianceMode, ParameterParseOptions,
+    Parameter, ParameterComplianceMode, ParameterEncodingMethod, ParameterParseOptions,
     encodings::{NewLineFormat, Rfc2231Decoder},
 };
 
@@ -49,8 +49,16 @@ fn round_trip(value: &ContentDisposition, options: &HeaderFormatOptions) -> Stri
         .unwrap();
         assert_eq!(parsed.disposition(), value.disposition());
         assert_eq!(
-            parsed.parameters().as_slice(),
-            value.parameters().as_slice(),
+            parsed
+                .parameters()
+                .iter()
+                .map(|p| (p.name(), p.value()))
+                .collect::<Vec<_>>(),
+            value
+                .parameters()
+                .iter()
+                .map(|p| (p.name(), p.value()))
+                .collect::<Vec<_>>(),
             "{output:?}"
         );
         assert!(parsed.parameters().issues().is_empty(), "{output:?}");
@@ -62,6 +70,298 @@ fn file_name(value: &str) -> ContentDisposition {
     let mut disposition = ContentDisposition::default();
     disposition.set_file_name(Some(value));
     disposition
+}
+
+fn check_encoded_words(output: &str) {
+    for (start, _) in output.match_indices("=?") {
+        let word = &output[start..];
+        let word = &word[..word.find("?=").unwrap() + 2];
+        assert!(word.len() <= 75, "{word}");
+        assert!(!word.contains(['"', '\\']));
+        assert!(
+            mimecraft::rfc2047::decode_text(word.as_bytes())
+                .issues
+                .is_empty(),
+            "{word}"
+        );
+    }
+}
+
+#[test]
+fn parameter_preferences_follow_owned_edits() {
+    let mut parameter = Parameter::new("FileName", "tps-report.doc").unwrap();
+    assert_eq!(parameter.encoding_method(), None);
+    assert!(!parameter.always_quote());
+    assert_eq!(
+        ParameterEncodingMethod::default(),
+        ParameterEncodingMethod::Rfc2231
+    );
+    assert_eq!(
+        HeaderFormatOptions::default().parameter_encoding_method,
+        ParameterEncodingMethod::Rfc2231
+    );
+    for always_quote in [true, true, false, true] {
+        parameter.set_always_quote(always_quote);
+        assert_eq!(parameter.always_quote(), always_quote);
+    }
+    for method in [
+        Some(ParameterEncodingMethod::Rfc2047),
+        Some(ParameterEncodingMethod::Rfc2231),
+        None,
+    ] {
+        parameter.set_encoding_method(method);
+        assert_eq!(parameter.encoding_method(), method);
+    }
+    parameter.set_encoding_method(Some(ParameterEncodingMethod::Rfc2047));
+    let mut disposition = ContentDisposition::default();
+    disposition.parameters_mut().add(parameter.clone()).unwrap();
+    disposition
+        .parameters_mut()
+        .set("FILENAME", "changed.txt")
+        .unwrap();
+    disposition.set_file_name(Some("final.txt"));
+    let stored = &disposition.parameters().as_slice()[0];
+    assert_eq!(stored.name(), "FileName");
+    assert_eq!(stored.value(), "final.txt");
+    assert!(stored.always_quote());
+    assert_eq!(stored.encoding_method(), parameter.encoding_method());
+    assert_eq!(parameter.value(), "tps-report.doc");
+    assert_eq!(
+        round_trip(&disposition, &HeaderFormatOptions::default()),
+        "Content-Disposition: attachment; FileName=\"final.txt\"\r\n"
+    );
+    let previous = disposition
+        .parameters_mut()
+        .replace(0, Parameter::new("filename", "new").unwrap())
+        .unwrap();
+    assert!(previous.always_quote());
+    assert_eq!(
+        previous.encoding_method(),
+        Some(ParameterEncodingMethod::Rfc2047)
+    );
+    assert!(!disposition.parameters().as_slice()[0].always_quote());
+    assert_eq!(
+        disposition.parameters().as_slice()[0].encoding_method(),
+        None
+    );
+}
+
+#[test]
+fn per_parameter_quoting_and_encoding_override_header_options() {
+    for method in [
+        ParameterEncodingMethod::Rfc2231,
+        ParameterEncodingMethod::Rfc2047,
+    ] {
+        let options = HeaderFormatOptions {
+            parameter_encoding_method: method,
+            ..Default::default()
+        };
+        let mut disposition = ContentDisposition::default();
+        let mut parameter = Parameter::new("filename", "tps-report.doc").unwrap();
+        parameter.set_always_quote(true);
+        disposition.parameters_mut().add(parameter).unwrap();
+        disposition.parameters_mut().set("plain", "value").unwrap();
+        assert_eq!(
+            round_trip(&disposition, &options),
+            "Content-Disposition: attachment; filename=\"tps-report.doc\"; plain=value\r\n"
+        );
+        let quoted = HeaderFormatOptions {
+            always_quote_parameters: true,
+            ..options
+        };
+        assert!(round_trip(&disposition, &quoted).contains("plain=\"value\""));
+        disposition.set_file_name(Some(&"a".repeat(300)));
+        let output = round_trip(&disposition, &options);
+        if method == ParameterEncodingMethod::Rfc2231 {
+            for line in output.lines().filter(|line| line.contains("filename*")) {
+                assert!(line.split_once('=').unwrap().1.starts_with('"'), "{line}");
+            }
+        } else {
+            assert!(output.contains("filename=\"=?us-ascii?"));
+            check_encoded_words(&output);
+        }
+    }
+
+    for (global, local) in [
+        (
+            ParameterEncodingMethod::Rfc2047,
+            ParameterEncodingMethod::Rfc2231,
+        ),
+        (
+            ParameterEncodingMethod::Rfc2231,
+            ParameterEncodingMethod::Rfc2047,
+        ),
+    ] {
+        let options = HeaderFormatOptions {
+            parameter_encoding_method: global,
+            ..Default::default()
+        };
+        let mut disposition = ContentDisposition::default();
+        let mut parameter = Parameter::new("filename", "caf\u{e9}.txt").unwrap();
+        parameter.set_encoding_method(Some(local));
+        disposition.parameters_mut().add(parameter.clone()).unwrap();
+        let output = round_trip(&disposition, &options);
+        assert_eq!(
+            output.contains("filename*="),
+            local == ParameterEncodingMethod::Rfc2231
+        );
+        assert_eq!(
+            output.contains("filename=\"=?"),
+            local == ParameterEncodingMethod::Rfc2047
+        );
+        parameter.set_encoding_method(None);
+        disposition.parameters_mut().replace(0, parameter).unwrap();
+        let output = round_trip(&disposition, &options);
+        assert_eq!(
+            output.contains("filename*="),
+            global == ParameterEncodingMethod::Rfc2231
+        );
+    }
+}
+
+#[test]
+fn rfc2047_parameter_compatibility_vectors() {
+    let options = HeaderFormatOptions {
+        parameter_encoding_method: ParameterEncodingMethod::Rfc2047,
+        ..Default::default()
+    };
+    assert_eq!(
+        round_trip(&file_name("\u{6d4b}\u{8bd5}\u{6587}\u{672c}.doc"), &options),
+        "Content-Disposition: attachment;\r\n\tfilename=\"=?utf-8?b?5rWL6K+V5paH5pysLmRvYw==?=\"\r\n"
+    );
+    assert_eq!(
+        round_trip(&file_name("caf\u{e9}.txt"), &options),
+        "Content-Disposition: attachment; filename=\"=?iso-8859-1?q?caf=E9=2Etxt?=\"\r\n"
+    );
+    for text in [
+        "dir\\fichier-\u{e9}.txt",
+        "I \u{2764}\u{fe0f}\u{200d}\u{1f525} emojis.doc",
+        "Some \"\u{6d4b}\u{8bd5}\u{6587}\u{672c}\" characters.doc",
+        "X-ingF=?iso-8859-1?q?QJg-V2?=.2",
+        "=?utf-8?q?caf=C3=A9?=",
+        "start-info=\"=?utf-8?q?caf=C3=A9?=\"",
+        "=?utf-8?q?caf=C3=A9?= au lait",
+        "caf\u{e9} au lait et cr\u{e8}me\u{2603}.txt",
+    ] {
+        let output = round_trip(&file_name(text), &options);
+        assert!(output.contains("filename=\"=?"));
+        check_encoded_words(&output);
+        let body = output.split_once(':').unwrap().1;
+        for rfc2047_compliance_mode in [
+            mimecraft::rfc2047::ComplianceMode::Loose,
+            mimecraft::rfc2047::ComplianceMode::Strict,
+        ] {
+            let parsed = ContentDisposition::parse_with_options(
+                body.as_bytes(),
+                &ParameterParseOptions {
+                    compliance_mode: ParameterComplianceMode::Strict,
+                    rfc2047_compliance_mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(parsed.file_name(), Some(text));
+            assert_eq!(parsed.parameters().as_slice()[0].encoding_method(), None);
+        }
+    }
+    let output = round_trip(&file_name("dir\\fichier-\u{e9}.txt"), &options);
+    assert!(!output.contains('\\'));
+    assert!(output.contains("=5C"));
+}
+
+#[test]
+fn rfc2047_controls_unicode_and_long_ascii_preserve_literal_values() {
+    let options = HeaderFormatOptions {
+        parameter_encoding_method: ParameterEncodingMethod::Rfc2047,
+        ..Default::default()
+    };
+    for code in 0..=255 {
+        let text = format!("before{}after", char::from_u32(code).unwrap());
+        check_encoded_words(&round_trip(&file_name(&text), &options));
+    }
+    for text in [
+        "this is a really really long filename that should force MimeKit to break it apart - yay!.html".to_owned(),
+        "a".repeat(300),
+        " ".repeat(300),
+        " \\\") abc".repeat(80),
+        "\"".repeat(300),
+        "x\r\nInjected: header\0.txt".repeat(40),
+        "a\u{301}\u{feff}\u{10000}\u{10ffff} \u{d7ff}\u{e000}".repeat(40),
+        (0..=255).map(|code| char::from_u32(code).unwrap()).collect(),
+    ] {
+        let output = round_trip(&file_name(&text), &options);
+        assert!(output.contains("filename=\"=?"));
+        assert!(!output.contains("filename*"));
+        check_encoded_words(&output);
+    }
+}
+
+#[test]
+fn rfc2047_every_line_limit_and_following_parameters_fit() {
+    let mut value = file_name(&("a\\\" ?\u{e9}\u{1f600}".repeat(20) + &"z".repeat(100)));
+    value.parameters_mut().set("tail", "final value").unwrap();
+    for new_line_format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        for max_line_length in 60..=998 {
+            let options = HeaderFormatOptions {
+                parameter_encoding_method: ParameterEncodingMethod::Rfc2047,
+                max_line_length,
+                new_line_format,
+                ..Default::default()
+            };
+            check_encoded_words(&round_trip(&value, &options));
+        }
+    }
+}
+
+#[test]
+fn rfc2047_long_names_empty_values_and_exact_limits() {
+    let options = HeaderFormatOptions {
+        parameter_encoding_method: ParameterEncodingMethod::Rfc2047,
+        max_line_length: 60,
+        ..Default::default()
+    };
+    for name_length in 1..=70 {
+        for text in ["", "abc", "a b", "\u{e9}", "\u{1f600}", "=?"] {
+            let mut value = ContentDisposition::default();
+            value
+                .parameters_mut()
+                .set(&"x".repeat(name_length), text)
+                .unwrap();
+            let before = value.clone();
+            match value.to_header_string_with_options(&options) {
+                Ok(output) => {
+                    round_trip(&value, &options);
+                    check_encoded_words(&output);
+                }
+                Err(HeaderFormatError::LineTooLong { required, limit }) => {
+                    assert!(required > limit);
+                    assert_eq!(limit, 60);
+                }
+                Err(error) => panic!("unexpected error: {error}"),
+            }
+            assert_eq!(value, before);
+        }
+    }
+    let mut value = ContentDisposition::default();
+    let name = "x".repeat(43);
+    value.parameters_mut().set(&name, "a\u{1f525}").unwrap();
+    let output = round_trip(&value, &options);
+    assert!(output.contains(&format!("{name}=\"=?utf-8?q?a?=\r\n\t")));
+    check_encoded_words(&output);
+
+    let mut value = ContentDisposition::default();
+    let name = "x".repeat(36);
+    value.parameters_mut().set(&name, "\u{1f525}").unwrap();
+    let output = round_trip(&value, &options);
+    assert_eq!(output.lines().last().unwrap().len(), 60);
+    value.parameters_mut().set("tail", "last").unwrap();
+    assert!(matches!(
+        value.to_header_string_with_options(&options),
+        Err(HeaderFormatError::LineTooLong {
+            required: 61,
+            limit: 60
+        })
+    ));
 }
 
 #[test]

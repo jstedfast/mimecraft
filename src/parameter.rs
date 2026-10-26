@@ -17,12 +17,28 @@ use crate::{
 ///
 /// Names cannot be changed in place. Parsed names retain their first encountered
 /// spelling with continuation suffixes removed. Values are Unicode strings,
-/// not raw header syntax. This initial parameter API does not retain language
-/// or formatting/encoding preferences.
+/// not raw header syntax. Authored parameters may override the output encoding
+/// method and request quoting. Parsing does not recover those preferences,
+/// language tags, or an explicit output charset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
     name: String,
     value: String,
+    encoding_method: Option<ParameterEncodingMethod>,
+    always_quote: bool,
+}
+
+/// The encoding used when a MIME parameter cannot be emitted as a short value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ParameterEncodingMethod {
+    /// RFC 2231 extended parameters and continuations (the default).
+    #[default]
+    Rfc2231,
+    /// RFC 2047 encoded words inside a quoted value, for compatibility.
+    ///
+    /// This is a legacy mail-client convention, not standards-compliant
+    /// parameter encoding. Prefer RFC 2231 unless compatibility requires it.
+    Rfc2047,
 }
 
 impl Parameter {
@@ -43,6 +59,8 @@ impl Parameter {
         Ok(Self {
             name: name.to_owned(),
             value: value.into(),
+            encoding_method: None,
+            always_quote: false,
         })
     }
 
@@ -59,6 +77,44 @@ impl Parameter {
     /// Replaces the decoded value literally, without parsing or sanitizing it.
     pub fn set_value(&mut self, value: impl Into<String>) {
         self.value = value.into();
+    }
+
+    /// Returns the output override, or `None` to inherit header formatting options.
+    pub fn encoding_method(&self) -> Option<ParameterEncodingMethod> {
+        self.encoding_method
+    }
+
+    /// Selects the output encoding method, or restores inheritance with `None`.
+    ///
+    /// Short ASCII values still use ordinary tokens or quoted strings. Encoding
+    /// is needed for controls, non-ASCII text, encoded-word lookalikes, and values
+    /// too long for an ordinary assignment.
+    ///
+    /// ```
+    /// use mimecraft::{ContentDisposition, Parameter, ParameterEncodingMethod};
+    ///
+    /// let mut parameter = Parameter::new("filename", "caf\u{e9}.txt")?;
+    /// parameter.set_encoding_method(Some(ParameterEncodingMethod::Rfc2047));
+    /// let mut disposition = ContentDisposition::default();
+    /// disposition.parameters_mut().add(parameter)?;
+    /// assert!(disposition.to_header_string()?.contains("filename=\"=?"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn set_encoding_method(&mut self, method: Option<ParameterEncodingMethod>) {
+        self.encoding_method = method;
+    }
+
+    /// Returns whether this parameter requests quoting, initially false.
+    pub fn always_quote(&self) -> bool {
+        self.always_quote
+    }
+
+    /// Requests quoting of ordinary values and unencoded continuation sections.
+    ///
+    /// False does not override a header-wide quoting request. Extended RFC 2231
+    /// sections remain percent-encoded, while RFC 2047 output is always quoted.
+    pub fn set_always_quote(&mut self, value: bool) {
+        self.always_quote = value;
     }
 }
 
@@ -130,7 +186,8 @@ impl ParameterList {
     /// Sets a decoded value, returning the old value if the name already existed.
     ///
     /// Comparison is ASCII case-insensitive. Existing spelling and position are
-    /// retained; a new name is appended. Values are stored literally.
+    /// retained, including output preferences; a new name is appended with default
+    /// preferences. Values are stored literally.
     ///
     /// ```
     /// use mimecraft::ParameterList;
@@ -162,6 +219,8 @@ impl ParameterList {
         self.parameters.push(Parameter {
             name: name.to_owned(),
             value,
+            encoding_method: None,
+            always_quote: false,
         });
         Ok(None)
     }
@@ -362,6 +421,8 @@ impl ParameterList {
                 result.parameters.push(Parameter {
                     name: name.to_owned(),
                     value,
+                    encoding_method: None,
+                    always_quote: false,
                 });
             }
         }

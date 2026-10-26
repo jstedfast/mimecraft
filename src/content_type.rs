@@ -70,7 +70,8 @@ impl ContentType {
     /// Serializes a complete ASCII header, including `Content-Type: ` and a
     /// terminating CRLF, using default [`HeaderFormatOptions`].
     ///
-    /// Parameter values use quoting or RFC 2231 encoding as needed. This does not
+    /// Parameter values use quoting or RFC 2231 encoding as needed, unless a
+    /// parameter explicitly selects RFC 2047 compatibility output. This does not
     /// mutate the value, its diagnostics, or a separately stored raw header.
     ///
     /// # Errors

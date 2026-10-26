@@ -1,5 +1,5 @@
 // Adapted from MimeKit's Utils/Rfc2047.cs (GetRfc822Words, AppendEncodedWord,
-// CharsetConvert and Encode).
+// CharsetConvert and Encode), and Parameter.cs (EncodeRfc2047).
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{error::Error, fmt};
@@ -225,7 +225,27 @@ fn encode(text: &str, options: &EncodeOptions, mode: QEncodeMode) -> Result<Stri
 
     // All fragments of an overlong word must remain encoded so separator
     // whitespace is discarded instead of becoming part of the original text.
-    encode_words(text, options, mode)
+    encode_words(text, options, mode, options.max_word_length)
+}
+
+pub(crate) fn encode_parameter(
+    text: &str,
+    options: &EncodeOptions,
+    first_word_length: usize,
+) -> Result<String, EncodeError> {
+    if !(1..=75).contains(&options.max_word_length) {
+        return Err(EncodeError::InvalidWordLength {
+            requested: options.max_word_length,
+        });
+    }
+    if !(1..=options.max_word_length).contains(&first_word_length) {
+        return Err(EncodeError::InvalidWordLength {
+            requested: first_word_length,
+        });
+    }
+    // Even long ASCII values must stay entirely encoded: whitespace inserted
+    // between plain tokens would otherwise become part of the parameter.
+    encode_words(text, options, QEncodeMode::Text, first_word_length)
 }
 
 #[derive(Clone, Copy)]
@@ -238,6 +258,7 @@ fn encode_words(
     text: &str,
     options: &EncodeOptions,
     mode: QEncodeMode,
+    first_word_length: usize,
 ) -> Result<String, EncodeError> {
     let charset = options.charset;
     let wrapper_length = charset.name().len() + 7;
@@ -248,6 +269,11 @@ fn encode_words(
     let mut start = 0;
 
     while start < text.len() {
+        let limit = if start == 0 {
+            first_word_length
+        } else {
+            options.max_word_length
+        };
         let mut selected = None;
         let mut required = wrapper_length;
         for (offset, ch) in text[start..].char_indices() {
@@ -273,7 +299,7 @@ fn encode_words(
                 PayloadEncoding::Q => scratch.len(),
             };
             required = wrapper_length + payload_length;
-            if required > options.max_word_length {
+            if required > limit {
                 break;
             }
             selected = Some((end, encoding));
@@ -282,7 +308,7 @@ fn encode_words(
             return Err(EncodeError::WordTooLong {
                 offset: start,
                 required,
-                limit: options.max_word_length,
+                limit,
             });
         };
         let bytes = charset.encode(&text[start..end])?;

@@ -11,6 +11,8 @@
 
 mod encode;
 
+pub(crate) use encode::encode_parameter;
+
 pub use encode::{
     EncodeError, EncodeOptions, encode_phrase, encode_phrase_with_options, encode_text,
     encode_text_with_options,

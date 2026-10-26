@@ -379,6 +379,7 @@ fn checked_authoring_preserves_literal_values_and_physical_line_limits() {
                 max_line_length: 60,
                 new_line_format,
                 always_quote_parameters: true,
+                ..Default::default()
             };
             let mut part = part(b"Content-Type: application/octet-stream\n");
             part.set_file_name_with_options(Some(name), &options)

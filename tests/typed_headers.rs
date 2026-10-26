@@ -323,6 +323,7 @@ fn custom_formatters_keep_folds_newlines_and_cached_identifiers() {
         max_line_length: 60,
         new_line_format: NewLineFormat::Unix,
         always_quote_parameters: true,
+        ..Default::default()
     };
     let mut content_type = ContentType::new("text", "plain").unwrap();
     content_type.set_name(Some(&"long file name ".repeat(20)));

@@ -78,7 +78,7 @@ impl fmt::Display for InvalidContentDuration {
 impl Error for InvalidContentDuration {}
 
 /// A filename could not be assigned to both MIME content headers atomically.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileNameEditError {
     /// Assigning a name requires an explicit Content-Type.
     MissingContentType,

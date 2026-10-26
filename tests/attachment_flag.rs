@@ -208,6 +208,7 @@ fn changed_headers_use_checked_parameter_encoding_and_requested_line_format() {
                     max_line_length,
                     new_line_format,
                     always_quote_parameters,
+                    ..Default::default()
                 };
                 for mut entity in entities(raw) {
                     let original = disposition(&entity);
@@ -260,11 +261,11 @@ fn invalid_first_dispositions_return_typed_errors_without_repair_or_mutation() {
             assert_eq!(get_concrete(&entity), Err(error));
             for value in [false, true] {
                 let expected = AttachmentEditError::ContentDisposition(error);
-                assert_eq!(entity.set_is_attachment(value), Err(expected));
-                assert_eq!(set_concrete(&mut entity, value), Err(expected));
+                assert_eq!(entity.set_is_attachment(value), Err(expected.clone()));
+                assert_eq!(set_concrete(&mut entity, value), Err(expected.clone()));
                 assert_eq!(
                     entity.set_is_attachment_with_options(value, &invalid_options),
-                    Err(expected)
+                    Err(expected.clone())
                 );
                 assert_eq!(entity.headers(), &before);
                 assert_eq!(expected.source().unwrap().to_string(), error.to_string());
@@ -316,12 +317,12 @@ fn formatting_failures_leave_absent_or_existing_dispositions_untouched() {
                 let error = expected.to_header_with_options(&options).unwrap_err();
                 assert_eq!(
                     set_concrete_with_options(&mut entity, value, &options),
-                    Err(AttachmentEditError::HeaderFormat(error))
+                    Err(AttachmentEditError::HeaderFormat(error.clone()))
                 );
                 let actual = entity
                     .set_is_attachment_with_options(value, &options)
                     .unwrap_err();
-                assert_eq!(actual, AttachmentEditError::HeaderFormat(error));
+                assert_eq!(actual, AttachmentEditError::HeaderFormat(error.clone()));
                 assert_eq!(actual.source().unwrap().to_string(), error.to_string());
                 assert_eq!(actual.to_string(), error.to_string());
                 assert_eq!(entity.headers(), &before);
