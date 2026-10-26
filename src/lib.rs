@@ -316,6 +316,9 @@
 //! negotiates SMTP extensions, rewrites addresses, or proves spoof safety.
 //! [`DateTimeOffset`] parses legacy date-header values and formats canonical dates
 //! with checked calendar components and a fixed numeric UTC offset.
+//! [`Received`] parses trace-header values into ordered clauses, nested comments,
+//! and dates, retaining original keyword/date spelling with explicit parse errors
+//! and charset-recovery reporting. It does not validate or authenticate the hops.
 //! [`charsets`] resolves MIME charset labels and converts complete text buffers,
 //! with explicit conversion errors and legacy codecs supplied by `encoding_rs`.
 //! [`filters::CharsetFilter`] converts between charsets incrementally, retaining
@@ -420,6 +423,7 @@ mod multipart_related;
 mod multipart_report;
 mod parameter;
 mod parse_utils;
+mod received;
 mod report_fields;
 pub mod rfc2047;
 mod smtp_address;
@@ -508,6 +512,10 @@ pub use parameter::{
     Parameter, ParameterComplianceMode, ParameterEncodingMethod, ParameterIssue,
     ParameterIssueKind, ParameterList, ParameterListEditError, ParameterParseError,
     ParameterParseErrorKind, ParameterParseOptions,
+};
+pub use received::{
+    Received, ReceivedClause, ReceivedClauseId, ReceivedParseError, ReceivedParseErrorKind,
+    ReceivedParseOptions,
 };
 pub use smtp_address::{SmtpAddressError, SmtpAddressValidationOptions};
 pub use smtp_utf8_address::{SmtpUtf8AddressError, SmtpUtf8AddressValidationOptions};

@@ -64,6 +64,9 @@ MimeKit. The crate is not configured for publication.
   use in filtering pipelines rather than automatic message anonymization.
 - Raw address, unstructured, content-header, and Received masking with preserved
   syntax, parameters, trace keywords, and recognized date suffixes for inspection.
+- Read-only Received-header parsing with ordered clauses, nested comments,
+  multi-word values, preserved date spelling, charset recovery reporting, and
+  typed syntax errors with source byte offsets.
 - Field-aware masking of complete raw header records, including byte masking of
   malformed records, default metadata preservation, and configurable preserved
   fields, plus masked header-list output with CRLF/LF conversion.
@@ -6206,6 +6209,71 @@ dates outside the reader's range need not round-trip. Component getters and
 Equality includes the local components and offset; compare timestamps when
 comparing instants. This is not date arithmetic or strict RFC syntax validation.
 
+### Received trace headers
+
+`Received::parse(&[u8])` and `"value".parse::<Received>()` interpret a raw
+Received field value, excluding its field name. Use `Header::raw_value()` when
+starting from a parsed header; no preliminary unfolding or encoded-word decoding
+is required. The result is detached and read-only.
+
+```rust
+use mimecraft::Received;
+
+let received = Received::parse(
+    b"from source.example ([192.0.2.1]) by target.example with ESMTP; Tue, 30 Apr 2019 19:10:19 +0000"
+).unwrap();
+assert_eq!(received.from(), Some("source.example"));
+assert_eq!(received.from_tcp_info(), Some("[192.0.2.1]"));
+assert_eq!(received.by(), Some("target.example"));
+assert_eq!(received.with(), Some("ESMTP"));
+assert_eq!(received.date_time().unwrap().year(), 2019);
+```
+
+`clauses()` retains source order and returns `ReceivedClause` values with `id()`,
+`keyword()`, `value()`, and `comments()`. The recognized `ReceivedClauseId`
+variants are `From`, `By`, `Via`, `With`, `Id`, and `For`; leading comments form
+a `None` clause with empty keyword/value strings. Unknown keywords are retained
+as `Unknown`. `clause(id)` returns the first match. Convenience accessors include
+`from`, `by`, `via`, `with`, `id`, and `for_recipient`; `from_tcp_info` and
+`by_tcp_info` return the corresponding clause's first comment.
+
+Known clauses are ASCII case-insensitive, may appear in any order, and cannot
+repeat. Keyword spelling is preserved. Unknown clauses may repeat. Values may
+be empty or contain multiple tokens joined with single spaces, retaining
+MimeKit's compatibility with `Microsoft SMTP Server` and `Frontend Transport`.
+A recognized keyword starts a new clause even where a value might be expected.
+Comments can precede or follow values. Nested parentheses survive, outer
+parentheses and escape backslashes are removed, CR/LF are dropped, and tabs
+become spaces, including escaped whitespace.
+
+`date_time()` reuses the tolerant `DateTimeOffset` parser. `date_time_text()`
+retains decoded date spelling, including named zones and comments, with outer
+ASCII whitespace trimmed, CR/LF removed, and tabs replaced by spaces. It does
+not canonicalize dates or collapse remaining spaces. Missing dates and an empty
+suffix after `;` are accepted. Empty/whitespace-only input also succeeds.
+
+`ReceivedParseOptions::fallback_charset` selects an optional preferred charset.
+Each keyword, value token, complete comment, and date independently uses the
+existing UTF-8 / preferred-charset / Latin-1 decoding order.
+`had_charset_fallback()` reports whether any segment used non-UTF-8 decoding.
+RFC 2047 encoded words and IDNA domains are not decoded.
+
+`ReceivedParseErrorKind` distinguishes `IncompleteComment`,
+`DuplicateClause(ReceivedClauseId)`, and `InvalidDateTime`. `token_offset()` marks
+the offending token's start; `offset()` marks EOF, the duplicate keyword's end,
+or the invalid date's trimmed end. Offsets are zero-based bytes relative to the
+supplied slice, including when parsing a subslice of a larger buffer.
+
+This is a compatibility inspection API, not strict RFC validation or a trust
+decision. Host, protocol, message-ID, and recipient values are not validated;
+quotes and address literals do not shield comment/date delimiters.
+Other control bytes can survive parsing, so these strings must not be inserted
+directly into authored headers. The underlying date parser may recover dates
+from nonstandard suffixes, including an unterminated trailing date comment.
+Comment nesting is iterative and allocation is proportional to input size.
+Authoring, editing, folding/serialization, and automatic message integration
+remain deferred; raw header storage and serialization are unchanged.
+
 ### Quoted-string utilities
 
 `mimecraft::utils` ports MimeKit's shared quoted-string transformations:
@@ -7557,6 +7625,15 @@ Date parsing and formatting follow `Utils/DateUtils.cs`, with compatibility
 vectors from `UnitTests/Utils/DateParserTests.cs`. The dependency-free `DateTimeOffset`
 stores checked Gregorian components and a minute offset in place of
 `DateTimeOffset`; formatting and timestamp conversion use Gregorian day counts.
+Received trace parsing follows `Received.cs`, preserving applicable inline
+comments for missing values, multi-token server strings, nested/escaped comments,
+and date spelling. All 19 enabled valid parser fixtures and 11 invalid cases from
+`UnitTests/ReceivedTests.cs` are ported, including original error offsets.
+Additional cases cover clause ordering, charset recovery, subslices, all fixture
+prefixes, arbitrary bytes, and deeply nested comments. The existing charset/date
+helpers are reused; private model fields expose inspection without implying
+authoring validation. Constructor, setter, and formatting tests are deferred
+with those APIs; the upstream disabled malformed-literal case remains excluded.
 Charset alias resolution and unlabelled-text fallback follow
 `Utils/CharsetUtils.cs`, with compatibility cases from
 `UnitTests/Utils/CharsetUtilsTests.cs`. Legacy conversion uses `encoding_rs`;
