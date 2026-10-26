@@ -4260,7 +4260,7 @@ children, preamble, and epilogue are preserved. Use
 options. All report-type operations recheck the media type after raw edits,
 and neither read nor reposition child sources.
 
-### Partial-message reassembly
+### Partial-message splitting and reassembly
 
 `MessagePartial<R>` composes a message/partial `MimePart<R>`.
 `new(id, number, total)` creates empty owned content; `with_content` adopts a
@@ -4330,9 +4330,49 @@ and enclosed streams cannot define their new order. Ordinary and masked writers
 therefore emit combined message headers before root-body Content-* headers.
 Descendant offsets and embedded-message header interleaving remain intact;
 the enclosing and input fragment headers are unchanged.
-Automatic splitting remains deferred. Explicit-domain IDs can be created with
-`MessageId::generate_with_domain`. Fragment leaves can use
-ordinary part/tree transport preparation; no splitting-specific preparation
+`MessagePartial::split(message, max_size)` consumes an in-memory `MimeMessage`
+and returns `Vec<MimeMessage>`. `split_with_options` also accepts
+`&MimePartWriteOptions`. It serializes the enclosed root's Content-* fields,
+Subject, Message-Id, Encrypted, and MIME-Version, followed by the body. Root
+Content-* extensions and all descendant headers are retained. When this
+filtered serialization fits, the original message is returned without copying
+its content or changing its headers, framing, IDs, or cursor positions.
+
+```rust
+use mimecraft::{MessagePartial, MimeMessage, TextPart};
+
+let message = MimeMessage::with_body(
+    TextPart::new("plain", &"hello\r\n".repeat(100)).unwrap().into()
+);
+let fragments = MessagePartial::split(message, 256).unwrap();
+assert!(fragments.len() > 1);
+```
+
+Otherwise, each fragment owns between one and `max_size` unencoded bytes.
+Whole-line boundaries are preferred; oversized lines are split at the limit,
+keeping CRLF together when possible. Unlike MimeKit's scan, an LF immediately
+past the limit is not included. Every fragment declares its one-based number
+and total, and shares the original Message-Id or a generated ID if absent.
+Enclosing messages clone the original non-Content headers with cleared offsets
+and receive distinct generated Message-Ids. Generated IDs use the configured
+`MessageId::default_domain()`. A missing original Message-Id is not inserted
+into the enclosed serialization.
+
+The limit excludes enclosing headers and later serialization changes. No
+transfer-encoding header or automatic seven-bit preparation is applied to the
+fragments. Ordinary serializers still normalize newlines and may append a
+final newline if requested; fragment bytes must remain unchanged for exact
+reassembly. A one-byte limit can divide a CRLF pair, so such fragments should
+be passed directly to `join`, which reads stored bytes without normalization.
+The entire enclosed serialization is buffered before splitting, with no
+aggregate memory budget or lazy/stream-backed return type. Zero size, invalid
+writer options or original IDs, excessive fragment counts, and serialization
+or ID-generation failures return errors, dropping the consumed message and
+intermediate buffers rather than returning a partial vector.
+
+Explicit-domain IDs can also be created with `MessageId::generate_with_domain`.
+Fragment leaves can use ordinary part/tree transport preparation; no
+splitting-specific preparation
 is performed.
 
 ### Returned-message headers
@@ -6741,8 +6781,13 @@ rejected. Shared parser limits bound the reassembled decoded message; no
 intermediate concatenated message buffer is required. As in MimeKit, combined
 message and root-body offsets are cleared without changing descendant offsets.
 Visitor dispatch and disposal comments do not apply to the Rust model.
-Automatic splitting is not yet ported; explicit-domain ID generation is available
-through `MessageId::generate_with_domain`.
+Automatic splitting adapts the same source's `Split` and `CloneMessage`,
+including its whole-line preference comment and eleven-fragment photo test.
+The consuming in-memory API preserves small-message storage and cursor positions,
+uses configured-domain IDs, and enforces the fragment size even when LF lies
+just outside the boundary. Root-only header filtering retains Content-* extensions
+and attached-message headers. Writer-error coverage replaces the source's
+throwing-stream test because the approved API uses owned byte buffers.
 `MimeReader.cs`'s multipart/digest default is scoped to the immediate parent
 and resets at embedded message roots. Unlike cached effective metadata, the
 raw API keeps missing headers absent; the writer uses its parent frame to

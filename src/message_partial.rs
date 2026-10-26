@@ -9,8 +9,9 @@ use std::{
 };
 
 use crate::{
-    ContentHeaderParseError, ContentType, HeaderFormatError, HeaderId, HeaderList, MimeContent,
-    MimeEntityParseOptions, MimeMessage, MimePart,
+    ContentHeaderParseError, ContentType, HeaderFormatError, HeaderId, HeaderList, MessageId,
+    MessageIdGenerationError, MessageIdParseError, MimeContent, MimeEntity, MimeEntityParseOptions,
+    MimeMessage, MimePart, MimePartWriteOptions,
 };
 
 /// An opaque message/partial fragment with checked metadata and reassembly.
@@ -21,8 +22,9 @@ use crate::{
 /// or reposition sources, and returned parameter values are detached.
 ///
 /// [`Self::join`] reassembles existing fragments using the first enclosing
-/// message's headers. Automatic splitting, automatic ID assignment, and transport
-/// preparation are not implemented.
+/// message's headers. [`Self::split`] consumes an in-memory message and creates
+/// numbered fragments with distinct enclosing Message-Ids. Transport preparation
+/// is not performed.
 ///
 /// ```
 /// use std::io::Cursor;
@@ -56,6 +58,180 @@ impl MessagePartial {
     /// Requires `1 <= number <= total <= i32::MAX`; formatting errors propagate.
     pub fn new(id: &str, number: u32, total: u32) -> Result<Self, MessagePartialError> {
         Self::with_content(id, number, total, MimeContent::new(Cursor::new(Vec::new())))
+    }
+
+    /// Splits an owned in-memory message using default CRLF serialization.
+    ///
+    /// See [`Self::split_with_options`] for size, ownership, and transport rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-size, serialization, identifier, or fragment metadata errors.
+    pub fn split(
+        message: MimeMessage,
+        max_size: usize,
+    ) -> Result<Vec<MimeMessage>, MessagePartialError> {
+        Self::split_with_options(message, max_size, &MimePartWriteOptions::default())
+    }
+
+    /// Splits an owned in-memory message into numbered message/partial bodies.
+    ///
+    /// Serializes only the enclosed root's Content-* fields (including extensions),
+    /// Subject, Message-Id, Encrypted, and MIME-Version, followed by its content.
+    /// Descendant headers are not filtered. Header order, parsed framing, and body
+    /// encodings follow the ordinary writer. This filtered serialization, not the
+    /// complete original message, determines whether splitting is needed.
+    ///
+    /// When its length is at most `max_size`, returns the original message without
+    /// copying its body or changing headers, framing, IDs, or source positions.
+    /// Otherwise, every nonempty fragment contains at most `max_size` stored bytes.
+    /// Whole lines are preferred; oversized lines are split at the byte limit.
+    /// A CRLF pair is kept together when it fits. Unlike MimeKit's boundary scan,
+    /// an LF just beyond the size limit is not included.
+    ///
+    /// Enclosing messages clone the original non-Content headers, clear their old
+    /// stream offsets, and receive distinct generated Message-Ids. All fragments
+    /// share the original Message-Id as their `id` parameter, or a generated ID if
+    /// absent. Generated IDs use [`MessageId::default_domain`]. A missing original
+    /// Message-Id is not inserted into the enclosed serialization. Fragment
+    /// numbering starts at one; every fragment declares the same total.
+    ///
+    /// Bodies own independent unencoded byte buffers, without a transfer-encoding
+    /// header. The size limit excludes enclosing headers and later serialization
+    /// changes. Ordinary part writing still normalizes newlines and can append
+    /// them when requested; do not change fragment bytes before reassembly.
+    /// In particular, a one-byte limit can divide CRLF pairs. [`Self::join`] reads
+    /// the stored fragments directly, without such normalization.
+    ///
+    /// Like MimeKit, the entire enclosed serialization is buffered before
+    /// splitting; there is no aggregate memory budget or lazy/stream-backed result.
+    /// This is not seven-bit validation, transport preparation, or signing.
+    ///
+    /// # Errors
+    ///
+    /// Zero size and invalid writer options fail before serialization. More than
+    /// `i32::MAX` fragments, invalid original IDs when splitting is required,
+    /// ID-generation failures, and writer/metadata errors return no partial vector.
+    /// Failure drops the consumed message and all intermediate buffers.
+    ///
+    /// ```
+    /// use mimecraft::{MessagePartial, MimeMessage, TextPart};
+    ///
+    /// let message = MimeMessage::with_body(TextPart::new("plain", &"hello\r\n".repeat(100))?.into());
+    /// let messages = MessagePartial::split(message, 256)?;
+    /// assert!(messages.len() > 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn split_with_options(
+        mut message: MimeMessage,
+        max_size: usize,
+        options: &MimePartWriteOptions,
+    ) -> Result<Vec<MimeMessage>, MessagePartialError> {
+        if max_size == 0 {
+            return Err(MessagePartialError::InvalidMaxSize);
+        }
+        options.validate().map_err(MessagePartialError::Io)?;
+        let positions: Vec<_> = message
+            .leaf_parts()
+            .map(|part| part.content().get_ref().position())
+            .collect();
+        let mut bytes = Vec::new();
+        // RFC 2046 keeps these fields inside the fragmented message. Filtering
+        // only the root avoids stripping headers from attached messages.
+        crate::mime_entity::write_entity_headers(
+            message
+                .merged_headers()
+                .filter(|header| header.is_content_header() || is_enclosed_field(header.id())),
+            message.body().and_then(MimeEntity::parsed),
+            &mut bytes,
+            options,
+        )
+        .map_err(MessagePartialError::Io)?;
+        if let Some(body) = message.body_mut() {
+            body.write_content_to_with_options(&mut bytes, options)
+                .map_err(MessagePartialError::Io)?;
+        }
+        if bytes.len() <= max_size {
+            restore_positions(&mut message, positions);
+            return Ok(vec![message]);
+        }
+
+        let mut ends = Vec::new();
+        let mut start = 0;
+        while start < bytes.len() {
+            // Preferably, we'd split on whole lines if we can, but if that's
+            // not possible, split on max size.
+            let mut end = start.saturating_add(max_size).min(bytes.len());
+            if end < bytes.len() {
+                if let Some(index) = bytes[start..end].iter().rposition(|&byte| byte == b'\n') {
+                    end = start + index + 1;
+                } else if end > start + 1 && bytes[end - 1] == b'\r' && bytes[end] == b'\n' {
+                    end -= 1;
+                }
+            }
+            if ends.len() == i32::MAX as usize {
+                return Err(MessagePartialError::TooManyFragments);
+            }
+            ends.push(end);
+            start = end;
+        }
+        let id = match message
+            .message_id()
+            .map_err(MessagePartialError::MessageId)?
+        {
+            Some(id) => id,
+            None => MessageId::generate().map_err(MessagePartialError::GenerateMessageId)?,
+        };
+        let mut headers: HeaderList = message
+            .merged_headers()
+            .filter(|header| !header.is_content_header())
+            .cloned()
+            .collect();
+        headers.clear_offsets();
+        drop(message);
+        let total = ends.len() as u32;
+        let mut messages = Vec::with_capacity(ends.len());
+        start = 0;
+        for (index, end) in ends.into_iter().enumerate() {
+            let partial = Self::with_content(
+                id.as_str(),
+                index as u32 + 1,
+                total,
+                MimeContent::new(Cursor::new(bytes[start..end].to_vec())),
+            )?;
+            let mut enclosing = MimeMessage::from_parts(headers.clone(), Some(partial.into()));
+            let generated =
+                MessageId::generate().map_err(MessagePartialError::GenerateMessageId)?;
+            enclosing
+                .set_message_id(generated.as_str())
+                .map_err(MessagePartialError::MessageId)?;
+            messages.push(enclosing);
+            start = end;
+        }
+        Ok(messages)
+    }
+}
+
+fn restore_positions(message: &mut MimeMessage, positions: Vec<u64>) {
+    let mut positions = positions.into_iter();
+    let mut stack: Vec<_> = message.body_mut().into_iter().collect();
+    while let Some(entity) = stack.pop() {
+        match entity {
+            MimeEntity::Part(part) => {
+                // Restoring a cursor is not a content edit: retain parsed framing.
+                part.content
+                    .get_mut()
+                    .set_position(positions.next().unwrap());
+            }
+            MimeEntity::Multipart(part) => {
+                stack.extend(part.children_and_epilogue().0.iter_mut().rev());
+            }
+            MimeEntity::Message(part) => {
+                if let Some(body) = part.message.as_deref_mut().and_then(MimeMessage::body_mut) {
+                    stack.push(body);
+                }
+            }
+        }
     }
 }
 
@@ -380,9 +556,17 @@ impl<R: Read> Read for FragmentReader<R> {
     }
 }
 
-/// A partial-message fragment could not be constructed, read, or reassembled.
+/// A message could not be split, or its fragments constructed, read, or reassembled.
 #[derive(Debug)]
 pub enum MessagePartialError {
+    /// The maximum fragment size is zero.
+    InvalidMaxSize,
+    /// Splitting would require more than i32::MAX numbered fragments.
+    TooManyFragments,
+    /// An original or newly assigned Message-Id is invalid.
+    MessageId(MessageIdParseError),
+    /// Generating a fragment or enclosing message ID failed.
+    GenerateMessageId(MessageIdGenerationError),
     /// The first Content-Type header is absent.
     MissingContentType,
     /// The first Content-Type describes a different media type.
@@ -428,13 +612,17 @@ pub enum MessagePartialError {
         /// Declared fragment number.
         actual: u32,
     },
-    /// Opening, decoding, or parsing failed.
+    /// Opening, decoding, parsing, or serialization failed.
     Io(io::Error),
 }
 
 impl fmt::Display for MessagePartialError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidMaxSize => f.write_str("partial message size must be positive"),
+            Self::TooManyFragments => f.write_str("partial message count exceeds i32::MAX"),
+            Self::MessageId(error) => error.fmt(f),
+            Self::GenerateMessageId(error) => error.fmt(f),
             Self::MissingContentType => f.write_str("partial message has no Content-Type"),
             Self::NotPartial(value) => write!(f, "expected message/partial, got {value}"),
             Self::ContentType(error) => error.fmt(f),
@@ -466,6 +654,8 @@ impl fmt::Display for MessagePartialError {
 impl Error for MessagePartialError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::MessageId(error) => Some(error),
+            Self::GenerateMessageId(error) => Some(error),
             Self::ContentType(error) => Some(error),
             Self::HeaderFormat(error) => Some(error),
             Self::Io(error) => Some(error),

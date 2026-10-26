@@ -90,6 +90,8 @@
 //! sharing nested-container rules and preserving parsed framing during decoding.
 //! [`BodyBuilder`] assembles owned in-memory text alternatives, linked resources,
 //! and attachments into common MIME layouts, with configurable text encoding.
+//! [`MessagePartial::split`] consumes in-memory messages to create numbered
+//! fragments, preferring whole lines and retaining originals that fit.
 //! [`attachment`] constructs in-memory attachments from bytes, readers, or files,
 //! with filename metadata, inline resources, and bounded embedded-message parsing.
 //! [`MultipartRelated`] shares text-body root selection and adds atomic root
