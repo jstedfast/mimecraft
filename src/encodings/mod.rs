@@ -8,6 +8,9 @@
 //! encoders instead write complete payloads per call, without wrappers or folding.
 //! [`MimeEncoder`] and [`MimeDecoder`] provide common incremental interfaces;
 //! pass-through codecs copy bytes unchanged with configurable encoding metadata.
+//! [`YEncWriter`] adds validated block metadata, framing, and checksum trailers
+//! around the incremental yEnc payload encoder. [`YEncReader`] streams complete
+//! blocks with framing, size, and checksum validation.
 
 mod base64;
 mod hex;
@@ -18,6 +21,9 @@ mod rfc2231;
 mod traits;
 mod uu;
 mod yenc;
+mod yenc_header;
+mod yenc_reader;
+mod yenc_writer;
 
 use std::{error::Error, fmt};
 
@@ -30,6 +36,9 @@ pub use rfc2231::{Rfc2231Decoder, Rfc2231Encoder};
 pub use traits::{MimeDecoder, MimeEncoder};
 pub use uu::{UuDecoder, UuEncoder};
 pub use yenc::{YDecoder, YEncoder};
+pub use yenc_header::{YEncHeader, YEncHeaderError};
+pub use yenc_reader::{YEncReadError, YEncReader, YEncReaderOptions};
+pub use yenc_writer::{YEncWriteError, YEncWriter, YEncWriterOptions};
 
 /// A new-line format, matching MimeKit's `NewLineFormat`.
 ///

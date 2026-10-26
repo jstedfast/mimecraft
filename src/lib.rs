@@ -5,6 +5,8 @@
 //! This crate is under development. Currently it provides incremental MIME
 //! Base64, quoted-printable, UU, yEnc, and pass-through codecs, plus parameter
 //! percent and RFC 2047 B/Q payload codecs, and owned message/MIME tree I/O.
+//! Complete synchronous yEnc block reading and writing add checked single-part/
+//! multipart metadata, streaming payload I/O, size limits, and CRC-32 validation.
 //! Encoded message-wrapper interpretation is deferred.
 //! Cryptography is outside the scope of this crate.
 //! Wrapping body encoders default to CRLF line endings, with LF available through

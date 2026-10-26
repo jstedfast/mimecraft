@@ -229,10 +229,8 @@ enum DecoderState {
 ///
 /// # Compatibility
 ///
-/// MimeKit's optional-part scanner discards a leading `=` when the first line
-/// after `=ybegin` starts with `=` followed by a byte other than `y`. This also
-/// affects an escaped first payload byte when no `=ypart` header intervenes.
-/// This behavior is preserved; payload-only decoding does not have this quirk.
+/// The optional-part scanner preserves a leading escape when the first line
+/// after `=ybegin` is payload rather than an `=ypart` header.
 /// Malformed `=y...` part candidates are skipped through LF before trying the
 /// next line, while `=ye` ends the stream immediately.
 #[derive(Clone, Debug)]
@@ -328,9 +326,9 @@ impl YDecoder {
                 }
                 DecoderState::Part { matched } => {
                     if matched == 1 && byte != b'y' {
-                        // MimeKit consumes the candidate '=' but clears escaping
-                        // when this is payload. Preserve that scanner quirk.
+                        // The candidate '=' belongs to the payload's first escape.
                         self.state = DecoderState::Payload;
+                        self.escaped = true;
                     } else if matched == 2 && byte == b'e' {
                         // MimeKit treats "=ye" here as an "=yend" marker.
                         self.state = DecoderState::Ended;
@@ -362,8 +360,6 @@ impl YDecoder {
                 DecoderState::Ended => return,
             }
 
-            // Header scanning does not change escape/line state. Payload starts
-            // unescaped at a line boundary, even across split header markers.
             if byte == b'\r' {
                 self.escaped = false;
                 continue;

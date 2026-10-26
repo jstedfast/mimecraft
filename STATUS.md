@@ -42,6 +42,9 @@ MimeKit. The crate is not configured for publication.
   `begin`-line scanning and DOS/Unix new-line formats.
 - Incremental yEnc payload encoding and tolerant decoding, with CRC-32 tracking,
   optional `=ybegin`/`=ypart` scanning, and DOS/Unix new-line formats.
+- Complete synchronous streaming yEnc block reading and writing with checked
+  single-part/multipart metadata, filename charsets, size/line limits, and
+  checksum trailers and validation.
 - RFC 2231 parameter percent encoding and incremental, tolerant decoding.
 - MIME parameter-list parsing with quoted values, RFC 2231 continuations,
   case-insensitive lookup, and explicit syntax errors and recovery diagnostics.
@@ -6514,11 +6517,9 @@ and stop at `=y` at the start of a payload line without requiring a complete
 filenames, and trailer checksums are not validated or returned; multipart
 assembly is not implemented.
 
-For compatibility, the header-scanning decoder preserves MimeKit's quirk of
-discarding a leading `=` when the first line after `=ybegin` begins with `=`
-followed by a byte other than `y`. This can misdecode an escaped first payload
-byte when there is no intervening `=ypart` header. Payload-only mode does not
-have this quirk.
+The optional-part scan preserves a leading payload escape when the first line
+after `=ybegin` is not a `=ypart` header, matching MimeKit's corrected decoder.
+All possible initial bytes are covered across input splits and cloned states.
 
 Both codecs expose `checksum() -> u32`: MimeKit's **uncomplemented** running
 CRC-32 state, initially `u32::MAX`. Use `!codec.checksum()` for the finalized
@@ -6526,6 +6527,136 @@ value used in a yEnc trailer. Only original/decoded bytes affect it, not line
 endings, escapes, or headers. Cloning preserves the checksum and all streaming
 state; resetting clears them while retaining configuration or scanning mode.
 The implementation is safe scalar Rust with a static CRC table.
+
+#### Complete yEnc block metadata and writing
+
+`encodings::YEncHeader` supplies checked immutable metadata. `new(file_name, size)`
+creates a single-part header with a nominal payload line length of 128.
+`with_line_length` and `with_part(part_number, total_parts, range)` return updated
+metadata; multipart ranges are one-based and inclusive, and `None` leaves the
+total part count unspecified. `size()` always describes the entire file, while
+`decoded_size()` describes just this block. Empty single-part files are valid.
+Empty filenames, surrounding ASCII spaces, NUL/CR/LF, zero multipart numbers,
+inconsistent totals, and empty/out-of-file ranges are rejected. Filenames remain
+untrusted metadata, not filesystem paths.
+
+`encodings::YEncWriter<W: Write>` wraps an owned or borrowed destination.
+`write_block(&header, &mut source, file_checksum)` writes `=ybegin`, optional
+`=ypart`, encoded payload, and `=yend`, returning the **finalized** CRC-32 of this
+block. It reuses `YEncoder` rather than duplicating its payload algorithm. Multiple
+successful blocks can be written consecutively. Sources need only `Read`, begin
+at their current positions, and must end at exactly `decoded_size()`; an excess
+probe consumes at most one byte beyond that size. Multipart sources contain only
+their declared range: the writer does not seek into whole files or assemble parts.
+
+`YEncWriterOptions` defaults to CRLF, exact Latin-1 filenames, a 16384-byte
+physical-line limit, and a 1 GiB per-block decoded-size limit. Options are copied
+on construction. LF and explicit filename `Charset` values are supported without
+replacement fallback; yEnc does not identify the charset on the wire. Encoded
+filenames are checked again for NUL/CR/LF. Control-line limits count encoded
+bytes, not characters. Metadata accepts line lengths from 1 through
+`i32::MAX - 2`, but the writer requires 60 through 998 and reserves one extra
+physical-line byte for an escape pair, even for an empty block.
+
+Single-part trailers contain `crc32`; multipart trailers contain `part`,
+optional `total`, `pcrc32`, and an optional supplied whole-file `crc32`.
+A supplied whole-file checksum is verified for single-part blocks and multipart
+ranges covering the entire file. For partial ranges it is emitted without
+verification. Checksum mismatches suppress the trailer.
+
+Preflight validates metadata-dependent limits, filename encoding, and all
+control lines (including the future trailer) before any source/destination I/O.
+These failures leave the writer reusable. Once I/O begins, any source, destination,
+size, or checksum failure permanently faults the writer, and output may be partial.
+`YEncWriteError` distinguishes these failures and exposes underlying I/O/charset/
+encoder errors through `Error::source`. Interrupted reads and writes are retried,
+short writes are completed, and zero-length writes fail explicitly.
+Neither writing nor dropping flushes the sink; `get_ref`, `get_mut`, and
+`into_inner` provide destination access. Dropping owned streams follows normal Rust
+ownership; borrowed streams remain available.
+
+```rust
+use mimecraft::encodings::{YEncHeader, YEncWriter};
+
+let header = YEncHeader::new("test.bin", 20)?
+    .with_part(2, Some(3), 10..=18)?;
+let mut writer = YEncWriter::new(Vec::new());
+let crc = writer.write_block(&header, &mut &b"123456789"[..], Some(0x12345678))?;
+assert_eq!(crc, 0xcbf43926);
+let encoded_block = writer.into_inner();
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Unsigned `u64` byte counts/ranges and `u32` part counts replace MimeKit's signed
+integer APIs; `Option` replaces zero sentinels for multipart metadata. This also
+allows positive values beyond MimeKit's signed integer ranges.
+
+#### Complete yEnc block reading
+
+`encodings::YEncReader<R: Read>` supplies strict streaming block validation.
+Call `read_next()` to find and validate the next header, then
+`decode_to(&mut destination)` to decode and validate its payload and trailer.
+Decode to `std::io::sink()` to discard a block while still validating it.
+Surrounding text is skipped, and consecutive blocks are supported.
+Sources need not seek; neither decoding nor dropping flushes the destination.
+
+`YEncReaderOptions` copies the same physical-line limit, per-block decoded-size
+limit, and strict filename charset defaults as the writer. Readers accept both
+CRLF and LF, including a final unterminated line. Line scanning uses bounded
+buffers, not an unbounded delimiter read or allocations based on advertised
+file sizes. The physical limit applies to surrounding text and control/payload
+lines. The declared width cannot exceed that limit; payload lines can exceed
+their declared width by one byte only to complete a final escape pair.
+Unlike writing, reading permits nominal widths below 60 or above 998.
+
+Control fields are case-sensitive. Unknown fields are allowed, but malformed,
+empty, or duplicate fields are rejected. Header `name=` consumes the remainder
+of its line and trims only ASCII spaces. Multipart blocks require an immediate
+`=ypart` header with a valid range. Payload validation rejects unexpected control
+lines, unescaped NUL/CR, incomplete escapes, and excess decoded bytes before
+writing the offending line. Header, decoded, and trailer sizes must agree;
+multipart trailer numbers and any advertised total must match the header.
+
+Checksums are optional, but advertised values must contain exactly eight hex
+digits. Part checksums are always verified; whole-file checksums are verified
+only for single-part blocks or multipart ranges covering the entire file.
+`checksum()`, `expected_checksum()`, and `expected_part_checksum()` return
+finalized CRC values only after successful decoding. A partial range's
+`expected_checksum()` is explicitly unverified metadata.
+
+Output remains provisional until `decode_to` succeeds and must be discarded on
+failure. `decoded_size()` counts decoded bytes, not necessarily bytes delivered
+successfully to a failing destination. Syntax, limit, checksum, or I/O failures
+permanently fault the reader; `YEncReadError` exposes structured failures and
+underlying error sources. Calling in the wrong phase leaves it reusable.
+Metadata/checksums reset when advancing to another block; repeated EOF calls do
+not read again. Invalid headers never publish partially validated metadata.
+Interrupted I/O and short writes are handled.
+
+The reader can read ahead, so callers must not bypass it to read the source.
+`into_parts()` returns the source and unread buffered bytes; consume those bytes
+before reading the source again. Dropping never validates a pending block.
+
+```rust
+use mimecraft::encodings::YEncReader;
+
+let input = b"=ybegin line=128 size=9 name=test.bin\n\
+              [\\]^_`abc\n=yend size=9 crc32=cbf43926\n";
+let mut reader = YEncReader::new(input.as_slice());
+assert!(reader.read_next()?);
+assert_eq!(reader.header().unwrap().file_name(), "test.bin");
+let mut decoded = Vec::new();
+reader.decode_to(&mut decoded)?;
+assert_eq!(decoded, b"123456789");
+assert_eq!(reader.checksum(), Some(0xcbf43926));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Synchronous yEnc support is complete. Async/cancellation entry points remain
+deferred consistently with the rest of the synchronous I/O API. As in MimeKit,
+these block APIs do not add MIME headers, NNTP framing/dot-unstuffing, or multipart
+assembly. The tolerant `YDecoder` remains available independently; it is not a
+validated reader.
 
 ### Header payload encodings
 
@@ -7100,6 +7231,22 @@ AVX2, and AdvSimd kernels, begin-line scanning, terminator handling, and
 malformed-input behavior.
 The yEnc port follows `YEncoder.cs`, `YDecoder.cs`, and `Utils/Crc32.cs`,
 including their checksum lifetime and permissive header/payload transitions.
+Complete block reading and writing follow `Encodings/YEncHeader.cs`,
+`YEncReader.cs`, `YEncWriter.cs`, `YEncFormat.cs`, and `YEncOptions.cs`, with
+applicable comments retained.
+`UnitTests/Encodings/YEncTests.cs` supplies exact empty/single-part/multipart wire
+fixtures, chunked round trips, source-size/checksum failures, charset behavior,
+limits, and faulted-state cases. Rust tests additionally cover all 939 supported
+payload widths with both newline formats, UTF-8 byte limits, interrupted and
+short I/O, failures during each output stage, and independent bitwise CRC checks.
+Reader coverage includes all seven valid and 39 invalid upstream block fixtures,
+bounded scanning and EOF behavior, control-field grammar, multipart checksums,
+provisional output, buffered-source recovery, and faulted-state behavior.
+The five upstream `TestData/yenc` fixtures cover strict and tolerant multipart
+JPEG decoding, MIME-body decoding and byte-for-byte re-encoding, and permissive
+decoder state transitions. The initial-payload-escape correction also matches
+the current upstream decoder, with exhaustive initial-byte/split/clone coverage.
+Asynchronous entry points remain deferred.
 The header payload codecs follow `Rfc2231Encoder.cs`, `Rfc2231Decoder.cs`,
 `Rfc2047Base64Encoder.cs`, and `Rfc2047QuotedPrintableEncoder.cs`, using the
 character classifications in `Utils/ByteExtensions.cs`.

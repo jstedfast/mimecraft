@@ -78,7 +78,6 @@ fn reference_decode(mut input: &[u8], payload_only: bool) -> Vec<u8> {
                 return Vec::new();
             }
             if input[1] != b'y' {
-                input = &input[1..];
                 break;
             }
             let part = input.starts_with(b"=ypart ");
@@ -369,7 +368,7 @@ fn begin_and_part_headers_at_every_split() {
 #[test]
 fn malformed_header_transitions_match_mimekit() {
     let cases: &[(&[u8], &[u8])] = &[
-        (b"=xcontent", b"xcontent"),
+        (b"=xcontent", b"8content"),
         (b"=yxcontent", b""),
         (b"=ypxcontent", b""),
         (b"=ypaxcontent", b""),
@@ -380,8 +379,8 @@ fn malformed_header_transitions_match_mimekit() {
         (b"=yX\n=ybad\n=ypart \ncontent", b"content"),
         (b"=ye", b""),
         (b"=yeanything\ncontent", b""),
-        (b"=@", b"@"), // The optional-part scanner consumes the first '='.
-        (b"==@", b"=@"),
+        (b"=@", b"=@"),
+        (b"==@", b"==@"),
         (b"=ypart \n=@", b"=@"),
     ];
     for &(suffix, payload) in cases {
@@ -445,6 +444,31 @@ fn payload_escapes_line_breaks_and_early_termination() {
         assert_eq!(reference_decode(input, true), expected);
         for size in 1..=input.len() + 1 {
             assert_eq!(decode(input, true, size), expected);
+        }
+    }
+}
+
+#[test]
+fn framed_round_trip_every_initial_byte_and_split() {
+    for byte in 0..=255 {
+        let encoded = [
+            b"=ybegin line=128 size=1 name=test.bin\r\n".to_vec(),
+            reference_encode(&[byte], 128, NewLineFormat::Dos),
+            b"=yend size=1\r\n".to_vec(),
+        ]
+        .concat();
+        for split in 0..=encoded.len() {
+            let mut decoder = YDecoder::new();
+            let mut output = Vec::new();
+            decoder.decode(&encoded[..split], &mut output);
+            let mut clone = decoder.clone();
+            let mut cloned = output.clone();
+            decoder.decode(&encoded[split..], &mut output);
+            clone.decode(&encoded[split..], &mut cloned);
+            assert_eq!(output, [byte], "byte {byte}, split {split}");
+            assert_eq!(cloned, output);
+            assert_eq!(decoder.checksum(), checksum(&[byte]));
+            assert_eq!(clone.checksum(), decoder.checksum());
         }
     }
 }
