@@ -54,6 +54,11 @@ pub struct HeaderFormatOptions {
     /// Controls and encoded-word lookalikes still use the selected encoding;
     /// RFC 2047 also remains the fallback for long values when selected.
     /// Raw values are UTF-8 regardless of the preferred parameter charset.
+    ///
+    /// For SMTP delivery, generally set this to match whether the server
+    /// advertises `SMTPUTF8` in its `EHLO` response. Leave it false if that
+    /// extension is unavailable; enabling it is optional when supported.
+    ///
     /// This does not enable international addresses or negotiate transport
     /// support; callers must ensure the destination accepts UTF-8 headers.
     ///

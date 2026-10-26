@@ -2187,8 +2187,11 @@ line. Like MimeKit's lossless folding, it does not insert spaces into decoded
 text. The selected encoding charset and encoded-word limit
 apply to this fallback, with errors for unrepresentable text or an insufficient
 word limit. Invalid options are still rejected even for raw or empty output.
-The caller must ensure that the destination accepts UTF-8 headers; this does not
-negotiate transport capabilities or enable international address formatting.
+For SMTP delivery, generally set `international` to match whether the server
+advertises `SMTPUTF8` in its `EHLO` response. Keep it false if the extension is
+unavailable; enabling it is optional when supported. The caller must ensure that
+the destination accepts UTF-8 headers; this does not negotiate transport
+capabilities or enable international address formatting.
 
 Folding preserves interior spaces without splitting tokens or encoded words.
 Oversized plain tokens are encoded instead of having spaces inserted into them.
@@ -5779,9 +5782,11 @@ word limits are still rejected. Line limits count UTF-8 bytes, not characters.
 Strict addr-spec syntax, domain/route checks, indivisible addr-specs and routes,
 and nested error paths still apply. Message address and Sender/Resent-Sender
 `_with_options` setters support this mode and remain atomic on failure.
-ASCII-only value APIs and default header output are unchanged. This option
-does not negotiate SMTPUTF8; callers must ensure the destination accepts
-internationalized headers and addresses.
+ASCII-only value APIs and default header output are unchanged. For SMTP delivery,
+generally set `international` to match whether the server advertises `SMTPUTF8`
+in its `EHLO` response. Keep it false if the extension is unavailable; enabling
+it is optional when supported. This option does not negotiate SMTPUTF8; callers
+must ensure the destination accepts internationalized headers and addresses.
 
 ### Domain routes
 
@@ -6492,7 +6497,10 @@ encoding-method preference. The default remains ASCII output.
 
 This option applies only to Content-Type and Content-Disposition parameters,
 not international addresses or other headers, and does not negotiate transport
-capabilities. The caller must ensure that the destination accepts UTF-8 headers.
+capabilities. For SMTP delivery, generally set `international` to match whether
+the server advertises `SMTPUTF8` in its `EHLO` response. Keep it false if the
+extension is unavailable; enabling it is optional when supported. The caller
+must ensure that the destination accepts UTF-8 headers.
 
 For encoded output, charset selection follows MimeKit's automatic choice:
 printable ASCII uses `us-ascii`, controls and text entirely within U+00FF use

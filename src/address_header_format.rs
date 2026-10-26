@@ -42,6 +42,11 @@ pub struct AddressHeaderFormatOptions {
     /// whole name to use the selected encoding, preserving its decoded text.
     ///
     /// Addr-specs and source routes remain indivisible; oversized pieces fail.
+    ///
+    /// For SMTP delivery, generally set this to match whether the server
+    /// advertises `SMTPUTF8` in its `EHLO` response. Leave it false if that
+    /// extension is unavailable; enabling it is optional when supported.
+    ///
     /// This does not negotiate SMTPUTF8 or change the ASCII-only value APIs.
     /// Callers must ensure the destination accepts internationalized headers
     /// and addresses.

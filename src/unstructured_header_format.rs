@@ -38,6 +38,10 @@ pub struct UnstructuredHeaderFormatOptions {
     /// Like MimeKit, this avoids splitting a token and inserting whitespace
     /// into its decoded value.
     ///
+    /// For SMTP delivery, generally set this to match whether the server
+    /// advertises `SMTPUTF8` in its `EHLO` response. Leave it false if that
+    /// extension is unavailable; enabling it is optional when supported.
+    ///
     /// This does not enable international address formatting or negotiate
     /// transport capabilities. Callers must ensure the destination accepts
     /// UTF-8 headers.
