@@ -822,10 +822,6 @@ mod tests {
     #[test]
     fn root_generation_failures_preserve_the_container() {
         for failure in [
-            MessageIdGenerationError::HostName(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "hostname unavailable",
-            )),
             MessageIdGenerationError::InvalidDomain(crate::idna::to_ascii("").unwrap_err()),
             MessageIdGenerationError::ClockOutOfRange,
             MessageIdGenerationError::Random(getrandom::Error::UNSUPPORTED),

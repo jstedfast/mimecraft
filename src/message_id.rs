@@ -3,12 +3,14 @@
 
 use std::{
     error::Error,
-    ffi::OsString,
-    fmt, io,
+    fmt,
     iter::FusedIterator,
     str::FromStr,
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static DEFAULT_MESSAGE_ID_DOMAIN: OnceLock<String> = OnceLock::new();
 
 use crate::parse_utils::{
     DomainParseErrorKind, is_atom, is_whitespace, skip_comments_and_whitespace, skip_quoted,
@@ -48,37 +50,53 @@ pub struct MessageId {
 }
 
 impl MessageId {
-    /// Generates a Message-Id or Content-Id using the local machine's hostname.
+    /// Configures the process-wide domain for generated message and content IDs.
     ///
-    /// Adapts MimeKit's parameterless `MimeUtils.GenerateMessageId`. Queries
-    /// the operating system on each call, without DNS resolution; the name may
-    /// be unqualified. It undergoes the same validation and normalization as
-    /// [`Self::generate_with_domain`]. Use that method to choose a public domain
-    /// instead of exposing the machine's hostname.
+    /// Call once at startup, before [`Self::generate`] or [`Self::default_domain`].
+    /// The domain uses the same IDNA validation and lowercase normalization as
+    /// [`Self::generate_with_domain`], with an optional final root dot removed.
+    /// Invalid input does not initialize the setting. Concurrent initialization
+    /// is atomic: only one caller succeeds, even if the domains are identical.
+    ///
+    /// ```
+    /// use mimecraft::MessageId;
+    ///
+    /// MessageId::set_default_domain("EXAMPLE.COM.")?;
+    /// assert_eq!(MessageId::default_domain(), "example.com");
+    /// assert!(MessageId::generate()?.as_str().ends_with("@example.com"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns [`MessageIdGenerationError::HostName`] when discovery fails or
-    /// the name is not Unicode, and the validation, clock, and randomness errors
-    /// of [`Self::generate_with_domain`]. Unlike MimeKit, discovery failures do
-    /// not silently substitute `localhost.localdomain`.
-    pub fn generate() -> Result<Self, MessageIdGenerationError> {
-        Self::generate_local_with(hostname::get, SystemTime::now(), getrandom::fill)
+    /// Returns [`MessageIdDomainError::InvalidDomain`] for invalid input, or
+    /// [`MessageIdDomainError::AlreadyInitialized`] after configuration or first
+    /// use. Validation precedes the initialization attempt.
+    pub fn set_default_domain(domain: &str) -> Result<(), MessageIdDomainError> {
+        set_default_domain(&DEFAULT_MESSAGE_ID_DOMAIN, domain)
     }
 
-    fn generate_local_with(
-        get_hostname: impl FnOnce() -> io::Result<OsString>,
-        now: SystemTime,
-        fill: impl FnOnce(&mut [u8]) -> Result<(), getrandom::Error>,
-    ) -> Result<Self, MessageIdGenerationError> {
-        let hostname = get_hostname().map_err(MessageIdGenerationError::HostName)?;
-        let domain = hostname.to_str().ok_or_else(|| {
-            MessageIdGenerationError::HostName(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "local hostname is not valid Unicode",
-            ))
-        })?;
-        Self::generate_with(domain, now, fill)
+    /// Returns the configured domain, initializing it if necessary.
+    ///
+    /// Without prior configuration, permanently selects `localhost.localdomain`.
+    /// No hostname discovery or DNS lookup is performed.
+    pub fn default_domain() -> &'static str {
+        default_domain(&DEFAULT_MESSAGE_ID_DOMAIN)
+    }
+
+    /// Generates a Message-Id or Content-Id using the process-wide default domain.
+    ///
+    /// Adapts MimeKit's parameterless `MimeUtils.GenerateMessageId`, using
+    /// [`Self::default_domain`] instead of discovering the local hostname.
+    /// Set the domain once at startup with [`Self::set_default_domain`], or use
+    /// [`Self::generate_with_domain`] for an independent per-call override.
+    /// The first attempt freezes the default even if generation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns clock or OS-randomness errors from [`Self::generate_with_domain`].
+    pub fn generate() -> Result<Self, MessageIdGenerationError> {
+        Self::generate_with(Self::default_domain(), SystemTime::now(), getrandom::fill)
     }
 
     /// Generates a new Message-Id or Content-Id using an explicit domain.
@@ -92,7 +110,8 @@ impl MessageId {
     /// Unlike the loose parsing APIs, domains undergo [`crate::idna::to_ascii`]
     /// validation and lowercase ASCII normalization. An optional final DNS root
     /// dot is omitted, matching this type's normalized representation.
-    /// No hostname discovery, fallback domain, or header assignment is performed.
+    /// Does not read or initialize the global default domain, discover a hostname,
+    /// or assign a header.
     ///
     /// ```
     /// use mimecraft::{MessageId, MimeMessage};
@@ -460,11 +479,51 @@ fn append_base36(output: &mut String, mut value: u64) {
     }
 }
 
+fn default_domain(domain: &OnceLock<String>) -> &str {
+    domain.get_or_init(|| "localhost.localdomain".to_owned())
+}
+
+fn set_default_domain(domain: &OnceLock<String>, value: &str) -> Result<(), MessageIdDomainError> {
+    let value = crate::idna::to_ascii(value).map_err(MessageIdDomainError::InvalidDomain)?;
+    domain
+        .set(value.trim_end_matches('.').to_owned())
+        .map_err(|_| MessageIdDomainError::AlreadyInitialized)
+}
+
+/// The process-wide message/content-ID domain could not be configured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageIdDomainError {
+    /// The supplied domain failed IDNA or MIME-safe ASCII validation.
+    InvalidDomain(crate::idna::IdnaError),
+    /// Configuration or first use has already fixed the domain.
+    AlreadyInitialized,
+}
+
+impl fmt::Display for MessageIdDomainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDomain(error) => {
+                write!(f, "invalid default message identifier domain: {error}")
+            }
+            Self::AlreadyInitialized => {
+                f.write_str("default message identifier domain is already initialized")
+            }
+        }
+    }
+}
+
+impl Error for MessageIdDomainError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidDomain(error) => Some(error),
+            Self::AlreadyInitialized => None,
+        }
+    }
+}
+
 /// A new message or content identifier could not be generated.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageIdGenerationError {
-    /// The local hostname could not be obtained or is not Unicode.
-    HostName(io::Error),
     /// The domain failed IDNA or MIME-safe ASCII validation.
     InvalidDomain(crate::idna::IdnaError),
     /// The OS clock lies outside MimeKit's supported years 1 through 9999.
@@ -476,9 +535,6 @@ pub enum MessageIdGenerationError {
 impl fmt::Display for MessageIdGenerationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HostName(error) => {
-                write!(f, "message identifier hostname discovery failed: {error}")
-            }
             Self::InvalidDomain(error) => write!(f, "invalid message identifier domain: {error}"),
             Self::ClockOutOfRange => {
                 f.write_str("message identifier clock is outside years 1 through 9999")
@@ -491,7 +547,6 @@ impl fmt::Display for MessageIdGenerationError {
 impl Error for MessageIdGenerationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::HostName(error) => Some(error),
             Self::InvalidDomain(error) => Some(error),
             Self::Random(error) => Some(error),
             Self::ClockOutOfRange => None,
@@ -857,83 +912,80 @@ mod generation_tests {
     }
 
     #[test]
-    fn local_generation_normalizes_the_os_name_without_dns_resolution() {
-        for (hostname, expected) in [
+    fn configured_domains_are_normalized_and_cannot_be_replaced() {
+        for (value, expected) in [
             ("LOCALHOST", "localhost"),
             ("Host.EXAMPLE.COM.", "host.example.com"),
             ("Mj\u{f6}lnir", "xn--mjlnir-xxa"),
         ] {
-            let id = MessageId::generate_local_with(
-                || Ok(OsString::from(hostname)),
-                UNIX_EPOCH,
-                |bytes| {
-                    bytes.fill(0);
-                    Ok(())
-                },
-            )
-            .unwrap();
-            assert_eq!(id.as_str().split_once('@').unwrap().1, expected);
-            assert_eq!(MessageId::from_value(id.as_str()).unwrap(), id);
+            let domain = OnceLock::new();
+            set_default_domain(&domain, value).unwrap();
+            assert_eq!(default_domain(&domain), expected);
+            let error = set_default_domain(&domain, expected).unwrap_err();
+            assert_eq!(error, MessageIdDomainError::AlreadyInitialized);
+            assert!(error.source().is_none());
+            assert!(!error.to_string().is_empty());
+            assert_eq!(default_domain(&domain), expected);
         }
     }
 
     #[test]
-    fn hostname_failures_precede_entropy_and_do_not_use_fallback_domains() {
-        let no_entropy = |_: &mut [u8]| -> Result<(), getrandom::Error> {
-            panic!("hostname failures must precede entropy");
-        };
-        let error = MessageId::generate_local_with(
-            || {
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "test discovery failure",
-                ))
-            },
-            UNIX_EPOCH,
-            no_entropy,
-        )
-        .unwrap_err();
-        assert!(matches!(error, MessageIdGenerationError::HostName(_)));
+    fn invalid_configuration_does_not_initialize_the_default() {
+        let domain = OnceLock::new();
+        for value in [
+            "",
+            ".",
+            "invalid domain",
+            "host\r\nBcc: victim@example.com",
+            "a\0b",
+        ] {
+            let error = set_default_domain(&domain, value).unwrap_err();
+            assert!(matches!(error, MessageIdDomainError::InvalidDomain(_)));
+            assert!(error.source().unwrap().is::<crate::idna::IdnaError>());
+            assert!(error.to_string().contains("domain"));
+            assert!(domain.get().is_none());
+        }
+        set_default_domain(&domain, "example.com").unwrap();
+        assert_eq!(default_domain(&domain), "example.com");
+    }
+
+    #[test]
+    fn first_use_permanently_selects_localhost() {
+        let domain = OnceLock::new();
+        assert_eq!(default_domain(&domain), "localhost.localdomain");
         assert_eq!(
-            error
-                .source()
-                .unwrap()
-                .downcast_ref::<io::Error>()
-                .unwrap()
-                .kind(),
-            io::ErrorKind::PermissionDenied
+            set_default_domain(&domain, "example.com"),
+            Err(MessageIdDomainError::AlreadyInitialized)
         );
-        assert!(error.to_string().contains("test discovery failure"));
-        for name in ["", "invalid host", "host\r\nBcc: victim@example.com"] {
-            assert!(matches!(
-                MessageId::generate_local_with(|| Ok(name.into()), UNIX_EPOCH, no_entropy),
-                Err(MessageIdGenerationError::InvalidDomain(_))
-            ));
-        }
+        assert_eq!(default_domain(&domain), "localhost.localdomain");
     }
 
-    #[cfg(any(unix, windows))]
     #[test]
-    fn non_unicode_hostnames_are_not_lossily_converted() {
-        #[cfg(unix)]
-        let hostname = {
-            use std::os::unix::ffi::OsStringExt;
-            OsString::from_vec(vec![0xff])
-        };
-        #[cfg(windows)]
-        let hostname = {
-            use std::os::windows::ffi::OsStringExt;
-            OsString::from_wide(&[0xd800])
-        };
-        let error = MessageId::generate_local_with(
-            || Ok(hostname),
-            UNIX_EPOCH,
-            |_| panic!("invalid hostname must precede entropy"),
-        )
-        .unwrap_err();
-        let MessageIdGenerationError::HostName(error) = error else {
-            panic!("expected hostname encoding error");
-        };
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    fn concurrent_configuration_has_exactly_one_winner() {
+        let domain = OnceLock::new();
+        let barrier = std::sync::Barrier::new(8);
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        set_default_domain(&domain, "EXAMPLE.COM.")
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(MessageIdDomainError::AlreadyInitialized))
+                .count(),
+            7
+        );
+        assert_eq!(default_domain(&domain), "example.com");
     }
 }

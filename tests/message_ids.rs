@@ -8,19 +8,22 @@ use mimecraft::{
 };
 
 #[test]
-fn local_identifiers_use_the_os_hostname_and_round_trip() {
-    let hostname = hostname::get().unwrap();
-    let expected = mimecraft::idna::to_ascii(hostname.to_str().unwrap()).unwrap();
+fn default_identifiers_use_localhost_and_round_trip() {
     let mut seen = std::collections::HashSet::new();
     for _ in 0..64 {
         let id = MessageId::generate().unwrap();
         assert_eq!(
             id.as_str().split_once('@').unwrap().1,
-            expected.trim_end_matches('.')
+            "localhost.localdomain"
         );
         assert_eq!(MessageId::from_value(id.as_str()).unwrap(), id);
         assert!(seen.insert(id));
     }
+    assert_eq!(MessageId::default_domain(), "localhost.localdomain");
+    assert_eq!(
+        MessageId::set_default_domain("example.com"),
+        Err(mimecraft::MessageIdDomainError::AlreadyInitialized)
+    );
 }
 
 #[test]

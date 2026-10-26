@@ -150,9 +150,11 @@
 //! independent typed header access with checked parsing and canonical setters.
 //! Message identifiers and reply references also have raw-header-backed accessors,
 //! assignment-validated setters, and explicit parsing and recovery errors.
-//! [`MessageId::generate`] creates message or content identifiers using the local
-//! hostname and OS randomness; [`MessageId::generate_with_domain`] accepts an
-//! explicit domain instead. Neither method assigns headers.
+//! [`MessageId::generate`] creates message or content identifiers using a
+//! process-wide domain and OS randomness. [`MessageId::set_default_domain`]
+//! configures it once before first use; otherwise it is `localhost.localdomain`.
+//! [`MessageId::generate_with_domain`] accepts an independent explicit domain.
+//! Neither generator assigns headers or discovers the local hostname.
 //! Date, Resent-Date, and MIME-Version accessors reuse the existing value types,
 //! with explicit absence, parse errors, and independent canonical setters.
 //! Sender accessors return owned mailbox prefixes and provide atomic, checked
@@ -433,7 +435,8 @@ pub use message_feedback_report::{
     FeedbackReportError, FeedbackReportParseOptions, MessageFeedbackReport,
 };
 pub use message_id::{
-    MessageId, MessageIdGenerationError, MessageIdParseError, MessageIdParseErrorKind, References,
+    MessageId, MessageIdDomainError, MessageIdGenerationError, MessageIdParseError,
+    MessageIdParseErrorKind, References,
 };
 pub use message_part::{MessagePart, MessagePartError};
 pub use message_partial::{MessagePartial, MessagePartialError};

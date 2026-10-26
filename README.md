@@ -5082,11 +5082,20 @@ opt into assignment validation.
 `MimeMessage`'s identifier and reference setters use this assignment validation
 before formatting complete headers; standalone `MessageId` remains a value type.
 
-`MessageId::generate()` uses the operating system's local hostname, without DNS
-resolution or caching. The name may be unqualified. Use
-`MessageId::generate_with_domain(domain)` to supply a domain instead of exposing
-the machine's hostname. Generation combines UTC ticks since year 1 and eight
-OS-random bytes, using
+`MessageId::generate()` uses a process-wide domain, defaulting to
+`localhost.localdomain`. Call `MessageId::set_default_domain(domain)` once at
+startup to configure it. The first `generate()` or `default_domain()` call
+permanently initializes the default if it was not configured, even if generation
+subsequently fails. Later configuration attempts return
+`MessageIdDomainError::AlreadyInitialized`, including attempts to set the same
+value. Invalid domains return `InvalidDomain` without initializing the setting.
+Concurrent initialization has exactly one winner.
+
+`MessageId::default_domain()` returns the normalized domain.
+`MessageId::generate_with_domain(domain)` is an independent per-call override:
+it neither reads nor initializes the default. No hostname discovery or DNS
+lookup is performed, and there is no hostname dependency.
+Generation combines UTC ticks since year 1 and eight OS-random bytes, using
 MimeKit's uppercase, least-significant-digit-first base36 representation and
 big-endian random integer interpretation. It returns a `MessageId` without angle
 brackets; callers explicitly assign the result to Message-Id or Content-Id.
@@ -5094,24 +5103,24 @@ brackets; callers explicitly assign the result to Message-Id or Content-Id.
 ```rust
 use mimecraft::{MessageId, MimeMessage};
 
-let id = MessageId::generate_with_domain("example.com").unwrap();
+MessageId::set_default_domain("example.com").unwrap();
+let id = MessageId::generate().unwrap();
 let mut message: MimeMessage = MimeMessage::new();
 message.set_message_id(id.as_str()).unwrap();
 ```
 
 Generation uses `getrandom` for OS entropy, not a time-seeded PRNG. Uniqueness
 is probabilistic; these identifiers are not authentication tokens.
-`MessageIdGenerationError` distinguishes hostname discovery/Unicode errors,
-invalid domains, clock values outside years 1 through 9999, and entropy failures,
+`MessageIdGenerationError` distinguishes invalid explicit domains, clock values
+outside years 1 through 9999, and entropy failures,
 retaining underlying error sources.
 Domain and clock checks precede the entropy request; failures never substitute
 a weak random source or fallback identifier. Unlike MimeKit's platform IDN
 wrapper, generation uses the existing MIME-safe IDNA validation, lowercases
-ASCII domains, and removes an optional final DNS root dot. Unlike MimeKit,
-hostname discovery failures do not silently substitute `localhost.localdomain`.
-Build targets must support `hostname` (Windows or supported POSIX-like systems)
-and a `getrandom` backend; targets without a default randomness backend require
-its explicit platform-specific configuration.
+ASCII domains, and removes an optional final DNS root dot. This validation also
+applies to the configured default domain. Build targets must support a
+`getrandom` backend; targets without a default randomness backend require its
+explicit platform-specific configuration.
 
 ### References and In-Reply-To
 
@@ -6827,9 +6836,9 @@ Related multipart root management adapts `MultipartRelated.cs` and
 selection helper; root replacement distinguishes an actual selector match
 from the getter's first-child fallback. The source's Thunderbird bug 471402
 comment is retained/adapted where first-child roots remove start. Missing
-Content-Ids can be generated from the local hostname; atomic checked metadata
-edits replace
-cached parameter updates, and replaced children are returned to the caller.
+Content-Ids can be generated using the configured default domain; atomic checked
+metadata edits replace cached parameter updates, and replaced children are
+returned to the caller.
 Content-Id resource lookup adapts the CID branch of `IndexOf` and the
 `TestReferenceByContentId` regression using typed IDs and shared matching logic.
 Decoded opening adapts `Open` and `TestOpenNonMimePartThrows`, with borrowed
