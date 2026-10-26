@@ -7210,6 +7210,17 @@ ranges. Repeated serialization with `ensure_new_line` toggled retains the
 original framing after the parser is dropped. Empty recovered leaves keep a
 missing Content-Type absent even though MimeKit classifies them as TextPart
 instances.
+Nine more upstream multipart recovery cases cover missing closing delimiters,
+legal boundary-line padding, false delimiters with non-whitespace suffixes,
+and repeated opening delimiters followed by content, a closing delimiter, EOF,
+or a parent boundary. Nested message/rfc822 EOF recovery preserves the final
+text without inventing closing delimiters or a trailing newline. A multipart
+without a boundary parameter keeps its entire body as preamble rather than
+guessing delimiters. These cases check exact topology, headers, decoded bytes,
+source ranges, and repeatable serialization after dropping the parser, across
+Unix/DOS newlines, short refills, logging, and all storage modes. Applicable
+MimeKit serialization comments are retained. Existing parsing and serialization
+behavior satisfies these cases without production changes.
 This is not yet the full upstream MimeReader/MimeParser test port; additional
 reader/parser cases remain deferred. Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source

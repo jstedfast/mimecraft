@@ -1765,27 +1765,44 @@ fn assert_truncated_multipart(subject: &str, body: &str, children: &[(&str, &str
                     )
                     .unwrap();
                     let message = parse_truncated_multipart(parser, &input, logged);
-                    for (part, (_, expected)) in message.leaf_parts().zip(&children) {
-                        match part.content().get_ref() {
-                            mimecraft::MimeContentStream::Memory(content) => {
-                                assert_eq!(storage, MimeContentStorage::Memory);
-                                assert_eq!(content.get_ref(), expected.as_bytes());
-                                assert_eq!(content.position(), 0);
-                            }
-                            mimecraft::MimeContentStream::Source(content) => {
-                                assert_eq!(storage, MimeContentStorage::Source);
-                                let start = content.start_boundary() as usize;
-                                let end = content.end_boundary().unwrap() as usize;
-                                assert_eq!(&input.as_bytes()[start..end], expected.as_bytes());
-                                assert_eq!(content.position(), 0);
-                            }
-                        }
-                    }
+                    assert_stored_recovery_bodies(
+                        &message,
+                        &input,
+                        storage,
+                        children.iter().map(|(_, body)| body.as_str()),
+                    );
                     assert_truncated_multipart_model(message, &input, &children, format);
                 }
             }
         }
     }
+}
+
+fn assert_stored_recovery_bodies<'a, R: Read + Seek>(
+    message: &MimeMessage<mimecraft::MimeContentStream<R>>,
+    input: &str,
+    storage: MimeContentStorage,
+    expected: impl IntoIterator<Item = &'a str>,
+) {
+    let mut parts = message.leaf_parts();
+    for expected in expected {
+        let part = parts.next().expect("missing recovered leaf");
+        match part.content().get_ref() {
+            mimecraft::MimeContentStream::Memory(content) => {
+                assert_eq!(storage, MimeContentStorage::Memory);
+                assert_eq!(content.get_ref(), expected.as_bytes());
+                assert_eq!(content.position(), 0);
+            }
+            mimecraft::MimeContentStream::Source(content) => {
+                assert_eq!(storage, MimeContentStorage::Source);
+                let start = content.start_boundary() as usize;
+                let end = content.end_boundary().unwrap() as usize;
+                assert_eq!(&input.as_bytes()[start..end], expected.as_bytes());
+                assert_eq!(content.position(), 0);
+            }
+        }
+    }
+    assert!(parts.next().is_none(), "unexpected recovered leaf");
 }
 
 fn parse_truncated_multipart<R: BufRead, C: Read + Seek>(
@@ -1842,6 +1859,27 @@ fn assert_truncated_multipart_model<R: Read + Seek>(
             }
         }
     }
+    assert_recovery_serialization(&mut message, input, format);
+    // Mutable access invalidates parsed framing, so inspect decoded content
+    // only after checking that read-only serialization preserves it.
+    let MimeEntity::Multipart(multipart) = message.body_mut().unwrap() else {
+        unreachable!()
+    };
+    for (child, (_, expected)) in multipart.children_mut().iter_mut().zip(children) {
+        let MimeEntity::Part(part) = child else {
+            unreachable!()
+        };
+        let mut output = Vec::new();
+        part.content_mut().decode_to(&mut output).unwrap();
+        assert_eq!(output, expected.as_bytes());
+    }
+}
+
+fn assert_recovery_serialization<R: Read + Seek>(
+    message: &mut MimeMessage<R>,
+    input: &str,
+    format: NewLineFormat,
+) {
     let newline = match format {
         NewLineFormat::Dos => "\r\n",
         NewLineFormat::Unix => "\n",
@@ -1852,6 +1890,7 @@ fn assert_truncated_multipart_model<R: Read + Seek>(
     } else {
         format!("{input}{newline}")
     };
+    // The output should match the input exactly unless EnsureNewLine is set.
     // Make sure that EnsureNewLine did not leave any state behind.
     for ensure_new_line in [false, true, false] {
         let mut output = Vec::new();
@@ -1866,7 +1905,7 @@ fn assert_truncated_multipart_model<R: Read + Seek>(
             )
             .unwrap();
         assert_round_trip(
-            "truncated multipart",
+            "multipart recovery",
             if ensure_new_line {
                 ensured.as_bytes()
             } else {
@@ -1875,18 +1914,406 @@ fn assert_truncated_multipart_model<R: Read + Seek>(
             &output,
         );
     }
-    // Mutable access invalidates parsed framing, so inspect decoded content
-    // only after checking that read-only serialization preserves it.
-    let MimeEntity::Multipart(multipart) = message.body_mut().unwrap() else {
-        unreachable!()
+}
+
+#[test]
+fn multipart_without_end_boundary() {
+    assert_truncated_multipart(
+        "test of a multipart without an end boundary",
+        &format!(
+            "--{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the first part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the second part.\n"
+        ),
+        &[
+            (TRUNCATED_PART_HEADERS, "This is the first part.\n"),
+            (TRUNCATED_PART_HEADERS, "This is the second part.\n"),
+        ],
+    );
+}
+
+#[test]
+fn multipart_boundary_line_with_trailing_spaces() {
+    assert_truncated_multipart(
+        "test of a multipart boundary followed by trailing whitespace",
+        &format!(
+            "--{TRUNCATED_MULTIPART_BOUNDARY}   \n{TRUNCATED_PART_HEADERS}\n\
+             This is the first part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}       \n{TRUNCATED_PART_HEADERS}\n\
+             This is the second part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}--  \n"
+        ),
+        &[
+            (TRUNCATED_PART_HEADERS, "This is the first part.\n"),
+            (TRUNCATED_PART_HEADERS, "This is the second part.\n"),
+        ],
+    );
+}
+
+#[test]
+fn multipart_boundary_line_with_trailing_spaces_and_then_more_characters() {
+    let first =
+        format!("This is the first part.\n\n--{TRUNCATED_MULTIPART_BOUNDARY}       oops, not it.");
+    assert_truncated_multipart(
+        "test of a multipart boundary followed by trailing whitespace and then more characters",
+        &format!(
+            "--{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             {first}\n--{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the second part.\n\n--{TRUNCATED_MULTIPART_BOUNDARY}--\n"
+        ),
+        &[
+            (TRUNCATED_PART_HEADERS, &first),
+            (TRUNCATED_PART_HEADERS, "This is the second part.\n"),
+        ],
+    );
+}
+
+#[test]
+fn multipart_double_boundary() {
+    assert_truncated_multipart(
+        "test of double multipart boundaries",
+        &format!(
+            "--{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the first part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is technically the third part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}--\n"
+        ),
+        &[
+            (TRUNCATED_PART_HEADERS, "This is the first part.\n"),
+            ("", ""),
+            (
+                TRUNCATED_PART_HEADERS,
+                "This is technically the third part.\n",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn multipart_double_boundary_end_boundary() {
+    assert_truncated_multipart(
+        "test of double multipart boundaries and then an end boundary",
+        &format!(
+            "--{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the first part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the second part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n--{TRUNCATED_MULTIPART_BOUNDARY}\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}--\n"
+        ),
+        &[
+            (TRUNCATED_PART_HEADERS, "This is the first part.\n"),
+            (TRUNCATED_PART_HEADERS, "This is the second part.\n"),
+            ("", ""),
+            ("", ""),
+        ],
+    );
+}
+
+#[test]
+fn multipart_double_boundary_eof() {
+    assert_truncated_multipart(
+        "test of multipart ending with a double boundary",
+        &format!(
+            "--{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the first part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+             This is the second part.\n\n\
+             --{TRUNCATED_MULTIPART_BOUNDARY}\n--{TRUNCATED_MULTIPART_BOUNDARY}\n"
+        ),
+        &[
+            (TRUNCATED_PART_HEADERS, "This is the first part.\n"),
+            (TRUNCATED_PART_HEADERS, "This is the second part.\n"),
+            ("", ""),
+            ("", ""),
+        ],
+    );
+}
+
+#[test]
+fn multipart_without_end_boundary_or_trailing_new_line() {
+    let original = concat!(
+        "From: mimekit@example.com\n",
+        "To: mimekit@example.com\n",
+        "Subject: test of a truncated multipart w/o a trailing newline\n",
+        "MIME-Version: 1.0\n",
+        "Content-Type: multipart/mixed; boundary=\"outer\"\n\n",
+        "--outer\nContent-Type: text/plain\n\nThis is the first part.\n\n",
+        "--outer\nContent-Type: message/rfc822\n\n",
+        "From: mimekit@example.com\nSubject: embedded\n",
+        "Content-Type: multipart/alternative; boundary=\"inner\"\n\n",
+        "--inner\nContent-Type: text/plain\n\nThis is the last part."
+    );
+    assert_nested_multipart_recovery(original, false);
+}
+
+#[test]
+fn multipart_double_boundary_parent_boundary() {
+    let original = concat!(
+        "From: mimekit@example.com\n",
+        "To: mimekit@example.com\n",
+        "Subject: test of multipart with double boundaries and then a parent boundary\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\n",
+        "MIME-Version: 1.0\n",
+        "Message-ID: <54AD68C9E3B0184CAC6041320424FD1B5B81E74D@localhost.localdomain>\n",
+        "Content-Type: multipart/mixed;\n\tboundary=\"outer-boundary\"\n\n",
+        "--outer-boundary\n",
+        "Content-Type: multipart/mixed;\n\tboundary=\"inner-boundary\"\n\n",
+        "--inner-boundary\nContent-Type: text/plain; charset=utf-8\n\n",
+        "This is the first part.\n\n",
+        "--inner-boundary\nContent-Type: text/plain; charset=utf-8\n\n",
+        "This is the second part.\n\n",
+        "--inner-boundary\n--inner-boundary\n",
+        "--outer-boundary\nContent-Type: image/jpeg\n\n",
+        "<base64 data>\n--outer-boundary--\n"
+    );
+    assert_nested_multipart_recovery(original, true);
+}
+
+fn assert_nested_multipart_recovery(original: &str, parent_boundary: bool) {
+    let expected = if parent_boundary {
+        vec![
+            (TRUNCATED_PART_HEADERS, "This is the first part.\n"),
+            (TRUNCATED_PART_HEADERS, "This is the second part.\n"),
+            ("", ""),
+            ("", ""),
+            ("Content-Type: image/jpeg\n", "<base64 data>"),
+        ]
+    } else {
+        vec![
+            ("Content-Type: text/plain\n", "This is the first part.\n"),
+            ("Content-Type: text/plain\n", "This is the last part."),
+        ]
     };
-    for (child, (_, expected)) in multipart.children_mut().iter_mut().zip(children) {
-        let MimeEntity::Part(part) = child else {
-            unreachable!()
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(headers, body)| (headers.replace('\n', newline), body.replace('\n', newline)))
+            .collect();
+        for chunk in [1, 2, 7, 4096] {
+            for logged in [false, true] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let message = parse_truncated_multipart(parser, &input, logged);
+                assert_nested_multipart_model(message, &input, &expected, format, parent_boundary);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let message = parse_truncated_multipart(parser, &input, logged);
+                    assert_stored_recovery_bodies(
+                        &message,
+                        &input,
+                        storage,
+                        expected.iter().map(|(_, body)| body.as_str()),
+                    );
+                    assert_nested_multipart_model(
+                        message,
+                        &input,
+                        &expected,
+                        format,
+                        parent_boundary,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn assert_nested_multipart_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    expected: &[(String, String)],
+    format: NewLineFormat,
+    parent_boundary: bool,
+) {
+    let MimeEntity::Multipart(outer) = message.body().unwrap() else {
+        panic!("expected outer multipart")
+    };
+    assert_eq!(outer.children().len(), 2);
+    assert!(outer.epilogue().is_empty());
+    if parent_boundary {
+        assert_eq!(outer.boundary().unwrap().as_deref(), Some("outer-boundary"));
+        let MimeEntity::Multipart(inner) = &outer.children()[0] else {
+            panic!("expected nested multipart")
         };
+        assert_eq!(inner.boundary().unwrap().as_deref(), Some("inner-boundary"));
+        assert_eq!(inner.children().len(), 4);
+        assert!(
+            inner
+                .children()
+                .iter()
+                .all(|child| matches!(child, MimeEntity::Part(_)))
+        );
+        assert!(inner.epilogue().is_empty());
+        let MimeEntity::Part(image) = &outer.children()[1] else {
+            panic!("expected following image sibling")
+        };
+        assert!(
+            image
+                .content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("image", "jpeg")
+        );
+    } else {
+        assert_eq!(outer.boundary().unwrap().as_deref(), Some("outer"));
+        assert!(matches!(outer.children()[0], MimeEntity::Part(_)));
+        let MimeEntity::Message(wrapper) = &outer.children()[1] else {
+            panic!("expected message/rfc822 wrapper")
+        };
+        assert!(
+            wrapper
+                .content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("message", "rfc822")
+        );
+        let embedded = wrapper.message().unwrap();
+        assert_eq!(embedded.subject().unwrap().text, "embedded");
+        let MimeEntity::Multipart(inner) = embedded.body().unwrap() else {
+            panic!("expected embedded multipart")
+        };
+        assert!(
+            inner
+                .content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("multipart", "alternative")
+        );
+        assert_eq!(inner.boundary().unwrap().as_deref(), Some("inner"));
+        assert_eq!(inner.children().len(), 1);
+        assert!(matches!(inner.children()[0], MimeEntity::Part(_)));
+        assert!(inner.epilogue().is_empty());
+    }
+    assert_eq!(message.leaf_parts().count(), expected.len());
+    for (part, (expected_headers, _)) in message.leaf_parts().zip(expected) {
+        let mut headers = Vec::new();
+        part.headers().write_raw_to(&mut headers).unwrap();
+        assert_eq!(headers, expected_headers.as_bytes());
+        if expected_headers.is_empty() {
+            assert!(part.content_type().unwrap().is_none());
+        } else if expected_headers.starts_with("Content-Type: text/plain") {
+            let content_type = part.content_type().unwrap().unwrap();
+            assert!(content_type.is_mime_type("text", "plain"));
+            assert_eq!(
+                content_type.charset(),
+                expected_headers
+                    .contains("charset=utf-8")
+                    .then_some("utf-8")
+            );
+        }
+    }
+    assert_recovery_serialization(&mut message, input, format);
+    let mut bodies = expected.iter().map(|(_, body)| body.as_str());
+    assert_recovery_body_bytes(message.body_mut().unwrap(), &mut bodies);
+    assert!(bodies.next().is_none());
+}
+
+fn assert_recovery_body_bytes<'a, R: Read + Seek>(
+    entity: &mut MimeEntity<R>,
+    expected: &mut impl Iterator<Item = &'a str>,
+) {
+    match entity {
+        MimeEntity::Part(part) => {
+            let mut output = Vec::new();
+            part.content_mut().decode_to(&mut output).unwrap();
+            assert_eq!(output, expected.next().unwrap().as_bytes());
+        }
+        MimeEntity::Multipart(multipart) => {
+            for child in multipart.children_mut() {
+                assert_recovery_body_bytes(child, expected);
+            }
+        }
+        MimeEntity::Message(wrapper) => {
+            let message = wrapper.message_mut().unwrap();
+            assert_recovery_body_bytes(message.body_mut().unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn multipart_without_boundary_parameter() {
+    let original = format!(
+        "Content-Type: multipart/mixed\n\n\
+         --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+         This is the first part.\n\n\
+         --{TRUNCATED_MULTIPART_BOUNDARY}\n{TRUNCATED_PART_HEADERS}\n\
+         This is the second part.\n\n\
+         --{TRUNCATED_MULTIPART_BOUNDARY}--\n"
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        for chunk in [1, 2, 7, 4096] {
+            for logged in [false, true] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                assert_boundaryless_multipart(parser, &input, format, logged);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    assert_boundaryless_multipart(parser, &input, format, logged);
+                }
+            }
+        }
+    }
+}
+
+fn assert_boundaryless_multipart<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    format: NewLineFormat,
+    logged: bool,
+) {
+    let mut entity = if logged {
+        parser.parse_entity_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_entity()
+    }
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    drop(parser);
+    let MimeEntity::Multipart(multipart) = &entity else {
+        panic!("expected multipart without a boundary parameter")
+    };
+    assert_eq!(multipart.boundary().unwrap(), None);
+    assert!(multipart.children().is_empty());
+    assert_eq!(
+        multipart.preamble(),
+        &input.as_bytes()[input.find("--").unwrap()..]
+    );
+    assert!(multipart.epilogue().is_empty());
+    for ensure_new_line in [false, true, false] {
         let mut output = Vec::new();
-        part.content_mut().decode_to(&mut output).unwrap();
-        assert_eq!(output, expected.as_bytes());
+        entity
+            .write_to_with_options(
+                &mut output,
+                &MimePartWriteOptions {
+                    new_line_format: format,
+                    ensure_new_line,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_round_trip(
+            "missing multipart boundary parameter",
+            input.as_bytes(),
+            &output,
+        );
     }
 }
 
