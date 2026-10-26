@@ -1,7 +1,7 @@
 // Adapted from MimeKit's Header.cs and Utils/Rfc2047.cs (TokenFolder).
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{error::Error, fmt};
+use std::{borrow::Cow, error::Error, fmt};
 
 use crate::{
     encodings::{InvalidLineLength, NewLineFormat},
@@ -9,10 +9,11 @@ use crate::{
     utils::unfold,
 };
 
-/// Options for complete ASCII unstructured headers, such as Subject.
+/// Options for complete unstructured headers, such as Subject.
 ///
 /// Defaults to 78-byte physical lines, CRLF, and UTF-8 encoded words.
 /// Unlike MimeKit's soft folding target, the physical-line limit is enforced.
+/// Output remains ASCII unless [`Self::international`] is enabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnstructuredHeaderFormatOptions {
     /// Maximum bytes per physical line, excluding its newline, in `60..=998`.
@@ -26,7 +27,33 @@ pub struct UnstructuredHeaderFormatOptions {
     /// Validated before capping the word limit at `max_line_length - 1`, so each
     /// word fits with a continuation space. Encoding errors refer to the
     /// normalized (trimmed and unfolded) input, not the original string.
+    /// In international mode, the charset applies only when encoded words are
+    /// needed; raw text is always UTF-8. The word limit is always validated.
     pub encoding: EncodeOptions,
+    /// Allow raw UTF-8 text, defaulting to false.
+    ///
+    /// Folds at existing spaces, measuring UTF-8 bytes rather than characters.
+    /// Controls, literal encoded-word lookalikes, or a token too long for a
+    /// continuation line retain whole-value RFC 2047 encoding with [`Self::encoding`].
+    /// Like MimeKit, this avoids splitting a token and inserting whitespace
+    /// into its decoded value.
+    ///
+    /// This does not enable international address formatting or negotiate
+    /// transport capabilities. Callers must ensure the destination accepts
+    /// UTF-8 headers.
+    ///
+    /// ```
+    /// use mimecraft::{Header, UnstructuredHeaderFormatOptions};
+    ///
+    /// let options = UnstructuredHeaderFormatOptions {
+    ///     international: true,
+    ///     ..Default::default()
+    /// };
+    /// let header = Header::from_unstructured_with_options("Subject", "caf\u{e9}", &options)?;
+    /// assert_eq!(header.raw(), "Subject: caf\u{e9}\r\n".as_bytes());
+    /// # Ok::<(), mimecraft::UnstructuredHeaderFormatError>(())
+    /// ```
+    pub international: bool,
 }
 
 impl Default for UnstructuredHeaderFormatOptions {
@@ -35,6 +62,7 @@ impl Default for UnstructuredHeaderFormatOptions {
             max_line_length: 78,
             new_line_format: NewLineFormat::Dos,
             encoding: EncodeOptions::default(),
+            international: false,
         }
     }
 }
@@ -140,8 +168,7 @@ pub(crate) fn format_header(
     }
 
     // Header.SetValue trims and unfolds before encoding, without interpreting
-    // the assigned text as pre-encoded words. Literal "=?", controls, and Unicode
-    // are handled by the shared RFC 2047 encoder.
+    // the assigned text as pre-encoded words.
     let normalized = unfold(value);
     let encoding = EncodeOptions {
         max_word_length: options
@@ -150,10 +177,26 @@ pub(crate) fn format_header(
             .min(options.max_line_length - 1),
         ..options.encoding
     };
-    // Encode overlong tokens rather than splitting them and inserting spaces
-    // into the decoded text. Each encoded word must fit with its indentation.
-    let encoded = rfc2047::encode_text_with_options(&normalized, &encoding)
-        .map_err(UnstructuredHeaderFormatError::Encoding)?;
+    let encoded = if options.international
+        && !normalized.bytes().any(|byte| byte.is_ascii_control())
+        && !normalized.contains("=?")
+        && normalized
+            .split(' ')
+            .all(|word| word.len() < options.max_line_length)
+    {
+        normalized
+    } else {
+        // Folding inside a word would insert whitespace into its decoded value.
+        // Encode the whole value so original whitespace stays in the payloads,
+        // not in the ignored separators between adjacent encoded words.
+        // Each encoded word must fit with its indentation.
+        // Controls and literal encoded-word text keep this whole-value policy
+        // even in international mode, instead of changing the displayed value.
+        Cow::Owned(
+            rfc2047::encode_text_with_options(&normalized, &encoding)
+                .map_err(UnstructuredHeaderFormatError::Encoding)?,
+        )
+    };
     let mut output = format!("{field}:");
     if !encoded.is_empty() {
         for word in encoded.split(' ') {

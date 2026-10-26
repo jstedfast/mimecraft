@@ -24,6 +24,56 @@ fn snapshot<R>(message: &MimeMessage<R>) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn international_subject_replaces_duplicates_without_io_and_keeps_failures_atomic() {
+    let mut message: MimeMessage<()> = MimeMessage::from_parts(
+        headers(b"X-Before: kept\nsUbJeCt: old\r\nX-Between: kept\nSubject: duplicate\n"),
+        None,
+    );
+    let options = UnstructuredHeaderFormatOptions {
+        international: true,
+        new_line_format: NewLineFormat::Unix,
+        ..Default::default()
+    };
+    message
+        .set_subject_with_options(" \r\ncaf\u{e9} \u{1f600} ", &options)
+        .unwrap();
+    assert_eq!(
+        snapshot(&message),
+        [
+            b"X-Before: kept\n".to_vec(),
+            "Subject: caf\u{e9} \u{1f600}\n".as_bytes().to_vec(),
+            b"X-Between: kept\n".to_vec(),
+        ]
+    );
+    assert_eq!(message.subject().unwrap().text, "caf\u{e9} \u{1f600}");
+    let before = snapshot(&message);
+    let ascii = UnstructuredHeaderFormatOptions {
+        encoding: EncodeOptions {
+            charset: Charset::ASCII,
+            ..Default::default()
+        },
+        ..options
+    };
+    for value in ["\u{1f600}\0".to_owned(), "\u{1f600}".repeat(100)] {
+        assert!(message.set_subject_with_options(&value, &ascii).is_err());
+        assert_eq!(snapshot(&message), before);
+    }
+    let too_small = UnstructuredHeaderFormatOptions {
+        encoding: EncodeOptions {
+            max_word_length: 1,
+            ..Default::default()
+        },
+        ..options
+    };
+    assert!(
+        message
+            .set_subject_with_options("\u{1f600}\0", &too_small)
+            .is_err()
+    );
+    assert_eq!(snapshot(&message), before);
+}
+
+#[test]
 fn absent_and_empty_subjects_are_distinct_without_stream_traits() {
     let mut message: MimeMessage<()> = MimeMessage::new();
     assert!(message.subject().is_none());

@@ -65,7 +65,7 @@ impl Header {
         )
     }
 
-    /// Creates an ASCII unstructured header with explicit formatting options.
+    /// Creates an unstructured header with explicit formatting options.
     ///
     /// The field must be nonempty printable ASCII without a colon. Its spelling
     /// is preserved. Like MimeKit's value assignment, trims Unicode whitespace
@@ -73,10 +73,13 @@ impl Header {
     /// not silently removed. The value is literal text: encoded-word lookalikes
     /// are encoded again so readers do not reinterpret them.
     ///
-    /// Uses [`rfc2047::encode_text_with_options`]'s whole-value encoding policy,
-    /// not MimeKit's mixed plain/encoded-word heuristics. Folds at spaces without
-    /// splitting words or changing interior whitespace. Empty normalized text
-    /// creates `field:` plus the selected newline, not an absent field.
+    /// Output is ASCII by default. Enabling
+    /// [`crate::UnstructuredHeaderFormatOptions::international`] allows raw UTF-8.
+    /// When encoding is needed, uses [`rfc2047::encode_text_with_options`]'s
+    /// whole-value policy, not MimeKit's mixed plain/encoded-word heuristics.
+    /// Folds at spaces without splitting words or changing interior whitespace.
+    /// Empty normalized text creates `field:` plus the selected newline, not an
+    /// absent field.
     ///
     /// This does not dispatch on the field name or validate structured grammar.
     /// Use address/content/identifier formatters for those fields. Decoded

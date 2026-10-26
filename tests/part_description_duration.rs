@@ -35,6 +35,39 @@ fn part(raw: &[u8]) -> MimePart<NoIo> {
 }
 
 #[test]
+fn international_description_uses_the_shared_formatter_without_source_io() {
+    let mut part =
+        part(b"Content-Description: old\r\nX-Keep: raw\nContent-Description: duplicate\r\n");
+    let options = UnstructuredHeaderFormatOptions {
+        international: true,
+        ..Default::default()
+    };
+    part.set_content_description_with_options(Some("caf\u{e9} \u{1f600}"), &options)
+        .unwrap();
+    assert_eq!(
+        part.headers(),
+        &headers("Content-Description: caf\u{e9} \u{1f600}\r\nX-Keep: raw\n".as_bytes())
+    );
+    assert_eq!(
+        part.content_description().unwrap().text,
+        "caf\u{e9} \u{1f600}"
+    );
+    let before = part.headers().clone();
+    let invalid = UnstructuredHeaderFormatOptions {
+        max_line_length: 59,
+        ..options
+    };
+    assert!(
+        part.set_content_description_with_options(Some("caf\u{e9}"), &invalid)
+            .is_err()
+    );
+    assert_eq!(part.headers(), &before);
+    part.set_content_description_with_options(None, &invalid)
+        .unwrap();
+    assert_eq!(part.headers(), &headers(b"X-Keep: raw\n"));
+}
+
+#[test]
 fn description_absence_empty_text_assignment_and_removal_follow_upstream() {
     let mut part = part(b"");
     assert!(part.content_description().is_none());

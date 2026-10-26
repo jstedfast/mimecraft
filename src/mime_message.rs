@@ -339,6 +339,8 @@ impl<R> MimeMessage<R> {
     /// Like MimeKit, trims Unicode whitespace and removes CR/LF before encoding.
     /// Other controls and literal encoded-word lookalikes are encoded, not
     /// discarded or interpreted. See [`Header::from_unstructured_with_options`].
+    /// [`crate::UnstructuredHeaderFormatOptions::international`] allows raw UTF-8
+    /// while retaining encoding for controls, lookalikes, and oversized tokens.
     ///
     /// Replaces all Subjects with one canonical `Subject` at the first slot,
     /// as in MimeKit's Subject setter. If absent, appends `Subject`.

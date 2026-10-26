@@ -174,7 +174,7 @@
 //! returning flattened, duplicate-preserving [`MessageRecipients`] with diagnostics.
 //! Subject accessors reuse tolerant header decoding and checked
 //! [`Header::from_unstructured`] authoring with bounded folding, normalized
-//! assignment, and atomic duplicate-collapsing replacement.
+//! assignment, opt-in raw UTF-8 output, and atomic duplicate-collapsing replacement.
 //! [`MessagePart`] adds owned attached messages with checked
 //! wrapper metadata, iterative writing, and leaf traversal through their bodies.
 //! [`TextRfc822Headers`] uses the same structured-message representation for

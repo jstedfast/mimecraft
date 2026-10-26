@@ -2160,11 +2160,41 @@ lines. It accepts limits in `60..=998`, LF endings, and explicit RFC 2047 encodi
 options. Field names must be nonempty printable ASCII without a colon and fit
 with their colon on one line.
 
+Set `UnstructuredHeaderFormatOptions::international` to `true` for raw UTF-8
+unstructured text, including Subject and Content-Description. Raw text ignores
+the encoded-word charset; folding still counts **UTF-8 bytes**, not characters,
+and preserves existing spaces. This is separate from
+`HeaderFormatOptions::international`, which controls MIME parameters.
+
+```rust
+use mimecraft::{MimeMessage, UnstructuredHeaderFormatOptions};
+
+let mut message: MimeMessage = MimeMessage::new();
+let options = UnstructuredHeaderFormatOptions {
+    international: true,
+    ..Default::default()
+};
+message.set_subject_with_options("caf\u{e9}", &options).unwrap();
+assert_eq!(
+    message.headers().get("Subject").unwrap().raw(),
+    "Subject: caf\u{e9}\r\n".as_bytes()
+);
+```
+
+International mode retains whole-value RFC 2047 encoding for controls (including
+tabs), literal encoded-word lookalikes, and tokens too large for a continuation
+line. Like MimeKit's lossless folding, it does not insert spaces into decoded
+text. The selected encoding charset and encoded-word limit
+apply to this fallback, with errors for unrepresentable text or an insufficient
+word limit. Invalid options are still rejected even for raw or empty output.
+The caller must ensure that the destination accepts UTF-8 headers; this does not
+negotiate transport capabilities or enable international address formatting.
+
 Folding preserves interior spaces without splitting tokens or encoded words.
 Oversized plain tokens are encoded instead of having spaces inserted into them.
-The existing encoder's whole-value policy is retained rather than MimeKit's
-mixed plain/encoded-word heuristics. Unmappable text and invalid options return
-explicit errors; encoding offsets refer to the normalized text.
+When encoding is needed, the encoder's whole-value policy is retained rather
+than MimeKit's mixed plain/encoded-word heuristics. Unmappable text and invalid
+options return explicit errors; encoding offsets refer to the normalized text.
 
 These factories do not dispatch on field names or validate structured grammar:
 use address/content/identifier formatters for those fields. Safe header framing
@@ -6492,8 +6522,8 @@ declaration fits but the first character must go in the following section.
 Serialization preserves parameter order and spelling without mutating values,
 historical diagnostics, or separately stored raw headers. Failures return no
 partial output. These APIs normalize headers, not reproduce their original
-bytes; use `Header::raw()` for the latter. Internationalized output beyond MIME
-content-header parameters remains unported.
+bytes; use `Header::raw()` for the latter. Unstructured UTF-8 output has its own
+formatting option; internationalized address formatting remains unported.
 
 ## Scope and compatibility
 
