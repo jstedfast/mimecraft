@@ -71,6 +71,35 @@ fn empty_lists_and_first_last_lookup() {
 }
 
 #[test]
+fn long_field_names_preserve_case_insensitive_lookup_after_edits() {
+    for length in [1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 1024] {
+        let upper = "A".repeat(length);
+        let lower = upper.to_ascii_lowercase();
+        let mixed: String = (0..length)
+            .map(|index| if index % 2 == 0 { 'A' } else { 'a' })
+            .collect();
+        let mut list = parse(format!("{upper}: first\r\n{lower}: second\r\n").as_bytes());
+        for field in [&upper, &lower, &mixed] {
+            assert_eq!(list.index_of(field), Some(0), "{length}");
+            assert_eq!(list.get(field).unwrap().raw_value(), b" first\r\n");
+        }
+        assert_eq!(list.remove(&mixed).unwrap().raw_value(), b" first\r\n");
+        assert_eq!(list.get(&upper).unwrap().raw_value(), b" second\r\n");
+        list.replace(0, header(format!("{mixed}: replaced\r\n").as_bytes()))
+            .unwrap();
+        assert_eq!(list.get(&lower).unwrap().raw_value(), b" replaced\r\n");
+        assert_eq!(list, list.clone().into_vec().into());
+        assert_eq!(list.remove_all(&upper), 1);
+        assert!(!list.contains(&lower));
+        list.add(header(format!("{mixed}: reinserted\r\n").as_bytes()));
+        assert!(list.contains(&lower));
+        for suffix in ["A", "-", "\u{e9}", "\0"] {
+            assert!(!list.contains(&format!("{lower}{suffix}")));
+        }
+    }
+}
+
+#[test]
 fn insert_and_append_preserve_duplicates_and_change_first_lookup() {
     let original = parse(b"Received: first\r\nSubject: hello\r\nreceived: last\r\n");
     for index in 0..=original.len() {
