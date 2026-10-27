@@ -179,6 +179,86 @@ Content-Type: multipart/mixed; boundary=i\n\n--i\n\nbody\r\n--o--",
 }
 
 #[test]
+fn message_bom_positions_limits_and_errors_survive_pauses() {
+    let wire = b"\xef\xbb\xbfX: y\r\n\r\n\xef\xbb\xbfbody";
+    let mut begins = 0;
+    let mut body = Vec::new();
+    let mut parser = MimeEventParser::new(MimeEventFormat::Message);
+    let mut collect = |event: MimeEvent<'_>| {
+        match event {
+            MimeEvent::MessageBegin { position } => {
+                assert_eq!(position, MimePosition::default());
+                begins += 1;
+            }
+            MimeEvent::EntityBegin { position, .. } => {
+                assert_eq!(position, MimePosition { offset: 3, line: 1 });
+                begins += 1;
+            }
+            MimeEvent::Content {
+                bytes, position, ..
+            } => {
+                assert_eq!(
+                    bytes,
+                    &wire[position.offset as usize..position.offset as usize + bytes.len()]
+                );
+                body.extend_from_slice(bytes);
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+    for byte in wire {
+        parser
+            .parse(std::slice::from_ref(byte), &mut collect)
+            .unwrap();
+    }
+    parser.finish(&mut collect).unwrap();
+    assert_eq!(begins, 2);
+    assert_eq!(body, b"\xef\xbb\xbfbody");
+    for limit in 1..=wire.len() {
+        let options = MimeEntityParseOptions {
+            max_input_bytes: limit,
+            max_header_length: 6,
+            ..Default::default()
+        };
+        assert_splits(wire, MimeEventFormat::Message, options);
+        assert_eq!(
+            sync(wire, MimeEventFormat::Message, options).error,
+            (limit < wire.len()).then_some(io::ErrorKind::InvalidData)
+        );
+    }
+    for (input, error) in [
+        (b"\xef".as_slice(), io::ErrorKind::UnexpectedEof),
+        (b"\xef\xbb", io::ErrorKind::UnexpectedEof),
+        (b"\xef\xbb\xbf", io::ErrorKind::UnexpectedEof),
+        (b"\xefx", io::ErrorKind::InvalidData),
+        (b"\xef\xbbX: y\n\nbody", io::ErrorKind::InvalidData),
+        (
+            b"\xef\xbb\xbf\xef\xbb\xbfX: y\n\nbody",
+            io::ErrorKind::InvalidData,
+        ),
+    ] {
+        assert_splits(input, MimeEventFormat::Message, Default::default());
+        assert_eq!(
+            sync(input, MimeEventFormat::Message, Default::default()).error,
+            Some(error)
+        );
+    }
+    // Initialization belongs to the source, not each embedded message.
+    let nested = b"\xef\xbb\xbfContent-Type: message/rfc822\n\n\xef\xbb\xbfX: y\n\nbody";
+    assert_splits(nested, MimeEventFormat::Message, Default::default());
+    assert_eq!(
+        sync(nested, MimeEventFormat::Message, Default::default()).error,
+        None
+    );
+    assert_splits(wire, MimeEventFormat::Entity, Default::default());
+    assert_eq!(
+        sync(wire, MimeEventFormat::Entity, Default::default()).error,
+        Some(io::ErrorKind::InvalidData)
+    );
+}
+
+#[test]
 fn mbox_prefix_bom_content_length_and_reporting_budgets_survive_pauses() {
     let body = b"From protected\r\nbody\r\n";
     let wire = [
@@ -284,6 +364,7 @@ fn long_lines_and_padded_boundary_candidates_remain_resumable() {
 fn callbacks_and_logger_failures_are_terminal_and_preserve_errors() {
     for wire in [
         b"Subject: test\r\n\r\nbody".as_slice(),
+        b"\xef\xbb\xbfSubject: test\r\n\r\nbody",
         b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\nbody\r\n--b--\r\n",
     ] {
         let count = sync(wire, MimeEventFormat::Message, Default::default())

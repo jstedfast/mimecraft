@@ -810,7 +810,15 @@ impl BufRead for FaultSource<'_> {
 
 #[test]
 fn source_failures_and_interruptions_preserve_consumption_and_error_identity() {
-    let wire = b"X: a\r\n\r\nbody";
+    for wire in [
+        b"X: a\r\n\r\nbody".as_slice(),
+        b"\xef\xbb\xbfX: a\r\n\r\n\xef\xbb\xbfbody",
+    ] {
+        assert_source_failures_and_interruptions(wire);
+    }
+}
+
+fn assert_source_failures_and_interruptions(wire: &[u8]) {
     for fail_at in 0..=wire.len() {
         let source = FaultSource {
             bytes: wire,
@@ -836,7 +844,58 @@ fn source_failures_and_interruptions_preserve_consumption_and_error_identity() {
     let mut message = parser.parse_message().unwrap();
     let mut output = Vec::new();
     message.write_to(&mut output).unwrap();
-    assert_eq!(output, wire);
+    assert_eq!(output, wire.strip_prefix(b"\xef\xbb\xbf").unwrap_or(wire));
+}
+
+#[test]
+fn message_bom_initialization_does_not_read_past_eof() {
+    struct EofOnce<'a> {
+        input: &'a [u8],
+        eof: bool,
+    }
+
+    impl Read for EofOnce<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let input = self.fill_buf()?;
+            let count = input.len().min(output.len());
+            output[..count].copy_from_slice(&input[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for EofOnce<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            assert!(
+                !self.eof,
+                "initialization must not cause another read after EOF"
+            );
+            self.eof = self.input.is_empty();
+            Ok(self.input)
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.input = &self.input[amount..];
+        }
+    }
+
+    for (input, valid) in [
+        (b"".as_slice(), false),
+        (b"\xef", false),
+        (b"\xef\xbb", false),
+        (b"\xef\xbb\xbf", false),
+        (b"\xef\xbb\xbf\r\n", true),
+        (b"\xef\xbb\xbfX: y\r\n\r\nbody", true),
+    ] {
+        let mut reader = MimeReader::new(EofOnce { input, eof: false });
+        let result = reader.read_message(|_| Ok(()));
+        if valid {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        }
+        assert!(reader.into_inner().eof);
+    }
 }
 
 #[test]

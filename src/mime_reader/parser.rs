@@ -33,7 +33,11 @@ enum State {
 /// EOF with [`finish`](Self::finish). Empty slices do not signal EOF. This is the
 /// same scanner and tree state machine used by [`super::MimeReader`], including
 /// malformed-input recovery, resource limits, mbox lookahead, and content-length
-/// handling. Use [`crate::HeaderParser`] for standalone header blocks.
+/// handling. Message mode skips one initial UTF-8 BOM while retaining its
+/// bytes in positions and input limits; entity mode does not skip it.
+/// Message-begin precedes the BOM, matching the synchronous reader's early
+/// callback; entity-begin and header offsets follow the BOM.
+/// Use [`crate::HeaderParser`] for standalone header blocks.
 ///
 /// The parser retains headers, nesting state, and ambiguous lookahead, not
 /// complete bodies. Ordinary content borrows the caller's input; ambiguous

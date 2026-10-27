@@ -1643,6 +1643,17 @@ raw `HeaderList` and include structural kind, stored transfer encoding, and
 header/body positions. Message-root entity headers include both message and
 Content-* fields; ordinary nested entities keep all of their headers.
 
+Ordinary message parsing now skips one leading UTF-8 BOM, as MimeKit's
+message-source initialization does. The same prefix scanner serves mbox and
+byte-fed message parsing. Its bytes count toward input limits and original
+offsets, but not header length, and are not retained in the message model.
+Partial prefixes at EOF yield `UnexpectedEof`; mismatching prefixes yield
+`InvalidData`. Source replacement resets recognition. Entity and standalone
+header parsing bypass this step, matching upstream; BOMs in bodies and nested
+message headers remain ordinary input. Rust retains its early `MessageBegin`
+callback at the source origin so callers can abort without I/O; root
+`EntityBegin` and header offsets follow the BOM.
+
 ```rust
 use mimecraft::{MimeContentKind, MimeEvent, MimeReader};
 
@@ -7228,6 +7239,12 @@ These run across short reads and default, Memory, and Source storage.
 Leading-mbox-BOM cases check offsets, exact input limits, malformed/truncated
 marks, interrupted and failing reads, source replacement, and nonzero backing
 origins while preserving byte order marks inside bodies.
+Standalone-message BOM cases port MimeKit's partial-prefix and BOM-only EOF
+regressions and cover the same buffered/storage/slice paths. Additional checks
+exercise every prefix split in the byte-fed API, exact byte/header budgets,
+original header/body ranges, source replacement after failure, and nested/body
+BOM preservation. Initialization does not read again after observing EOF or
+delay the early callback that can reject a message without I/O.
 Header-limit regressions accept an exact-sized folded header, reject one extra
 byte or an oversized field name, and verify the failing header's offset,
 including enclosing multipart/message and mbox framing, and early termination
@@ -7298,9 +7315,9 @@ No LegacyMimeParser tests are included.
 The MIME scanner and tree engine now preserve their state between byte-fed
 calls without owning or reading a source. This includes partial header and
 delimiter lines, CRLF lookahead, multipart/message frames, newline observations,
-mbox prefixes/BOMs, Content-Length protection, and input budgets. The existing
-`MimeReader` and model-building `MimeParser` APIs use a synchronous driver over
-that same core; source-backed storage remains outside it.
+initial message BOMs, mbox prefixes, Content-Length protection, and input
+budgets. The existing `MimeReader` and model-building `MimeParser` APIs use a
+synchronous driver over that same core; source-backed storage remains outside it.
 
 `MimeEventParser::new(MimeEventFormat::{Entity, Message, Mbox})` exposes the
 core to callers. `parse(bytes, callback)` consumes the supplied slice on success;

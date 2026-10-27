@@ -825,6 +825,59 @@ fn mbox_byte_order_mark_keeps_source_ranges_and_replacement_origins() {
 }
 
 #[test]
+fn message_byte_order_mark_keeps_source_ranges_and_replacement_origins() {
+    let prefix = b"\xef\xbb\xbfSubject: first\n\n";
+    let content = b"\xef\xbb\xbfbody";
+    let wire = [prefix.as_slice(), content].concat();
+    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+        for chunk in [1, 2, 3, 7, 4096] {
+            for origin in [0, 17] {
+                let data = [vec![b'x'; origin], wire.clone()].concat();
+                let (mut source, _) = Source::new(data, chunk);
+                source.bytes.set_position(origin as u64);
+                let mut parser = MimeParser::with_storage(source, storage).unwrap();
+                let mut first = parser.parse_message().unwrap();
+                assert_eq!(first.headers().get("Subject").unwrap().offset(), Some(3));
+                assert_eq!(parser.position().offset, wire.len() as u64);
+                if let MimeContentStream::Source(range) = body(&mut first) {
+                    assert_eq!(range.start_boundary(), (origin + prefix.len()) as u64);
+                    assert_eq!(range.end_boundary(), Some((origin + wire.len()) as u64));
+                }
+
+                let (source, _) = Source::new(b"\xef\xbb".as_slice(), chunk);
+                drop(parser.replace_storage_source(source).unwrap());
+                assert_eq!(
+                    parser.parse_message().err().unwrap().kind(),
+                    io::ErrorKind::UnexpectedEof
+                );
+                assert_eq!(parser.position().offset, 2);
+                assert!(!parser.is_end_of_stream());
+                assert_eq!(
+                    parser.parse_message().err().unwrap().kind(),
+                    io::ErrorKind::InvalidInput
+                );
+
+                let replacement = b"skip\xef\xbb\xbfSubject: replacement\n\nnew";
+                let (mut source, _) = Source::new(replacement.as_slice(), chunk);
+                source.bytes.set_position(4);
+                drop(parser.replace_storage_source(source).unwrap());
+                assert_eq!(parser.position().offset, 0);
+                let mut new = parser.parse_message().unwrap();
+                assert_eq!(new.headers().get("Subject").unwrap().offset(), Some(3));
+                assert!(parser.is_end_of_stream());
+                if let MimeContentStream::Source(range) = body(&mut new) {
+                    assert_eq!(range.start_boundary(), (replacement.len() - 3) as u64);
+                    assert_eq!(range.end_boundary(), Some(replacement.len() as u64));
+                }
+                drop(parser);
+                assert_eq!(read_body(&mut new), b"new");
+                assert_eq!(read_body(&mut first), content);
+            }
+        }
+    }
+}
+
+#[test]
 fn borrowed_nonzero_buffered_source_and_generic_replacement() {
     let (mut source, observed) = Source::new(b"prefixSubject: one\r\n\r\nbody".to_vec(), 7);
     source.bytes.set_position(6);

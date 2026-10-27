@@ -622,6 +622,13 @@ impl<R: BufRead> MimeReader<R> {
 
     /// Scans a message through EOF, enclosing its root in message events.
     ///
+    /// Skips one initial UTF-8 BOM before parsing headers. Original offsets and
+    /// input limits include its bytes; BOMs elsewhere remain ordinary input.
+    /// Message-begin still precedes all I/O, at the original source position;
+    /// entity-begin and header offsets follow the BOM.
+    /// Unlike message reading, entity and standalone-header reading do not
+    /// skip a BOM. An incomplete initial BOM is an error.
+    ///
     /// Otherwise follows [`Self::read_entity`], including its errors.
     pub fn read_message<F>(&mut self, mut callback: F) -> io::Result<()>
     where

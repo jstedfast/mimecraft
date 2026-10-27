@@ -488,6 +488,9 @@ impl<R: BufRead, C: Read + Seek> MimeParser<R, C> {
     /// Parses a message, separating its headers from its root body's headers.
     ///
     /// Follows [`Self::parse_entity`]'s ownership, limits, and error behavior.
+    /// Unlike entity parsing, skips one initial UTF-8 BOM as MimeKit does.
+    /// The BOM counts toward input limits and original offsets, but is not
+    /// stored in the model or written back out.
     pub fn parse_message(&mut self) -> io::Result<MimeMessage<C>> {
         let mut builder = Builder::new(&self.factory);
         self.reader.read(true, &mut builder, None)?;

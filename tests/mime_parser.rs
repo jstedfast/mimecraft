@@ -1671,6 +1671,223 @@ fn assert_leading_garbage_error<R: BufRead, C: Read + Seek>(
 }
 
 #[test]
+fn message_byte_order_mark() {
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let body = format!("\u{feff}body{newline}");
+        let input = format!("\u{feff}X: y{newline}{newline}{body}");
+        for max_input_bytes in [1, 2, 3, input.len() - 1, input.len()] {
+            let options = MimeEntityParseOptions {
+                max_input_bytes,
+                // The BOM counts toward the input budget, not the header length.
+                max_header_length: 4 + newline.len(),
+                ..Default::default()
+            };
+            for logged in [false, true] {
+                let parser =
+                    MimeParser::from_slice_with_options(input.as_bytes(), options).unwrap();
+                assert_message_bom_parser(parser, &input, &body, format, logged, max_input_bytes);
+                for chunk in [1, 2, 3, 7, 4096] {
+                    let parser = MimeParser::with_options(
+                        BufReader::with_capacity(chunk, input.as_bytes()),
+                        options,
+                    )
+                    .unwrap();
+                    assert_message_bom_parser(
+                        parser,
+                        &input,
+                        &body,
+                        format,
+                        logged,
+                        max_input_bytes,
+                    );
+                    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                        let parser = MimeParser::with_storage_and_options(
+                            ShortSource {
+                                inner: Cursor::new(input.as_bytes()),
+                                chunk,
+                            },
+                            storage,
+                            options,
+                        )
+                        .unwrap();
+                        assert_message_bom_parser(
+                            parser,
+                            &input,
+                            &body,
+                            format,
+                            logged,
+                            max_input_bytes,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn assert_message_bom_parser<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    body: &str,
+    format: NewLineFormat,
+    logged: bool,
+    limit: usize,
+) {
+    let result = if logged {
+        parser.parse_message_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_message()
+    };
+    if limit < input.len() {
+        let error = result
+            .err()
+            .expect("BOM bytes must count toward the input limit");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "MIME input byte limit exceeded");
+        assert_eq!(parser.position().offset, limit as u64);
+        assert!(!parser.is_end_of_stream());
+        assert_eq!(
+            parser.parse_message().err().unwrap().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        return;
+    }
+    let mut message = result.unwrap();
+    assert_eq!(parser.position().offset, input.len() as u64);
+    assert!(parser.is_end_of_stream());
+    drop(parser);
+    assert_eq!(message.headers().len(), 1);
+    let header = message.headers().get("X").unwrap();
+    assert_eq!(header.offset(), Some(3));
+    assert_eq!(header.decode_value().text, "y");
+    // The source BOM is not part of the message model; a BOM inside the
+    // content is ordinary data and must survive decoding and writing.
+    assert_recovery_serialization(&mut message, &input[3..], format);
+    let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+        panic!("expected default text/plain leaf")
+    };
+    assert!(part.headers().is_empty());
+    let mut decoded = Vec::new();
+    part.content_mut().decode_to(&mut decoded).unwrap();
+    assert_eq!(decoded, body.as_bytes());
+}
+
+#[test]
+fn partial_byte_order_mark_eof() {
+    for prefix in [b"\xef".as_slice(), b"\xef\xbb"] {
+        assert_message_bom_failure(prefix, io::ErrorKind::UnexpectedEof, prefix.len());
+    }
+}
+
+#[test]
+fn partial_byte_order_mark() {
+    let archive = include_bytes!("data/mbox/simple.mbox.txt");
+    for prefix in [b"\xef".as_slice(), b"\xef\xbb"] {
+        let input = [prefix, archive].concat();
+        assert_message_bom_failure(&input, io::ErrorKind::InvalidData, prefix.len());
+    }
+}
+
+fn assert_message_bom_failure(input: &[u8], kind: io::ErrorKind, consumed: usize) {
+    for logged in [false, true] {
+        assert_message_bom_failure_parser(MimeParser::from_slice(input), kind, consumed, logged);
+        for chunk in [1, 2, 7, 4096] {
+            assert_message_bom_failure_parser(
+                MimeParser::new(BufReader::with_capacity(chunk, input)),
+                kind,
+                consumed,
+                logged,
+            );
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let parser = MimeParser::with_storage(
+                    ShortSource {
+                        inner: Cursor::new(input),
+                        chunk,
+                    },
+                    storage,
+                )
+                .unwrap();
+                assert_message_bom_failure_parser(parser, kind, consumed, logged);
+            }
+        }
+    }
+}
+
+fn assert_message_bom_failure_parser<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    kind: io::ErrorKind,
+    consumed: usize,
+    logged: bool,
+) {
+    let result = if logged {
+        parser.parse_message_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_message()
+    };
+    let error = result
+        .err()
+        .expect("partial BOM must not produce a message");
+    assert_eq!(error.kind(), kind);
+    assert_eq!(error.to_string(), "incomplete UTF-8 byte order mark");
+    assert_eq!(
+        parser.position(),
+        MimePosition {
+            offset: consumed as u64,
+            line: 1
+        }
+    );
+    assert!(!parser.is_end_of_stream());
+    assert_eq!(
+        parser.parse_message().err().unwrap().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
+fn byte_order_mark_eof() {
+    assert_marker_eof(b"\xef\xbb\xbf", false);
+}
+
+#[test]
+fn byte_order_mark_does_not_change_entity_or_raw_header_parsing() {
+    let input = b"\xef\xbb\xbfSubject: test\r\n\r\nbody";
+    for chunk in [1, 2, 7, 4096] {
+        let mut parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_slice()));
+        assert_eq!(
+            parser.parse_entity().err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_slice()));
+        let headers = parser.parse_headers().unwrap();
+        assert_eq!(headers.len(), 1);
+        let header = &headers.as_slice()[0];
+        assert!(header.is_invalid());
+        assert_eq!(header.offset(), Some(0));
+        assert_eq!(header.raw(), b"\xef\xbb\xbfSubject: test\r\n");
+    }
+}
+
+#[test]
+fn message_byte_order_mark_is_not_repeated_for_nested_messages() {
+    let input = "\u{feff}Content-Type: message/rfc822\n\n\u{feff}X: y\n\nbody";
+    let message = MimeParser::from_slice(input.as_bytes())
+        .parse_message()
+        .unwrap();
+    let MimeEntity::Message(wrapper) = message.body().unwrap() else {
+        panic!("expected message/rfc822 wrapper")
+    };
+    let headers = wrapper.message().unwrap().headers();
+    assert_eq!(headers.len(), 1);
+    let header = &headers.as_slice()[0];
+    assert!(header.is_invalid());
+    assert_eq!(header.raw(), b"\xef\xbb\xbfX: y\n");
+    assert_eq!(
+        header.offset(),
+        Some(input.rfind('\u{feff}').unwrap() as u64)
+    );
+}
+
+#[test]
 fn invalid_header_after_mbox_marker() {
     for input in [
         "From - \nThis is not a header\nSubject: test\n\nbody\n",

@@ -57,6 +57,46 @@ pub(crate) struct TreeEnd {
     pub eof: bool,
 }
 
+fn skip_byte_order_mark(
+    bytes: &mut &[u8],
+    eof: bool,
+    index: &mut usize,
+    position: &mut MimePosition,
+    remaining: &mut usize,
+) -> io::Result<bool> {
+    // MimeKit checks for a UTF-8 BOM when initializing a message source.
+    // Keep a partial match across refills; a nonmatching first byte belongs
+    // to the headers or the initial mbox marker search.
+    while *index < 3 {
+        if bytes.is_empty() && !eof {
+            return Ok(false);
+        }
+        if bytes.first() != Some(&[0xef, 0xbb, 0xbf][*index]) {
+            if *index == 0 {
+                return Ok(true);
+            }
+            // Actual EOF after a matched prefix is truncated input, not a
+            // request to refill the buffer again.
+            return Err(io::Error::new(
+                if bytes.is_empty() {
+                    io::ErrorKind::UnexpectedEof
+                } else {
+                    io::ErrorKind::InvalidData
+                },
+                "incomplete UTF-8 byte order mark",
+            ));
+        }
+        if *remaining == 0 {
+            return Err(input_limit_error());
+        }
+        *position = position.advance(&bytes[..1]);
+        *remaining -= 1;
+        *bytes = &bytes[1..];
+        *index += 1;
+    }
+    Ok(true)
+}
+
 enum MarkerState {
     Bom(usize),
     Search,
@@ -113,39 +153,19 @@ impl MarkerParser {
     ) -> io::Result<Option<Option<usize>>> {
         loop {
             match self.state {
-                MarkerState::Bom(index) => {
-                    // MimeKit checks for a UTF-8 BOM only when initializing a
-                    // source, before its first mbox marker, across short reads.
-                    if bytes.is_empty() && !eof {
+                MarkerState::Bom(mut index) => {
+                    if !skip_byte_order_mark(
+                        bytes,
+                        eof,
+                        &mut index,
+                        &mut self.input.position,
+                        &mut self.input.remaining,
+                    )? {
+                        self.state = MarkerState::Bom(index);
                         return Ok(None);
                     }
-                    let expected = [0xef, 0xbb, 0xbf][index];
-                    if bytes.first() != Some(&expected) {
-                        if index != 0 {
-                            return Err(io::Error::new(
-                                if bytes.is_empty() {
-                                    io::ErrorKind::UnexpectedEof
-                                } else {
-                                    io::ErrorKind::InvalidData
-                                },
-                                "incomplete UTF-8 byte order mark",
-                            ));
-                        }
-                        self.state = MarkerState::Search;
-                        continue;
-                    }
-                    if self.input.remaining == 0 {
-                        return Err(input_limit_error());
-                    }
-                    self.input.position = self.input.position.advance(&bytes[..1]);
-                    self.input.remaining -= 1;
-                    *bytes = &bytes[1..];
-                    if index == 2 {
-                        self.search_start = self.input.position;
-                        self.state = MarkerState::Search;
-                    } else {
-                        self.state = MarkerState::Bom(index + 1);
-                    }
+                    self.search_start = self.input.position;
+                    self.state = MarkerState::Search;
                 }
                 MarkerState::Search => {
                     // Like MimeKit's StepMboxMarkerStart, skip whole lines until
@@ -234,6 +254,7 @@ impl MarkerParser {
 
 pub(crate) struct TreeParser {
     input: Lines,
+    bom: Option<usize>,
     // Explicit message and multipart frames avoid recursive calls that
     // could exhaust the call stack on deeply nested input.
     stack: Vec<Frame>,
@@ -253,6 +274,7 @@ impl TreeParser {
         buffer.pending.clear();
         Self {
             input: Lines::new(position, remaining, mbox, buffer.scanner),
+            bom: (!mbox).then_some(0),
             stack: Vec::new(),
             state: State::headers(
                 NonZeroUsize::new(options.max_header_length).expect("validated limit"),
@@ -277,11 +299,32 @@ impl TreeParser {
         callback: &mut F,
     ) -> io::Result<Option<TreeEnd>> {
         let header_limit = NonZeroUsize::new(options.max_header_length).expect("validated limit");
+        if let Some(index) = &mut self.bom {
+            // MimeKit's message initialization checks the BOM before parsing
+            // headers. ReadEntity and ReadHeaders bypass that initialization.
+            if options.message {
+                if !skip_byte_order_mark(
+                    bytes,
+                    eof,
+                    index,
+                    &mut self.input.position,
+                    &mut self.input.remaining,
+                )? {
+                    return Ok(None);
+                }
+                if *index != 0 {
+                    self.state = State::headers(header_limit, self.input.position);
+                    self.pending_position = self.input.position;
+                }
+            }
+            self.bom = None;
+        }
         let Self {
             input,
             stack,
             state,
             pending_position,
+            ..
         } = self;
         let ScanBuffer {
             line,
