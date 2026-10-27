@@ -11,12 +11,15 @@ use crate::{
     encodings::NewLineFormat, mime_compliance::Reporting,
 };
 
+mod driver;
 mod engine;
 mod options;
+mod parser;
 mod scan;
 
 use engine::ReadContext;
 pub use options::MimeEntityParseOptions;
+pub use parser::{MimeEventFormat, MimeEventParser};
 
 /// A position in the reader's original input, before newline normalization.
 ///
@@ -67,7 +70,7 @@ pub enum MimeContentKind {
     Epilogue,
 }
 
-/// A synchronous MIME reader notification.
+/// A MIME parser notification delivered through a synchronous callback.
 ///
 /// Begin/end events nest in wire order. A message contains one root entity;
 /// its root's header list includes both message and Content-* fields. An empty
@@ -82,8 +85,8 @@ pub enum MimeContentKind {
 pub enum MimeEvent<'a> {
     /// An mbox envelope line before the corresponding message.
     ///
-    /// Emitted only by [`MimeReader::read_mbox_message`]. The sender/date is not
-    /// interpreted, and this line is not part of the message's headers.
+    /// Emitted in mbox mode by [`MimeReader`] or [`MimeEventParser`]. The
+    /// sender/date is not interpreted; this line is not a message header.
     MboxMarker {
         /// Original marker bytes, including the LF or CRLF ending.
         bytes: &'a [u8],
@@ -158,6 +161,8 @@ pub enum MimeEvent<'a> {
 /// truncated headers/containers and malformed MIME metadata. Fallible compliance
 /// loggers can reject selected violations. Async I/O and persistent source
 /// ranges are not implemented.
+/// The underlying [`MimeEventParser`] core also accepts byte slices directly,
+/// independently of synchronous or asynchronous input acquisition.
 ///
 /// Ordinary content borrows buffered input directly, including across physical
 /// lines. With the default `simd` feature, runtime-detected SSE2/AVX2 or NEON
@@ -731,7 +736,7 @@ impl<R: BufRead> MimeReader<R> {
         }
         let initial = self.state == ReadState::Ready;
         self.begin_read(ReadState::Mbox)?;
-        let Some(remaining) = engine::read_mbox_marker(
+        let Some(remaining) = driver::read_mbox_marker(
             &mut self.source,
             &self.options,
             &mut self.position,
@@ -752,7 +757,7 @@ impl<R: BufRead> MimeReader<R> {
             message: true,
             mbox_content_end: self.options.respect_content_length.then_some(0),
         };
-        let end = engine::read_tree(
+        let end = driver::read_tree(
             &mut self.source,
             &mut context,
             &mut self.position,
@@ -804,7 +809,7 @@ impl<R: BufRead> MimeReader<R> {
             message,
             mbox_content_end: None,
         };
-        engine::read_tree(
+        driver::read_tree(
             &mut self.source,
             &mut context,
             &mut self.position,

@@ -1626,9 +1626,11 @@ Zero-copy source ranges and async loading remain deferred.
 ### MIME reader and parser
 
 The streaming implementation lives under `src/mime_reader`: `engine.rs` owns
-the state machine and framing, `options.rs` defines the shared parse options,
-and `scan.rs` plus `scan/` contain scalar/SIMD scanning and scanner tests.
-`src/mime_reader.rs` provides the public reader API and source lifecycle;
+resumable, byte-fed scanning, tree state, and framing; `driver.rs` supplies
+the synchronous `BufRead` loop; `parser.rs` exposes `MimeEventParser` for direct
+byte-fed use. `options.rs` defines the shared parse options, and `scan.rs` plus
+`scan/` contain scalar/SIMD scanning and scanner tests.
+`src/mime_reader.rs` provides the synchronous reader API and source lifecycle;
 `src/mime_parser.rs` builds owned MIME trees from its events.
 `src/mime_entity_load.rs` contains only the entity-loading convenience methods.
 `MimeEntityParseOptions` remains available at the crate root.
@@ -7257,10 +7259,40 @@ prefixes and buffered chunks, nested lengths, EOF, resource limits, source
 replacement, and fallible callbacks/loggers.
 No LegacyMimeParser tests are included.
 
-Async adapters remain deferred while message parsing and serialization APIs
-stabilize. Parsing and
-serialization state should remain independent of blocking I/O so synchronous
-and future optional async drivers can share the same processing logic.
+### Sans-I/O MIME parsing
+
+The MIME scanner and tree engine now preserve their state between byte-fed
+calls without owning or reading a source. This includes partial header and
+delimiter lines, CRLF lookahead, multipart/message frames, newline observations,
+mbox prefixes/BOMs, Content-Length protection, and input budgets. The existing
+`MimeReader` and model-building `MimeParser` APIs use a synchronous driver over
+that same core; source-backed storage remains outside it.
+
+`MimeEventParser::new(MimeEventFormat::{Entity, Message, Mbox})` exposes the
+core to callers. `parse(bytes, callback)` consumes the supplied slice on success;
+empty slices are no-ops. `finish(callback)` explicitly signals EOF, applies
+existing truncation recovery, and is idempotent after success. Parsing and
+callback/logger failures poison the parser rather than allowing unsafe retries.
+Mbox mode streams all entries and resets input/reporting budgets per message.
+`with_options` and `with_logger` retain the reader's limits and reporting policy.
+`HeaderParser` already provides separate byte-fed parsing and I/O adapters and
+does not need a replacement.
+
+Ordinary body bytes still borrow input buffers; only headers and ambiguous
+lookahead are retained. The parser can move between threads between calls when
+its logger is `Send`; local-only loggers remain supported. Callbacks themselves
+are synchronous and borrowed content must be copied if retained for downstream
+async processing. Drivers can pause between bounded input chunks without
+finalizing; a callback error is not a backpressure signal. Runtime-specific
+async drivers and async model/storage APIs remain deferred.
+
+Direct byte-fed regressions exercise every two-way split of representative
+nested/recovered messages and mbox archives, one-byte feeds, empty feeds, explicit
+EOF, exact input limits, padded delimiters, long lines, terminal callback/logger
+failures, borrowed content, and thread migration. Corpus and generated-message
+checks compare byte-fed and synchronous events (including positions and errors)
+with and without logging. Existing model/source-storage and byte-preserving
+recovery regressions continue to cover the synchronous adapter.
 
 The source baseline for this initial port is the local MimeKit 5.0.0 development
 tree. The Base64 implementation follows `MimeKit/Encodings/Base64Encoder.cs` and

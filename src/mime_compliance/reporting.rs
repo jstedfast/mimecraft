@@ -11,10 +11,12 @@ use super::{
 use crate::{ContentEncoding, Header, HeaderId, MimeEntityKind, MimeEvent, MimePosition};
 
 /// Disabled reads neither allocate reporting state nor scan content for defects.
-pub(crate) struct Reporting<'a>(Option<Box<Active<'a>>>);
+pub(crate) struct Reporting<'a, L: MimeComplianceLogger + ?Sized = dyn MimeComplianceLogger + 'a>(
+    Option<Box<Active<'a, L>>>,
+);
 
-struct Active<'a> {
-    logger: &'a mut dyn MimeComplianceLogger,
+struct Active<'a, L: MimeComplianceLogger + ?Sized> {
+    logger: &'a mut L,
     options: MimeComplianceOptions,
     budget: Budget,
     bodies: Vec<Body>,
@@ -34,9 +36,9 @@ impl<'a> From<Option<&'a [u8]>> for HeaderEnd<'a> {
     }
 }
 
-impl<'a> Reporting<'a> {
+impl<'a, L: MimeComplianceLogger + ?Sized> Reporting<'a, L> {
     pub(crate) fn new(
-        logger: Option<&'a mut dyn MimeComplianceLogger>,
+        logger: Option<&'a mut L>,
         options: MimeComplianceOptions,
         message: bool,
     ) -> Self {
@@ -54,6 +56,14 @@ impl<'a> Reporting<'a> {
 
     pub(crate) fn message(&self) -> bool {
         self.0.as_ref().is_some_and(|active| active.message)
+    }
+
+    pub(crate) fn reset(&mut self) {
+        if let Some(active) = self.0.as_mut() {
+            active.budget.reset();
+            active.bodies.clear();
+            active.source_line_start = 0;
+        }
     }
 
     pub(crate) fn column(&self, position: MimePosition) -> u64 {
@@ -124,7 +134,7 @@ impl<'a> Reporting<'a> {
     }
 }
 
-impl Active<'_> {
+impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
     fn event(&mut self, event: &MimeEvent<'_>) -> io::Result<()> {
         match event {
             MimeEvent::EntityBegin {
@@ -501,7 +511,7 @@ impl Active<'_> {
     }
 }
 
-impl MimeComplianceLogger for Active<'_> {
+impl<L: MimeComplianceLogger + ?Sized> MimeComplianceLogger for Active<'_, L> {
     fn log(&mut self, issue: MimeComplianceIssue) -> io::Result<()> {
         if let Some(issue) = self.budget.check(issue) {
             self.logger.log(issue)?;
@@ -585,9 +595,9 @@ impl Body {
         }
     }
 
-    fn scan(
+    fn scan<L: MimeComplianceLogger + ?Sized>(
         &mut self,
-        active: &mut Active<'_>,
+        active: &mut Active<'_, L>,
         bytes: &[u8],
         mut position: MimePosition,
     ) -> io::Result<()> {

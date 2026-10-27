@@ -506,7 +506,8 @@ pub use mime_part::{
 };
 pub use mime_part_write::MimePartWriteOptions;
 pub use mime_reader::{
-    MimeContentKind, MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimePosition, MimeReader,
+    MimeContentKind, MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeEventFormat,
+    MimeEventParser, MimePosition, MimeReader,
 };
 pub use mime_types::{MimeTypeRegistrationError, MimeTypes};
 pub use mime_version::{MimeVersion, MimeVersionParseError, MimeVersionParseErrorKind};

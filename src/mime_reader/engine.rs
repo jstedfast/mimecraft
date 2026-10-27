@@ -1,28 +1,26 @@
 // Adapted from MimeKit's MimeReader.cs and MimeParser.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{
-    io::{self, BufRead},
-    num::NonZeroUsize,
-};
+use std::{io, num::NonZeroUsize};
 
 use crate::{
-    ContentEncoding, Header, HeaderList, HeaderParser, MimeContentKind, MimeEntityKind,
-    MimeEntityParseOptions, MimeEvent, MimePosition, encodings::NewLineFormat,
+    ContentEncoding, Header, HeaderList, HeaderParser, MimeComplianceLogger, MimeContentKind,
+    MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimePosition, encodings::NewLineFormat,
     mime_part::transfer_encoding,
 };
 
 use super::{EventSink, scan};
 
-pub(crate) struct ReadContext<'a> {
+pub(crate) struct ReadContext<'a, L: MimeComplianceLogger + ?Sized = dyn MimeComplianceLogger + 'a>
+{
     pub(crate) limits: MimeEntityParseOptions,
-    pub(crate) reporting: crate::mime_compliance::Reporting<'a>,
+    pub(crate) reporting: crate::mime_compliance::Reporting<'a, L>,
     pub(crate) message: bool,
     // None disables length handling; Some(0) awaits the outer message's headers.
     pub(crate) mbox_content_end: Option<u64>,
 }
 
-impl std::ops::Deref for ReadContext<'_> {
+impl<L: MimeComplianceLogger + ?Sized> std::ops::Deref for ReadContext<'_, L> {
     type Target = MimeEntityParseOptions;
 
     fn deref(&self) -> &Self::Target {
@@ -59,348 +57,428 @@ pub(crate) struct TreeEnd {
     pub eof: bool,
 }
 
-pub(crate) fn read_mbox_marker<R, F>(
-    reader: &mut R,
-    options: &MimeEntityParseOptions,
-    position: &mut MimePosition,
-    buffer: &mut ScanBuffer,
-    initial: bool,
-    callback: &mut F,
-) -> io::Result<Option<usize>>
-where
-    R: BufRead + ?Sized,
-    F: EventSink,
-{
-    let origin = buffer.mbox_prefix.unwrap_or(*position);
-    if buffer.mbox_prefix.is_none() {
-        let mut input = Lines {
-            reader,
-            remaining: options.max_input_bytes,
-            position,
-            at_line_start: true,
-            piece_at_line_start: true,
-            piece_position: origin,
-            mbox: true,
-            content_end: 0,
-            mbox_prefix: None,
-            borrowed: 0,
-            eof: false,
-            scanner: buffer.scanner,
+enum MarkerState {
+    Bom(usize),
+    Search,
+    Marker(MimePosition),
+}
+
+pub(crate) struct MarkerParser {
+    input: Lines,
+    state: MarkerState,
+    search_start: MimePosition,
+}
+
+impl MarkerParser {
+    pub(crate) fn new(
+        options: &MimeEntityParseOptions,
+        position: MimePosition,
+        buffer: &mut ScanBuffer,
+        initial: bool,
+    ) -> io::Result<Self> {
+        let mut input = Lines::new(position, options.max_input_bytes, true, buffer.scanner);
+        buffer.line.clear();
+        let state = if let Some(marker) = buffer.mbox_prefix.take() {
+            let consumed = usize::try_from(position.offset - marker.offset)
+                .map_err(|_| input_limit_error())?;
+            input.remaining = input
+                .remaining
+                .checked_sub(consumed)
+                .ok_or_else(input_limit_error)?;
+            buffer.line.extend_from_slice(b"From ");
+            MarkerState::Marker(marker)
+        } else if initial {
+            MarkerState::Bom(0)
+        } else {
+            MarkerState::Search
         };
-        if initial {
-            input.skip_byte_order_mark()?;
-        }
-        let marker_start = *input.position;
-        // Like MimeKit's StepMboxMarkerStart, skip whole lines until a line
-        // begins with "From ". A split line must never match in its middle.
-        while input.next(&mut buffer.line, &[], false, options.max_header_length)? {}
-        buffer.mbox_prefix = input.mbox_prefix;
-        if buffer.mbox_prefix.is_none() {
-            return if position.offset == marker_start.offset {
-                Ok(None)
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "missing mbox marker",
-                ))
-            };
-        }
+        Ok(Self {
+            input,
+            state,
+            search_start: position,
+        })
     }
-    let marker_position = buffer.mbox_prefix.take().expect("marker prefix found");
-    let consumed =
-        usize::try_from(position.offset - origin.offset).map_err(|_| input_limit_error())?;
-    let mut remaining = options
-        .max_input_bytes
-        .checked_sub(consumed)
-        .ok_or_else(input_limit_error)?;
-    buffer.line.clear();
-    buffer.line.extend_from_slice(b"From ");
-    loop {
-        if buffer.line.len() > options.max_header_length {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "mbox marker length limit exceeded",
-            ));
-        }
-        let input = match reader.fill_buf() {
-            Ok(input) => input,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        if input.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "incomplete mbox marker",
-            ));
-        }
-        if remaining == 0 {
-            return Err(input_limit_error());
-        }
-        let available = remaining.min(options.max_header_length - buffer.line.len());
-        if available == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "mbox marker length limit exceeded",
-            ));
-        }
-        let input = &input[..input.len().min(available)];
-        let count = memchr::memchr(b'\n', input).map_or(input.len(), |index| index + 1);
-        let complete = input[count - 1] == b'\n';
-        buffer.line.extend_from_slice(&input[..count]);
-        *position = position.advance(&input[..count]);
-        reader.consume(count);
-        remaining -= count;
-        if complete {
-            callback.event(MimeEvent::MboxMarker {
-                bytes: &buffer.line,
-                position: marker_position,
-                end: *position,
-            })?;
-            return Ok(Some(remaining));
+
+    pub(crate) fn position(&self) -> MimePosition {
+        self.input.position
+    }
+
+    pub(crate) fn parse<F: EventSink>(
+        &mut self,
+        bytes: &mut &[u8],
+        eof: bool,
+        options: &MimeEntityParseOptions,
+        buffer: &mut ScanBuffer,
+        callback: &mut F,
+    ) -> io::Result<Option<Option<usize>>> {
+        loop {
+            match self.state {
+                MarkerState::Bom(index) => {
+                    // MimeKit checks for a UTF-8 BOM only when initializing a
+                    // source, before its first mbox marker, across short reads.
+                    if bytes.is_empty() && !eof {
+                        return Ok(None);
+                    }
+                    let expected = [0xef, 0xbb, 0xbf][index];
+                    if bytes.first() != Some(&expected) {
+                        if index != 0 {
+                            return Err(io::Error::new(
+                                if bytes.is_empty() {
+                                    io::ErrorKind::UnexpectedEof
+                                } else {
+                                    io::ErrorKind::InvalidData
+                                },
+                                "incomplete UTF-8 byte order mark",
+                            ));
+                        }
+                        self.state = MarkerState::Search;
+                        continue;
+                    }
+                    if self.input.remaining == 0 {
+                        return Err(input_limit_error());
+                    }
+                    self.input.position = self.input.position.advance(&bytes[..1]);
+                    self.input.remaining -= 1;
+                    *bytes = &bytes[1..];
+                    if index == 2 {
+                        self.search_start = self.input.position;
+                        self.state = MarkerState::Search;
+                    } else {
+                        self.state = MarkerState::Bom(index + 1);
+                    }
+                }
+                MarkerState::Search => {
+                    // Like MimeKit's StepMboxMarkerStart, skip whole lines until
+                    // a line begins with "From ". Never match mid-line.
+                    match self.input.next(
+                        bytes,
+                        eof,
+                        &mut buffer.line,
+                        &[],
+                        false,
+                        options.max_header_length,
+                    )? {
+                        Piece::NeedInput => return Ok(None),
+                        Piece::Line => continue,
+                        Piece::End => {}
+                    }
+                    let Some(marker) = self.input.mbox_prefix else {
+                        return if self.input.position == self.search_start {
+                            Ok(Some(None))
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "missing mbox marker",
+                            ))
+                        };
+                    };
+                    // Unlike next-message lookahead, this prefix belongs to
+                    // the current marker and must fit its input budget.
+                    if self.input.borrowed != 0 {
+                        return Err(input_limit_error());
+                    }
+                    buffer.line.clear();
+                    buffer.line.extend_from_slice(b"From ");
+                    self.state = MarkerState::Marker(marker);
+                }
+                MarkerState::Marker(position) => {
+                    if buffer.line.len() > options.max_header_length {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "mbox marker length limit exceeded",
+                        ));
+                    }
+                    if bytes.is_empty() {
+                        return if eof {
+                            Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "incomplete mbox marker",
+                            ))
+                        } else {
+                            Ok(None)
+                        };
+                    }
+                    if self.input.remaining == 0 {
+                        return Err(input_limit_error());
+                    }
+                    let available = self
+                        .input
+                        .remaining
+                        .min(options.max_header_length - buffer.line.len());
+                    if available == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "mbox marker length limit exceeded",
+                        ));
+                    }
+                    let input = &bytes[..bytes.len().min(available)];
+                    let count = memchr::memchr(b'\n', input).map_or(input.len(), |index| index + 1);
+                    let complete = input[count - 1] == b'\n';
+                    buffer.line.extend_from_slice(&input[..count]);
+                    self.input.position = self.input.position.advance(&input[..count]);
+                    self.input.remaining -= count;
+                    *bytes = &bytes[count..];
+                    if complete {
+                        callback.event(MimeEvent::MboxMarker {
+                            bytes: &buffer.line,
+                            position,
+                            end: self.input.position,
+                        })?;
+                        return Ok(Some(Some(self.input.remaining)));
+                    }
+                }
+            }
         }
     }
 }
 
-pub(crate) fn read_tree<R, F>(
-    reader: &mut R,
-    options: &mut ReadContext<'_>,
-    position: &mut MimePosition,
-    buffer: &mut ScanBuffer,
-    mbox: bool,
-    remaining: usize,
-    callback: &mut F,
-) -> io::Result<TreeEnd>
-where
-    R: BufRead + ?Sized,
-    F: EventSink,
-{
-    let header_limit = NonZeroUsize::new(options.max_header_length).expect("validated limit");
-    let mut input = Lines {
-        reader,
-        remaining,
-        position,
-        at_line_start: true,
-        piece_at_line_start: true,
-        piece_position: MimePosition::default(),
-        mbox,
-        content_end: 0,
-        mbox_prefix: None,
-        borrowed: 0,
-        eof: false,
-        scanner: buffer.scanner,
-    };
+pub(crate) struct TreeParser {
+    input: Lines,
     // Explicit message and multipart frames avoid recursive calls that
     // could exhaust the call stack on deeply nested input.
-    let mut stack: Vec<Frame> = Vec::new();
-    let mut state = State::headers(header_limit, *input.position);
-    let ScanBuffer {
-        line,
-        pending,
-        mbox_prefix,
-        ..
-    } = buffer;
-    line.clear();
-    pending.clear();
-    let mut pending_position = *input.position;
+    stack: Vec<Frame>,
+    state: State,
+    pending_position: MimePosition,
+}
 
-    loop {
-        if options.mbox_content_end.is_some()
-            && stack.is_empty()
-            && matches!(state, State::Headers { .. })
-        {
-            // MimeKit sets contentEnd after the outer headers, before probing
-            // any body line. Do not let our withheld separator delay this:
-            // the very first body line can be a protected mbox From-line.
+impl TreeParser {
+    pub(crate) fn new(
+        options: &MimeEntityParseOptions,
+        position: MimePosition,
+        buffer: &mut ScanBuffer,
+        mbox: bool,
+        remaining: usize,
+    ) -> Self {
+        buffer.line.clear();
+        buffer.pending.clear();
+        Self {
+            input: Lines::new(position, remaining, mbox, buffer.scanner),
+            stack: Vec::new(),
+            state: State::headers(
+                NonZeroUsize::new(options.max_header_length).expect("validated limit"),
+                position,
+            ),
+            pending_position: position,
+        }
+    }
+
+    pub(crate) fn position(&self) -> MimePosition {
+        self.input.position
+    }
+
+    // None means more bytes are needed, not EOF. All partial lines, delimiter
+    // lookahead and tree frames survive that return; the caller owns the input.
+    pub(crate) fn parse<F: EventSink, L: MimeComplianceLogger + ?Sized>(
+        &mut self,
+        bytes: &mut &[u8],
+        eof: bool,
+        options: &mut ReadContext<'_, L>,
+        buffer: &mut ScanBuffer,
+        callback: &mut F,
+    ) -> io::Result<Option<TreeEnd>> {
+        let header_limit = NonZeroUsize::new(options.max_header_length).expect("validated limit");
+        let Self {
+            input,
+            stack,
+            state,
+            pending_position,
+        } = self;
+        let ScanBuffer {
+            line,
+            pending,
+            mbox_prefix,
+            ..
+        } = buffer;
+        loop {
+            if options.mbox_content_end.is_some()
+                && stack.is_empty()
+                && matches!(state, State::Headers { .. })
+            {
+                // MimeKit sets contentEnd after the outer headers, before probing
+                // any body line. Do not let our withheld separator delay this:
+                // the very first body line can be a protected mbox From-line.
+                consume_line(
+                    pending,
+                    *pending_position,
+                    state,
+                    stack,
+                    options,
+                    header_limit,
+                    callback,
+                )?;
+                pending.clear();
+                input.content_end = options.mbox_content_end.expect("mbox length mode enabled");
+            }
+            if !input.scanning
+                && !matches!(state, State::Headers { .. })
+                && input.forward_content(
+                    bytes,
+                    eof,
+                    state,
+                    pending,
+                    pending_position,
+                    stack,
+                    &mut options.reporting,
+                    callback,
+                )?
+            {
+                continue;
+            }
+            match input.next(
+                bytes,
+                eof,
+                line,
+                stack,
+                matches!(state, State::Headers { .. }),
+                options.max_header_length,
+            )? {
+                Piece::NeedInput => return Ok(None),
+                Piece::End => break,
+                Piece::Line => {}
+            }
+            let line_position = input.piece_position;
+            let delimiter = input
+                .piece_at_line_start
+                .then(|| find_boundary(stack, line))
+                .flatten();
+            // Withhold a piece so a delimiter's newline cannot become an
+            // absent message's separator. Existing headers and preambles keep theirs.
+            let trim = matches!(state, State::Leaf(_) | State::Epilogue { .. })
+                || (matches!(state, State::Headers { started: false, .. })
+                    && matches!(stack.last(), Some(Frame::Message { .. })));
+            let had_pending = !pending.is_empty();
+            let framing = if delimiter.is_some() && trim {
+                trim_delimiter_newline(pending)
+            } else {
+                b""
+            };
+            let end = if had_pending {
+                pending_position.advance(pending)
+            } else if delimiter.is_some() {
+                state.end_before_boundary(line_position)
+            } else {
+                line_position
+            };
             consume_line(
                 pending,
-                pending_position,
-                &mut state,
-                &mut stack,
+                *pending_position,
+                state,
+                stack,
                 options,
                 header_limit,
                 callback,
             )?;
             pending.clear();
-            input.content_end = options.mbox_content_end.expect("mbox length mode enabled");
+            options.reporting.content(framing, end)?;
+            // The pending separator may have introduced a multipart boundary.
+            let delimiter = input
+                .piece_at_line_start
+                .then(|| find_boundary(stack, line))
+                .flatten();
+            if delimiter.is_some() {
+                options.reporting.framing(line, line_position)?;
+                *state = at_boundary(
+                    std::mem::replace(state, State::Preamble),
+                    stack,
+                    line,
+                    options,
+                    end,
+                    (line_position, line_position.advance(line)),
+                    callback,
+                )?;
+            } else {
+                std::mem::swap(pending, line);
+                *pending_position = line_position;
+            }
         }
-        if !matches!(state, State::Headers { .. })
-            && input.forward_content(
-                &mut state,
-                pending,
-                &mut pending_position,
-                &stack,
-                &mut options.reporting,
-                callback,
-            )?
-        {
-            continue;
-        }
-        if !input.next(
-            line,
-            &stack,
-            matches!(state, State::Headers { .. }),
-            options.max_header_length,
-        )? {
-            break;
-        }
-        let line_position = input.piece_position;
-        let delimiter = input
-            .piece_at_line_start
-            .then(|| find_boundary(&stack, line))
-            .flatten();
-        // Withhold a piece so a delimiter's newline cannot become an
-        // absent message's separator. Existing headers and preambles keep theirs.
-        let trim = matches!(state, State::Leaf(_) | State::Epilogue { .. })
-            || (matches!(state, State::Headers { started: false, .. })
-                && matches!(stack.last(), Some(Frame::Message { .. })));
+
+        *mbox_prefix = input.mbox_prefix;
+        callback.end_boundary(*mbox_prefix);
+        let eof = mbox_prefix.is_none();
         let had_pending = !pending.is_empty();
-        let framing = if delimiter.is_some() && trim {
+        let framing = if !eof
+            && (matches!(state, State::Leaf(_) | State::Epilogue { .. })
+                || (matches!(state, State::Headers { started: false, .. })
+                    && matches!(stack.last(), Some(Frame::Message { .. }))))
+        {
+            // An mbox marker is an outer boundary. The preceding newline belongs
+            // to its framing, just as for MIME delimiters; EOF retains that newline.
             trim_delimiter_newline(pending)
         } else {
             b""
         };
-        let end = if had_pending {
+        let end = if eof {
+            input.position
+        } else if had_pending {
             pending_position.advance(pending)
-        } else if delimiter.is_some() {
-            state.end_before_boundary(line_position)
         } else {
-            line_position
+            state.end_before_boundary(mbox_prefix.expect("stopped at an mbox marker"))
         };
         consume_line(
             pending,
-            pending_position,
-            &mut state,
-            &mut stack,
+            *pending_position,
+            state,
+            stack,
             options,
             header_limit,
             callback,
         )?;
-        pending.clear();
         options.reporting.content(framing, end)?;
-        // The pending separator may have introduced a multipart boundary.
-        let delimiter = input
-            .piece_at_line_start
-            .then(|| find_boundary(&stack, line))
-            .flatten();
-        if delimiter.is_some() {
-            options.reporting.framing(line, line_position)?;
-            state = at_boundary(
-                state,
-                &mut stack,
-                line,
-                options,
-                end,
-                (line_position, line_position.advance(line)),
-                callback,
-            )?;
+        complete_headers(state, stack, options, header_limit, end, !eof, callback)?;
+        if eof
+            && !input.mbox
+            && !stack
+                .iter()
+                .any(|frame| matches!(frame, Frame::Multipart { .. }))
+            && matches!(state, State::Headers { started: false, .. })
+            && matches!(stack.last(), Some(Frame::Message { begun: false }))
+        {
+            // Without any enclosing boundary, MimeKit still constructs the empty
+            // embedded message at EOF. With a boundary it leaves the wrapper empty.
+            check_depth(stack.len(), options, end)?;
+            if let Some(Frame::Message { begun }) = stack.last_mut() {
+                *begun = true;
+            }
+            callback.event(MimeEvent::MessageBegin { position: end })?;
+            complete_headers(state, stack, options, header_limit, end, false, callback)?;
+        }
+        let diagnostic = if let Some(marker) = *mbox_prefix {
+            (marker, 1)
         } else {
-            std::mem::swap(pending, line);
-            pending_position = line_position;
-        }
-    }
-
-    *mbox_prefix = input.mbox_prefix;
-    callback.end_boundary(*mbox_prefix);
-    let eof = mbox_prefix.is_none();
-    let had_pending = !pending.is_empty();
-    let framing = if !eof
-        && (matches!(state, State::Leaf(_) | State::Epilogue { .. })
-            || (matches!(state, State::Headers { started: false, .. })
-                && matches!(stack.last(), Some(Frame::Message { .. }))))
-    {
-        // An mbox marker is an outer boundary. The preceding newline belongs
-        // to its framing, just as for MIME delimiters; EOF retains that newline.
-        trim_delimiter_newline(pending)
-    } else {
-        b""
-    };
-    let end = if eof {
-        *input.position
-    } else if had_pending {
-        pending_position.advance(pending)
-    } else {
-        state.end_before_boundary(mbox_prefix.expect("stopped at an mbox marker"))
-    };
-    consume_line(
-        pending,
-        pending_position,
-        &mut state,
-        &mut stack,
-        options,
-        header_limit,
-        callback,
-    )?;
-    options.reporting.content(framing, end)?;
-    complete_headers(
-        &mut state,
-        &mut stack,
-        options,
-        header_limit,
-        end,
-        !eof,
-        callback,
-    )?;
-    if eof
-        && !mbox
-        && !stack
-            .iter()
-            .any(|frame| matches!(frame, Frame::Multipart { .. }))
-        && matches!(state, State::Headers { started: false, .. })
-        && matches!(stack.last(), Some(Frame::Message { begun: false }))
-    {
-        // Without any enclosing boundary, MimeKit still constructs the empty
-        // embedded message at EOF. With a boundary it leaves the wrapper empty.
-        check_depth(stack.len(), options, end)?;
-        if let Some(Frame::Message { begun }) = stack.last_mut() {
-            *begun = true;
-        }
-        callback.event(MimeEvent::MessageBegin { position: end })?;
-        complete_headers(
-            &mut state,
-            &mut stack,
-            options,
-            header_limit,
-            end,
-            false,
-            callback,
-        )?;
-    }
-    let diagnostic = if let Some(marker) = *mbox_prefix {
-        (marker, 1)
-    } else {
-        (end, options.reporting.column(end))
-    };
-    finish_entity(
-        state,
-        &mut stack,
-        if eof {
-            io::ErrorKind::UnexpectedEof
-        } else {
-            io::ErrorKind::InvalidData
-        },
-        end,
-        diagnostic,
-        &mut options.reporting,
-        callback,
-    )?;
-    loop {
-        wrap_messages(&mut stack, end, &mut options.reporting, callback)?;
-        if stack.is_empty() {
-            break;
-        }
-        // EOF and an mbox marker can truncate several enclosing multiparts.
-        // Unwind the explicit frames just as an ancestor boundary does.
+            (end, options.reporting.column(end))
+        };
         finish_entity(
-            State::Preamble,
-            &mut stack,
-            io::ErrorKind::UnexpectedEof,
+            std::mem::replace(state, State::Preamble),
+            stack,
+            if eof {
+                io::ErrorKind::UnexpectedEof
+            } else {
+                io::ErrorKind::InvalidData
+            },
             end,
             diagnostic,
             &mut options.reporting,
             callback,
         )?;
+        loop {
+            wrap_messages(stack, end, &mut options.reporting, callback)?;
+            if stack.is_empty() {
+                break;
+            }
+            // EOF and an mbox marker can truncate several enclosing multiparts.
+            // Unwind the explicit frames just as an ancestor boundary does.
+            finish_entity(
+                State::Preamble,
+                stack,
+                io::ErrorKind::UnexpectedEof,
+                end,
+                diagnostic,
+                &mut options.reporting,
+                callback,
+            )?;
+        }
+        Ok(Some(TreeEnd { position: end, eof }))
     }
-    Ok(TreeEnd { position: end, eof })
 }
 
 enum Frame {
@@ -439,10 +517,10 @@ fn find_boundary(stack: &[Frame], line: &[u8]) -> Option<(usize, bool)> {
     })
 }
 
-fn complete_headers<F: EventSink>(
+fn complete_headers<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     state: &mut State,
     stack: &mut Vec<Frame>,
-    options: &mut ReadContext<'_>,
+    options: &mut ReadContext<'_, L>,
     header_limit: NonZeroUsize,
     end: MimePosition,
     interrupted: bool,
@@ -527,12 +605,12 @@ fn complete_headers<F: EventSink>(
     Ok(())
 }
 
-fn consume_line<F: EventSink>(
+fn consume_line<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     line: &[u8],
     position: MimePosition,
     state: &mut State,
     stack: &mut Vec<Frame>,
-    options: &mut ReadContext<'_>,
+    options: &mut ReadContext<'_, L>,
     header_limit: NonZeroUsize,
     callback: &mut F,
 ) -> io::Result<()> {
@@ -596,12 +674,12 @@ fn consume_line<F: EventSink>(
     Ok(())
 }
 
-fn emit_content<F: EventSink>(
+fn emit_content<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     state: &mut State,
     bytes: &[u8],
     mut position: MimePosition,
     scanned: Option<scan::Scan>,
-    reporting: &mut crate::mime_compliance::Reporting<'_>,
+    reporting: &mut crate::mime_compliance::Reporting<'_, L>,
     callback: &mut F,
 ) -> io::Result<()> {
     let kind = match state {
@@ -659,12 +737,12 @@ fn content_length(headers: &HeaderList) -> Option<u64> {
         })
 }
 
-fn start_entity<F: EventSink>(
+fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     headers: HeaderList,
     position: MimePosition,
     headers_end: MimePosition,
     stack: &mut Vec<Frame>,
-    options: &mut ReadContext<'_>,
+    options: &mut ReadContext<'_, L>,
     header_limit: NonZeroUsize,
     callback: &mut F,
 ) -> io::Result<State> {
@@ -782,9 +860,9 @@ fn start_entity<F: EventSink>(
     }
 }
 
-fn check_depth(
+fn check_depth<L: MimeComplianceLogger + ?Sized>(
     ancestors: usize,
-    options: &mut ReadContext<'_>,
+    options: &mut ReadContext<'_, L>,
     position: MimePosition,
 ) -> io::Result<()> {
     if ancestors >= options.max_depth {
@@ -803,11 +881,11 @@ fn check_depth(
     }
 }
 
-fn at_boundary<F: EventSink>(
+fn at_boundary<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     mut state: State,
     stack: &mut Vec<Frame>,
     line: &[u8],
-    options: &mut ReadContext<'_>,
+    options: &mut ReadContext<'_, L>,
     position: MimePosition,
     marker: (MimePosition, MimePosition),
     callback: &mut F,
@@ -878,13 +956,13 @@ fn at_boundary<F: EventSink>(
     }
 }
 
-fn finish_entity<F: EventSink>(
+fn finish_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     state: State,
     stack: &mut Vec<Frame>,
     incomplete: io::ErrorKind,
     position: MimePosition,
     diagnostic: (MimePosition, u64),
-    reporting: &mut crate::mime_compliance::Reporting<'_>,
+    reporting: &mut crate::mime_compliance::Reporting<'_, L>,
     callback: &mut F,
 ) -> io::Result<()> {
     match state {
@@ -950,10 +1028,10 @@ fn finish_entity<F: EventSink>(
     }
 }
 
-fn wrap_messages<F: EventSink>(
+fn wrap_messages<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     stack: &mut Vec<Frame>,
     position: MimePosition,
-    reporting: &mut crate::mime_compliance::Reporting<'_>,
+    reporting: &mut crate::mime_compliance::Reporting<'_, L>,
     callback: &mut F,
 ) -> io::Result<()> {
     while matches!(stack.last(), Some(Frame::Message { begun: true })) {
@@ -1013,10 +1091,9 @@ impl State {
     }
 }
 
-struct Lines<'a, R: ?Sized> {
-    reader: &'a mut R,
+struct Lines {
     remaining: usize,
-    position: &'a mut MimePosition,
+    position: MimePosition,
     at_line_start: bool,
     piece_at_line_start: bool,
     piece_position: MimePosition,
@@ -1026,75 +1103,63 @@ struct Lines<'a, R: ?Sized> {
     borrowed: usize,
     eof: bool,
     scanner: scan::Scanner,
+    scanning: bool,
+    padded_boundary: Option<bool>,
+    padding_checked: usize,
+    marker_length: usize,
 }
 
 const CHUNK_SIZE: usize = 4096;
+
+enum Piece {
+    NeedInput,
+    Line,
+    End,
+}
 
 fn input_limit_error() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "MIME input byte limit exceeded")
 }
 
-impl<R: BufRead + ?Sized> Lines<'_, R> {
-    fn skip_byte_order_mark(&mut self) -> io::Result<()> {
-        // MimeKit checks for a UTF-8 BOM only when initializing a source,
-        // before scanning its first mbox marker, even across short reads.
-        for (index, expected) in [0xef, 0xbb, 0xbf].into_iter().enumerate() {
-            let input = loop {
-                match self.reader.fill_buf() {
-                    Ok(input) => break input,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(error),
-                }
-            };
-            if input.first() != Some(&expected) {
-                if input.is_empty() {
-                    // Failed to read any data: EOF.
-                    self.eof = true;
-                }
-                return if index == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::new(
-                        if input.is_empty() {
-                            io::ErrorKind::UnexpectedEof
-                        } else {
-                            io::ErrorKind::InvalidData
-                        },
-                        "incomplete UTF-8 byte order mark",
-                    ))
-                };
-            }
-            if self.remaining == 0 {
-                return Err(input_limit_error());
-            }
-            *self.position = self.position.advance(&[expected]);
-            self.reader.consume(1);
-            self.remaining -= 1;
+impl Lines {
+    fn new(position: MimePosition, remaining: usize, mbox: bool, scanner: scan::Scanner) -> Self {
+        Self {
+            remaining,
+            position,
+            at_line_start: true,
+            piece_at_line_start: true,
+            piece_position: position,
+            mbox,
+            content_end: 0,
+            mbox_prefix: None,
+            borrowed: 0,
+            eof: false,
+            scanner,
+            scanning: false,
+            padded_boundary: None,
+            padding_checked: 0,
+            marker_length: 0,
         }
-        Ok(())
     }
 
-    fn forward_content<F: EventSink>(
+    #[allow(clippy::too_many_arguments)]
+    fn forward_content<F: EventSink, L: MimeComplianceLogger + ?Sized>(
         &mut self,
+        source: &mut &[u8],
+        eof: bool,
         state: &mut State,
         pending: &mut Vec<u8>,
         pending_position: &mut MimePosition,
         stack: &[Frame],
-        reporting: &mut crate::mime_compliance::Reporting<'_>,
+        reporting: &mut crate::mime_compliance::Reporting<'_, L>,
         callback: &mut F,
     ) -> io::Result<bool> {
         if self.eof {
             return Ok(false);
         }
-        let input = loop {
-            match self.reader.fill_buf() {
-                Ok(input) => break input,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
-        };
+        let input = *source;
         if input.is_empty() {
-            self.eof = true;
+            self.eof = eof;
             return Ok(false);
         }
         if self.remaining == 0 {
@@ -1104,9 +1169,9 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
             // MimeKit withholds a trailing CR because it may be half a CRLF.
             // Keep the pair together until the next line can be classified.
             pending.push(b'\n');
-            *self.position = self.position.advance(b"\n");
+            self.position = self.position.advance(b"\n");
             self.at_line_start = true;
-            self.reader.consume(1);
+            *source = &source[1..];
             self.remaining -= 1;
             return Ok(true);
         }
@@ -1158,7 +1223,7 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
         emit_content(
             state,
             &bytes[..content_len],
-            *self.position,
+            self.position,
             Some(scanned),
             reporting,
             callback,
@@ -1168,74 +1233,90 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
             line: end.line - u64::from(withheld != 0 && bytes.ends_with(b"\n")),
         };
         pending.extend_from_slice(&bytes[content_len..]);
-        *self.position = end;
+        self.position = end;
         self.at_line_start = bytes.ends_with(b"\n");
-        self.reader.consume(count);
+        *source = &source[count..];
         self.remaining -= count;
         Ok(true)
     }
 
     fn next(
         &mut self,
+        bytes: &mut &[u8],
+        eof: bool,
         line: &mut Vec<u8>,
         stack: &[Frame],
         reading_headers: bool,
         max_header_length: usize,
-    ) -> io::Result<bool> {
-        line.clear();
-        self.piece_position = *self.position;
-        self.piece_at_line_start = self.at_line_start;
+    ) -> io::Result<Piece> {
+        if !self.scanning && bytes.is_empty() && !eof {
+            // No line has started yet. On refill the content fast path must
+            // still be able to join a withheld CR with its following LF.
+            return Ok(Piece::NeedInput);
+        }
+        if !self.scanning {
+            line.clear();
+            self.piece_position = self.position;
+            self.piece_at_line_start = self.at_line_start;
+            self.padded_boundary = None;
+            self.padding_checked = 0;
+            self.marker_length = if reading_headers {
+                // The pending separator can introduce a boundary that is not
+                // yet on the stack. Its size is bounded by the raw header limit.
+                max_header_length.saturating_add(4)
+            } else {
+                stack
+                    .iter()
+                    .filter_map(|frame| match frame {
+                        Frame::Multipart {
+                            boundary: Some(boundary),
+                            closed: false,
+                            ..
+                        } => Some(boundary.len() + 4),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .max(74)
+            };
+            self.scanning = true;
+        }
         // As in MimeKit's CheckBoundary/IsPartialBoundary, compare the start
         // of the line, not the position after reading its From-prefix.
         let mbox = self.mbox && self.piece_position.offset >= self.content_end;
         if self.eof {
-            return Ok(false);
+            return Ok(Piece::End);
         }
-        let mut padded_boundary = None;
-        let mut padding_checked = 0;
-        let marker_length = if reading_headers {
-            // The pending separator can introduce a boundary that is not yet
-            // on the stack. Its size is bounded by the raw header limit.
-            max_header_length.saturating_add(4)
-        } else {
-            stack
-                .iter()
-                .filter_map(|frame| match frame {
-                    Frame::Multipart {
-                        boundary: Some(boundary),
-                        closed: false,
-                        ..
-                    } => Some(boundary.len() + 4),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(0)
-                .max(74)
-        };
+        let marker_length = self.marker_length;
         loop {
             if mbox && self.piece_at_line_start && line == b"From " {
                 // MimeKit's mbox boundary matching only checks the first five
                 // bytes, not the sender/date. Retain this prefix for the next
                 // call instead of buffering the next message or its marker.
                 self.mbox_prefix = Some(self.piece_position);
-                return Ok(false);
+                self.scanning = false;
+                return Ok(Piece::End);
             }
             let prefix =
                 mbox && self.piece_at_line_start && line.len() < 5 && b"From ".starts_with(line);
             if !prefix && self.borrowed != 0 {
                 return Err(input_limit_error());
             }
-            let input = match self.reader.fill_buf() {
-                Ok(input) => input,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
+            let input = *bytes;
             if input.is_empty() {
+                if !eof {
+                    return Ok(Piece::NeedInput);
+                }
                 if self.borrowed != 0 {
                     return Err(input_limit_error());
                 }
                 self.eof = true;
-                return Ok(!line.is_empty());
+                self.scanning = false;
+                return Ok(if line.is_empty() {
+                    Piece::End
+                } else {
+                    Piece::Line
+                });
             }
             let prefix = prefix && (!line.is_empty() || input[0] == b'F');
             // Bound ordinary content lookahead even when no newline occurs.
@@ -1246,7 +1327,7 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
             } else if line.len() < marker_length {
                 self.piece_at_line_start && line.starts_with(b"--")
             } else {
-                let candidate = padded_boundary.get_or_insert_with(|| {
+                let candidate = self.padded_boundary.get_or_insert_with(|| {
                     self.piece_at_line_start
                         && line.starts_with(b"--")
                         && line[marker_length..].iter().all(|byte| matches!(byte, b' ' | b'\t'))
@@ -1254,21 +1335,22 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
                         // Elsewhere only active ancestors can claim this line.
                         && (reading_headers || find_boundary(stack, line).is_some())
                 });
-                if *candidate && padding_checked != 0 {
+                if *candidate && self.padding_checked != 0 {
                     // Check only newly appended padding, not the entire growing
                     // line on every refill (which would make scanning quadratic).
-                    *candidate = line[padding_checked..]
+                    *candidate = line[self.padding_checked..]
                         .iter()
                         .all(|byte| matches!(byte, b' ' | b'\t'));
                 }
-                padding_checked = line.len();
+                self.padding_checked = line.len();
                 *candidate
             };
             if line.len() >= CHUNK_SIZE && !candidate {
                 // Keep CRLF together across chunks. A trailing lone CR is
                 // withheld until lookahead tells us whether LF follows it.
                 if line.last() != Some(&b'\r') || input[0] != b'\n' {
-                    return Ok(true);
+                    self.scanning = false;
+                    return Ok(Piece::Line);
                 }
             }
             if self.remaining == 0 && !prefix {
@@ -1295,16 +1377,17 @@ impl<R: BufRead + ?Sized> Lines<'_, R> {
             let count = memchr::memchr(b'\n', input).map_or(input.len(), |index| index + 1);
             let complete = input[count - 1] == b'\n';
             line.extend_from_slice(&input[..count]);
-            *self.position = self.position.advance(&input[..count]);
+            self.position = self.position.advance(&input[..count]);
             self.at_line_start = complete;
-            self.reader.consume(count);
+            *bytes = &bytes[count..];
             self.borrowed += count.saturating_sub(self.remaining);
             self.remaining = self.remaining.saturating_sub(count);
             if complete {
                 if self.borrowed != 0 {
                     return Err(input_limit_error());
                 }
-                return Ok(true);
+                self.scanning = false;
+                return Ok(Piece::Line);
             }
         }
     }

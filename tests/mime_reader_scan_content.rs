@@ -1,7 +1,10 @@
 // Adapted from MimeKit's MimeReaderScanContentTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use mimecraft::{MimeComplianceIssue, MimeContentKind, MimeEvent, MimePosition, MimeReader};
+use mimecraft::{
+    MimeComplianceIssue, MimeContentKind, MimeEvent, MimeEventFormat, MimeEventParser,
+    MimePosition, MimeReader,
+};
 use std::{
     fs,
     io::{self, BufReader},
@@ -18,6 +21,16 @@ enum Recorded {
 // Record callback arguments, including raw bytes and positions, rather than
 // comparing only the assembled bodies. Async duplicates are consolidated.
 fn record(data: &[u8], mbox: bool, chunk_size: usize, logged: bool) -> Vec<Recorded> {
+    record_with_driver(data, mbox, chunk_size, logged, false)
+}
+
+fn record_with_driver(
+    data: &[u8],
+    mbox: bool,
+    chunk_size: usize,
+    logged: bool,
+    byte_fed: bool,
+) -> Vec<Recorded> {
     let mut reader = MimeReader::new(BufReader::with_capacity(chunk_size, data));
     let mut events = Vec::new();
     let mut callback = |event: MimeEvent<'_>| {
@@ -46,7 +59,23 @@ fn record(data: &[u8], mbox: bool, chunk_size: usize, logged: bool) -> Vec<Recor
         Ok(())
     };
     let mut logger = |_: MimeComplianceIssue| Ok(());
-    let result = if mbox {
+    let result = if byte_fed {
+        let format = if mbox {
+            MimeEventFormat::Mbox
+        } else {
+            MimeEventFormat::Message
+        };
+        let mut parser: MimeEventParser<'_> = if logged {
+            let logger: &mut (dyn mimecraft::MimeComplianceLogger + Send) = &mut logger;
+            MimeEventParser::with_logger(format, Default::default(), Default::default(), logger)
+                .unwrap()
+        } else {
+            MimeEventParser::new(format)
+        };
+        data.chunks(chunk_size)
+            .try_for_each(|chunk| parser.parse(chunk, &mut callback).map(|_| ()))
+            .and_then(|_| parser.finish(&mut callback))
+    } else if mbox {
         loop {
             let result = if logged {
                 reader.read_mbox_message_with_logger(&mut logger, &mut callback)
@@ -105,6 +134,16 @@ fn corpus_fast_path_matches_logged_path() {
                     record(&data, mbox, chunk_size, true),
                     &format!("{} / {chunk_size}", path.display()),
                 );
+                for logged in [false, true] {
+                    assert_events_equal(
+                        record(&data, mbox, chunk_size, logged),
+                        record_with_driver(&data, mbox, chunk_size, logged, true),
+                        &format!(
+                            "byte-fed {} / {chunk_size} / logged={logged}",
+                            path.display()
+                        ),
+                    );
+                }
             }
         }
     }
@@ -235,6 +274,15 @@ fn generated_messages_fast_path_matches_logged_path() {
                 record(&data, mbox, chunk_size, true),
                 &format!("message #{iteration}, mbox={mbox}, chunk_size={chunk_size}"),
             );
+            for logged in [false, true] {
+                assert_events_equal(
+                    record(&data, mbox, chunk_size, logged),
+                    record_with_driver(&data, mbox, chunk_size, logged, true),
+                    &format!(
+                        "byte-fed #{iteration}, mbox={mbox}, chunk_size={chunk_size}, logged={logged}"
+                    ),
+                );
+            }
         }
     }
 }
