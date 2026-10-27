@@ -3,8 +3,8 @@
 
 use mimecraft::{
     ContentEncoding, HeaderId, HeaderList, HeaderTooLong, MimeContentStorage, MimeEntity,
-    MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser, MimePartWriteOptions, MimePosition,
-    MimeReader, TextFormat, encodings::NewLineFormat,
+    MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeMessage, MimeParser,
+    MimePartWriteOptions, MimePosition, MimeReader, TextFormat, encodings::NewLineFormat,
 };
 use std::{
     fmt::Write as _,
@@ -1152,6 +1152,11 @@ fn missing_message_body() {
     );
 }
 
+#[test]
+fn empty_message() {
+    assert_structure_round_trips("\r\n", StructureCase::EmptyMessage);
+}
+
 #[derive(Clone, Copy)]
 enum StructureCase {
     CarriageReturns(usize),
@@ -1159,6 +1164,7 @@ enum StructureCase {
     Epilogue,
     BadFold,
     MissingBody,
+    EmptyMessage,
 }
 
 fn assert_structure_round_trips(original: &str, case: StructureCase) {
@@ -1390,6 +1396,14 @@ fn serialize_structure_case<R: Read + Seek>(
             assert_eq!(structure, "message headers=3\ntext/plain headers=0\n");
             assert!(matches!(message.body(), Some(MimeEntity::Part(_))));
         }
+        StructureCase::EmptyMessage => {
+            assert_eq!(structure, "message headers=0\ntext/plain headers=0\n");
+            let MimeEntity::Part(part) = message.body().unwrap() else {
+                panic!("expected empty leaf")
+            };
+            assert!(part.content_type().unwrap().is_none());
+            assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+        }
     }
     let mut output = Vec::new();
     message
@@ -1420,7 +1434,10 @@ fn serialize_structure_case<R: Read + Seek>(
             "This part should be on the same level as the multipart/alternative and not a child.\n"
         );
     }
-    if matches!(case, StructureCase::MissingBody) {
+    if matches!(
+        case,
+        StructureCase::MissingBody | StructureCase::EmptyMessage
+    ) {
         let MimeEntity::Part(part) = message.body_mut().unwrap() else {
             unreachable!()
         };
@@ -1668,6 +1685,415 @@ fn assert_leading_garbage_error<R: BufRead, C: Read + Seek>(
     .expect("leading garbage must not produce a MIME model");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(error.to_string(), "invalid first MIME header");
+}
+
+#[test]
+fn parsing_garbage_mbox() {
+    assert_garbage_stream(MimeEventFormat::Mbox);
+}
+
+#[test]
+fn parsing_garbage_entity() {
+    assert_garbage_stream(MimeEventFormat::Entity);
+}
+
+#[test]
+fn parsing_garbage_message() {
+    assert_garbage_stream(MimeEventFormat::Message);
+}
+
+fn assert_garbage_stream(format: MimeEventFormat) {
+    for newline in ["\n", "\r\n"] {
+        let line = format!(
+            "This is just a standard test file... nothing to see here. No MIME anywhere to be found{newline}"
+        );
+        assert_empty_or_garbage_stream(line.repeat(200).as_bytes(), format);
+    }
+}
+
+#[test]
+fn empty_mbox_stream() {
+    assert_empty_or_garbage_stream(b"", MimeEventFormat::Mbox);
+}
+
+#[test]
+fn empty_entity_stream() {
+    assert_empty_or_garbage_stream(b"", MimeEventFormat::Entity);
+}
+
+#[test]
+fn empty_message_stream() {
+    assert_empty_or_garbage_stream(b"", MimeEventFormat::Message);
+}
+
+fn assert_empty_or_garbage_stream(input: &[u8], format: MimeEventFormat) {
+    for logged in [false, true] {
+        assert_empty_or_garbage_parser(MimeParser::from_slice(input), input, format, logged);
+        for chunk in [1, 2, 7, 4096] {
+            assert_empty_or_garbage_parser(
+                MimeParser::new(BufReader::with_capacity(chunk, input)),
+                input,
+                format,
+                logged,
+            );
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let parser = MimeParser::with_storage(
+                    ShortSource {
+                        inner: Cursor::new(input),
+                        chunk,
+                    },
+                    storage,
+                )
+                .unwrap();
+                assert_empty_or_garbage_parser(parser, input, format, logged);
+            }
+        }
+    }
+}
+
+fn assert_empty_or_garbage_parser<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &[u8],
+    format: MimeEventFormat,
+    logged: bool,
+) {
+    let mut logger = |_| Ok(());
+    if input.is_empty() && format == MimeEventFormat::Mbox {
+        // MimeKit throws at an empty archive. Rust's iterator-style API
+        // distinguishes clean exhaustion (None) from malformed mbox input.
+        let message = if logged {
+            parser.parse_mbox_message_with_logger(&mut logger)
+        } else {
+            parser.parse_mbox_message()
+        }
+        .unwrap();
+        assert!(message.is_none());
+        assert!(parser.parse_mbox_message().unwrap().is_none());
+        assert!(parser.is_end_of_stream());
+        assert_eq!(parser.position(), MimePosition::default());
+        assert!(parser.pending_input().is_empty());
+        return;
+    }
+
+    let error = match (format, logged) {
+        (MimeEventFormat::Entity, false) => parser.parse_entity().err(),
+        (MimeEventFormat::Entity, true) => parser.parse_entity_with_logger(&mut logger).err(),
+        (MimeEventFormat::Message, false) => parser.parse_message().err(),
+        (MimeEventFormat::Message, true) => parser.parse_message_with_logger(&mut logger).err(),
+        (MimeEventFormat::Mbox, false) => parser.parse_mbox_message().err(),
+        (MimeEventFormat::Mbox, true) => parser.parse_mbox_message_with_logger(&mut logger).err(),
+    }
+    .expect("empty or garbage input must not produce a MIME model");
+    assert_eq!(
+        error.kind(),
+        if input.is_empty() {
+            io::ErrorKind::UnexpectedEof
+        } else {
+            io::ErrorKind::InvalidData
+        }
+    );
+    if format == MimeEventFormat::Mbox {
+        assert_eq!(error.to_string(), "missing mbox marker");
+        assert_eq!(
+            parser.position(),
+            MimePosition {
+                offset: input.len() as u64,
+                line: 1 + input.iter().filter(|&&byte| byte == b'\n').count() as u64,
+            }
+        );
+    } else if input.is_empty() {
+        assert_eq!(parser.position(), MimePosition::default());
+    } else {
+        assert_eq!(error.to_string(), "invalid first MIME header");
+    }
+    assert!(!parser.is_end_of_stream());
+    let error = match format {
+        MimeEventFormat::Entity => parser.parse_entity().err(),
+        MimeEventFormat::Message => parser.parse_message().err(),
+        MimeEventFormat::Mbox => parser.parse_mbox_message().err(),
+    }
+    .expect("a failed source must not be reused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn simple_mbox_with_garbage_before_mbox_marker() {
+    let archive = include_str!("data/mbox/simple.mbox.txt").replace("\r\n", "\n");
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        for garbage_length in [
+            80, 4094, // The initial marker needs more data across the 4096-byte refill.
+            4096, 4097, // Marker search resumes in the middle of the garbage line.
+            8193, // Midline marker search needs another refill.
+        ] {
+            let input = format!(
+                "{}{newline}{}",
+                "X".repeat(garbage_length - newline.len()),
+                archive.replace('\n', newline)
+            );
+            for logged in [false, true] {
+                assert_simple_mbox_after_garbage(
+                    MimeParser::from_slice(input.as_bytes()),
+                    &input,
+                    garbage_length,
+                    format,
+                    logged,
+                );
+                for chunk in [1, 7, 4096] {
+                    assert_simple_mbox_after_garbage(
+                        MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes())),
+                        &input,
+                        garbage_length,
+                        format,
+                        logged,
+                    );
+                    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                        let parser = MimeParser::with_storage(
+                            ShortSource {
+                                inner: Cursor::new(input.as_bytes()),
+                                chunk,
+                            },
+                            storage,
+                        )
+                        .unwrap();
+                        assert_simple_mbox_after_garbage(
+                            parser,
+                            &input,
+                            garbage_length,
+                            format,
+                            logged,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn assert_simple_mbox_after_garbage<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    garbage_length: usize,
+    format: NewLineFormat,
+    logged: bool,
+) {
+    let mut messages = Vec::new();
+    for _ in 0..3 {
+        let message = if logged {
+            parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+        } else {
+            parser.parse_mbox_message()
+        }
+        .unwrap()
+        .unwrap();
+        messages.push(message);
+    }
+    assert!(parser.parse_mbox_message().unwrap().is_none());
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    drop(parser);
+    let newline_len = if format == NewLineFormat::Dos { 2 } else { 1 };
+    let markers: Vec<_> = input
+        .match_indices("From - ")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(markers[0], garbage_length);
+    for (index, mut message) in messages.into_iter().enumerate() {
+        let start = markers[index] + "From - ".len() + newline_len;
+        let end = markers
+            .get(index + 1)
+            .map_or(input.len(), |offset| offset - newline_len);
+        assert_eq!(message.headers().as_slice()[0].offset(), Some(start as u64));
+        for headers in
+            std::iter::once(message.headers()).chain(message.iter().map(MimeEntity::headers))
+        {
+            for header in headers {
+                let offset = header.offset().unwrap() as usize;
+                assert_eq!(
+                    header.raw(),
+                    &input.as_bytes()[offset..offset + header.raw().len()]
+                );
+            }
+        }
+        assert_recovery_serialization(&mut message, &input[start..end], format);
+        let mut entity = message.body_mut().unwrap();
+        for _ in 0..3 {
+            let MimeEntity::Multipart(multipart) = entity else {
+                panic!("expected three nested multiparts")
+            };
+            assert_eq!(multipart.children().len(), 1);
+            entity = &mut multipart.children_mut()[0];
+        }
+        let MimeEntity::Part(part) = entity else {
+            panic!("expected innermost text/plain leaf")
+        };
+        assert!(
+            part.content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("text", "plain")
+        );
+        let mut output = Vec::new();
+        part.write_to_with_options(
+            &mut output,
+            &MimePartWriteOptions {
+                new_line_format: NewLineFormat::Unix,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            output.starts_with(b"Content-Type: text/plain\n\n"),
+            "headers are not properly terminated"
+        );
+        let header = &part.headers().as_slice()[0];
+        let body_start = header.offset().unwrap() as usize + header.raw().len() + newline_len;
+        let mut decoded = Vec::new();
+        part.content_mut().decode_to(&mut decoded).unwrap();
+        assert_eq!(decoded, &input.as_bytes()[body_start..end]);
+    }
+}
+
+#[test]
+fn really_long_mbox_marker() {
+    let marker = format!("From {}", "X".repeat(4092));
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = format!(
+            "{marker}{newline}From: sender@example.com{newline}\
+             To: recipient@example.com{newline}Subject: test message{newline}\
+             {newline}Body text{newline}"
+        );
+        let body = &input[input.find("Body text").unwrap()..];
+        for logged in [false, true] {
+            let message = parse_recovery_mbox_message(
+                MimeParser::from_slice(input.as_bytes()),
+                &input,
+                logged,
+            );
+            assert_stored_recovery_bodies(
+                message.leaf_parts(),
+                &input,
+                MimeContentStorage::Source,
+                [body],
+            );
+            assert_long_marker_model(message, &input, format);
+            for chunk in [1, 2, 7, 4095, 4096, 4097, 8192] {
+                let message = parse_recovery_mbox_message(
+                    MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes())),
+                    &input,
+                    logged,
+                );
+                assert_long_marker_model(message, &input, format);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let message = parse_recovery_mbox_message(parser, &input, logged);
+                    assert_stored_recovery_bodies(message.leaf_parts(), &input, storage, [body]);
+                    assert_long_marker_model(message, &input, format);
+                }
+            }
+        }
+        // Rust exposes the complete marker, including its newline, as an event
+        // rather than a MimeParser property or part of the stored message.
+        let marker_end = marker.len() + newline.len();
+        for chunk in [1, 2, 7, 4095, 4096, 4097, 8192] {
+            for limit in [marker_end - 1, marker_end] {
+                let mut reader = MimeReader::with_options(
+                    BufReader::with_capacity(chunk, input.as_bytes()),
+                    MimeEntityParseOptions {
+                        max_header_length: limit,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut markers = 0;
+                let result = reader.read_mbox_message(|event| {
+                    if let MimeEvent::MboxMarker {
+                        bytes,
+                        position,
+                        end,
+                    } = event
+                    {
+                        markers += 1;
+                        assert_eq!(bytes, &input.as_bytes()[..marker_end]);
+                        assert_eq!(position, MimePosition::default());
+                        assert_eq!(
+                            end,
+                            MimePosition {
+                                offset: marker_end as u64,
+                                line: 2,
+                            }
+                        );
+                    }
+                    Ok(())
+                });
+                if limit == marker_end {
+                    assert!(result.unwrap());
+                    assert_eq!(markers, 1);
+                    assert!(reader.is_end_of_stream());
+                    assert_eq!(reader.position().offset, input.len() as u64);
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                    assert_eq!(error.to_string(), "mbox marker length limit exceeded");
+                    assert_eq!(markers, 0);
+                    assert_eq!(reader.position().offset, limit as u64);
+                    assert!(!reader.is_end_of_stream());
+                }
+            }
+        }
+    }
+}
+
+fn parse_recovery_mbox_message<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    logged: bool,
+) -> MimeMessage<C> {
+    let message = if logged {
+        parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_mbox_message()
+    }
+    .unwrap()
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    assert!(parser.parse_mbox_message().unwrap().is_none());
+    assert!(parser.pending_input().is_empty());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    message
+}
+
+fn assert_long_marker_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    format: NewLineFormat,
+) {
+    let start = input.find('\n').unwrap() + 1;
+    assert_eq!(message.headers().len(), 3);
+    assert_eq!(message.headers().as_slice()[0].offset(), Some(start as u64));
+    assert_eq!(message.subject().unwrap().text, "test message");
+    for header in message.headers() {
+        let offset = header.offset().unwrap() as usize;
+        assert_eq!(
+            header.raw(),
+            &input.as_bytes()[offset..offset + header.raw().len()]
+        );
+    }
+    let body = &input[input.find("Body text").unwrap()..];
+    assert_recovery_serialization(&mut message, &input[start..], format);
+    let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+        panic!("expected text leaf")
+    };
+    assert!(part.headers().is_empty());
+    let mut decoded = Vec::new();
+    part.content_mut().decode_to(&mut decoded).unwrap();
+    assert_eq!(decoded, body.as_bytes());
 }
 
 #[test]

@@ -299,6 +299,67 @@ fn mbox_prefix_bom_content_length_and_reporting_budgets_survive_pauses() {
 }
 
 #[test]
+fn long_mbox_marker_limits_and_positions_survive_pauses() {
+    for newline in ["\n", "\r\n"] {
+        let marker = format!("From {}{newline}", "X".repeat(4092));
+        let wire = format!("{marker}Subject: test{newline}{newline}body{newline}");
+        for max_header_length in [marker.len() - 1, marker.len()] {
+            let options = MimeEntityParseOptions {
+                max_header_length,
+                max_input_bytes: wire.len(),
+                ..Default::default()
+            };
+            let expected = sync(wire.as_bytes(), MimeEventFormat::Mbox, options);
+            assert_eq!(
+                expected.error,
+                (max_header_length < marker.len()).then_some(io::ErrorKind::InvalidData)
+            );
+            assert_eq!(
+                expected.position.offset,
+                if expected.error.is_some() {
+                    max_header_length
+                } else {
+                    wire.len()
+                } as u64
+            );
+            for split in [
+                0,
+                1,
+                4,
+                5,
+                4095,
+                4096,
+                4097,
+                marker.len() - 1,
+                marker.len(),
+                marker.len() + 1,
+                wire.len(),
+            ] {
+                assert_eq!(
+                    feed(
+                        wire.as_bytes(),
+                        MimeEventFormat::Mbox,
+                        options,
+                        &[split, wire.len() - split],
+                    ),
+                    expected,
+                    "split {split}, marker length {max_header_length}"
+                );
+            }
+            assert_eq!(
+                feed(
+                    wire.as_bytes(),
+                    MimeEventFormat::Mbox,
+                    options,
+                    &vec![1; wire.len()],
+                ),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn exact_input_limits_distinguish_temporary_exhaustion_from_eof() {
     let wire = b"Subject: test\r\n\r\nbody\r";
     let options = MimeEntityParseOptions {

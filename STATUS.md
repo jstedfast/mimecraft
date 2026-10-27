@@ -7245,6 +7245,19 @@ exercise every prefix split in the byte-fed API, exact byte/header budgets,
 original header/body ranges, source replacement after failure, and nested/body
 BOM preservation. Initialization does not read again after observing EOF or
 delay the early callback that can reject a message without I/O.
+Nine further upstream cases cover garbage-only and empty message/entity/mbox
+streams, an empty message with a header/body separator, 4097-byte mbox markers,
+and long garbage lines before the simple mbox corpus. They exercise Unix/DOS
+newlines, logging, direct slices, fragmented reads, and default/Memory/Source
+storage. Empty message/entity streams fail with `UnexpectedEof`; empty mbox
+iteration returns `None`, the intentional Rust adaptation of MimeKit's EOF
+exception. Garbage is rejected with `InvalidData`, and failed sources cannot be
+reused. The garbage-prefix cases retain MimeKit's refill/midline rationale and
+verify all three nested multipart trees, original header offsets, decoded
+content, and serialization after dropping the parser. Long markers retain their
+full bytes in reader events, not stored message headers, and exact marker-length
+limits hold across buffered and byte-fed pauses. Empty-message serialization
+stays stable through repeated reparsing. No production changes were needed.
 Header-limit regressions accept an exact-sized folded header, reject one extra
 byte or an oversized field name, and verify the failing header's offset,
 including enclosing multipart/message and mbox framing, and early termination
