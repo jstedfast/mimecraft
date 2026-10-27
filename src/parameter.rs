@@ -1,7 +1,15 @@
 // Adapted from MimeKit's Parameter.cs, ParameterList.cs and Utils/ByteExtensions.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{borrow::Cow, collections::HashMap, error::Error, fmt, ops::Range, str::FromStr};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    error::Error,
+    fmt,
+    hash::{Hash, Hasher},
+    ops::Range,
+    str::FromStr,
+};
 
 use crate::{
     charsets::{Charset, decode_best},
@@ -437,12 +445,22 @@ impl ParameterList {
         options: &ParameterParseOptions,
     ) -> Result<Self, ParameterParseError> {
         let mut result = Self::default();
-        let groups = parse_groups(input, start, options, &mut result.issues)?;
-        let mut positions = HashMap::<String, usize>::new();
-        for mut parts in groups {
+        let mut groups = parse_groups(input, start, options, &mut result.issues)?;
+        result.parameters.reserve_exact(groups.len());
+        // A single group cannot have duplicate definitions. Avoid allocating
+        // a lookup table for the common one-parameter case.
+        let mut positions = (groups.len() > 1)
+            .then(|| HashMap::<ParameterName<'_>, usize>::with_capacity(groups.len()));
+        for group in &mut groups {
+            let parts = match group {
+                PairGroup::Single(pair) => std::slice::from_mut(pair),
+                PairGroup::Continuation(parts) => parts.as_mut_slice(),
+            };
             let name = parts[0].name;
-            let key = name.to_ascii_lowercase();
-            let existing = positions.get(&key).copied();
+            let key = ParameterName(name);
+            let existing = positions
+                .as_ref()
+                .and_then(|positions| positions.get(&key).copied());
             let continued = parts[0].id.is_some();
             if existing.is_some() {
                 // Prefer the RFC 2231 form over an ordinary duplicate regardless
@@ -461,9 +479,9 @@ impl ParameterList {
                     // Stable ties give duplicate section numbers a deterministic
                     // encounter order; the source's List.Sort tie order is unspecified.
                     parts.sort_by_key(|part| part.id);
-                    check_sections(&parts, &mut result.issues);
+                    check_sections(parts, &mut result.issues);
                 }
-                let (value, charset) = decode_extended(&parts, options, &mut result.issues);
+                let (value, charset) = decode_extended(parts, options, &mut result.issues);
                 (value, Some(ParameterEncodingMethod::Rfc2231), charset)
             } else {
                 let (value, charset) = decode_ordinary(&parts[0], options, &mut result.issues);
@@ -482,7 +500,9 @@ impl ParameterList {
                 parameter.encoding_method = encoding_method;
                 parameter.charset = charset;
             } else {
-                positions.insert(key, result.parameters.len());
+                if let Some(positions) = &mut positions {
+                    positions.insert(key, result.parameters.len());
+                }
                 result.parameters.push(Parameter {
                     name: name.to_owned(),
                     value,
@@ -706,6 +726,32 @@ struct Pair<'a> {
     range: Range<usize>,
 }
 
+// Names are ASCII. Fold borrowed names for hashing and comparison instead of
+// allocating lowercase keys independently of the final parameter names.
+struct ParameterName<'a>(&'a str);
+
+impl PartialEq for ParameterName<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(other.0)
+    }
+}
+
+impl Eq for ParameterName<'_> {}
+
+impl Hash for ParameterName<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.len().hash(state);
+        for byte in self.0.bytes() {
+            state.write_u8(byte.to_ascii_lowercase());
+        }
+    }
+}
+
+enum PairGroup<'a> {
+    Single(Pair<'a>),
+    Continuation(Vec<Pair<'a>>),
+}
+
 fn skip_cfws(input: &[u8], index: &mut usize) -> Result<(), ParameterParseError> {
     skip_comments_and_whitespace(input, index).map_err(|offset| {
         ParameterParseError::new(ParameterParseErrorKind::IncompleteComment, offset)
@@ -797,22 +843,22 @@ fn parse_pair<'a>(
         let bytes = &input[value_start..*index];
         // Both paths trim trailing whitespace without removing internal spaces,
         // preserving the compatibility workaround from MimeKit issue #278.
+        let end = bytes
+            .iter()
+            .rposition(|&byte| !is_whitespace(byte))
+            .map_or(0, |i| i + 1);
+        let bytes = &bytes[..end];
         if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
-            let mut unfolded: Vec<u8> = bytes
-                .iter()
-                .copied()
-                .filter(|byte| !matches!(byte, b'\r' | b'\n'))
-                .collect();
-            while unfolded.last().is_some_and(|&byte| is_whitespace(byte)) {
-                unfolded.pop();
-            }
+            let mut unfolded = Vec::with_capacity(bytes.len());
+            unfolded.extend(
+                bytes
+                    .iter()
+                    .copied()
+                    .filter(|byte| !matches!(byte, b'\r' | b'\n')),
+            );
             Cow::Owned(unfolded)
         } else {
-            let end = bytes
-                .iter()
-                .rposition(|&byte| !is_whitespace(byte))
-                .map_or(0, |i| i + 1);
-            Cow::Borrowed(&bytes[..end])
+            Cow::Borrowed(bytes)
         }
     };
     Ok(Pair {
@@ -830,9 +876,9 @@ fn parse_groups<'a>(
     start: usize,
     options: &ParameterParseOptions,
     issues: &mut Vec<ParameterIssue>,
-) -> Result<Vec<Vec<Pair<'a>>>, ParameterParseError> {
-    let mut groups: Vec<Vec<Pair<'a>>> = Vec::new();
-    let mut continuations = HashMap::<String, usize>::new();
+) -> Result<Vec<PairGroup<'a>>, ParameterParseError> {
+    let mut groups = Vec::new();
+    let mut continuations = HashMap::<ParameterName<'_>, usize>::new();
     let mut index = start;
     loop {
         skip_cfws(input, &mut index)?;
@@ -845,16 +891,26 @@ fn parse_groups<'a>(
         }
         let pair = parse_pair(input, &mut index, options.compliance_mode)?;
         skip_cfws(input, &mut index)?;
+        // A complete single pair needs neither spare group capacity nor a
+        // continuation index, even when it has a section number.
+        if groups.is_empty() && index == input.len() {
+            return Ok(vec![PairGroup::Single(pair)]);
+        }
         if pair.id.is_some() {
-            let key = pair.name.to_ascii_lowercase();
+            let key = ParameterName(pair.name);
             if let Some(&group) = continuations.get(&key) {
-                groups[group].push(pair);
+                let PairGroup::Continuation(parts) = &mut groups[group] else {
+                    unreachable!("only continuation groups are indexed");
+                };
+                parts.push(pair);
             } else {
                 continuations.insert(key, groups.len());
-                groups.push(vec![pair]);
+                groups.push(PairGroup::Continuation(vec![pair]));
             }
         } else {
-            groups.push(vec![pair]);
+            // Like MimeKit's flat parameter list, ordinary definitions do not
+            // need a separately allocated list of continuation sections.
+            groups.push(PairGroup::Single(pair));
         }
         if index < input.len() && input[index] != b';' {
             if options.compliance_mode == ParameterComplianceMode::Strict {
@@ -972,10 +1028,18 @@ fn decode_extended(
     options: &ParameterParseOptions,
     issues: &mut Vec<ParameterIssue>,
 ) -> (String, Option<Charset>) {
-    let mut output = String::new();
+    // MimeKit estimates the assembled value's capacity from its raw sections.
+    // Reserve the encoded bytes separately; ordinary sections need no scratch.
+    let capacity = parts.iter().map(|part| part.value.len()).sum();
+    let encoded_capacity = parts
+        .iter()
+        .filter(|part| part.encoded)
+        .map(|part| part.value.len())
+        .sum();
+    let mut output = String::with_capacity(capacity);
     let mut hex = Rfc2231Decoder::new();
     let mut charset: Option<Charset> = None;
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(encoded_capacity);
     let mut run_range: Option<Range<usize>> = None;
     let group_range = parts
         .iter()

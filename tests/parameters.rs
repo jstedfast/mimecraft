@@ -643,6 +643,53 @@ fn assert_bounded(input: &[u8], mode: ParameterComplianceMode) {
 }
 
 #[test]
+fn folded_unquoted_values_trim_only_trailing_whitespace() {
+    for (input, expected) in [
+        (b"n=plain\r\n".as_slice(), "plain"),
+        (b"n=plain \t\r\n \t", "plain"),
+        (b"n= \r\n \t;", ""),
+        (b"n=one\r\n two \r\n\tthree\t\r\n", "one two \tthree"),
+        (b"n=one\r\ntwo\r\n", "onetwo"),
+    ] {
+        let list = ParameterList::parse(input).unwrap();
+        assert_eq!(list.get("n"), Some(expected), "{input:?}");
+        assert!(list.issues().is_empty(), "{input:?}");
+    }
+}
+
+#[test]
+fn interleaved_case_insensitive_groups_preserve_order_and_duplicate_precedence() {
+    let mut input = String::new();
+    for id in 0..128 {
+        input.push_str(&format!("p{id}=fallback;"));
+    }
+    for id in (0..128).rev() {
+        input.push_str(&format!("P{id}*1*={id};"));
+    }
+    for id in 0..128 {
+        input.push_str(&format!("p{id}*0*=utf-8''value-; P{id}=ignored;"));
+    }
+    let list = ParameterList::parse(input.as_bytes()).unwrap();
+    assert_eq!(list.len(), 128);
+    for (id, parameter) in list.as_slice().iter().enumerate() {
+        assert_eq!(parameter.name(), format!("p{id}"));
+        assert_eq!(parameter.value(), format!("value-{id}"));
+        assert_eq!(list.get(&format!("P{id}")), Some(parameter.value()));
+    }
+    assert_eq!(list.issues().len(), 256);
+    assert!(
+        list.issues()
+            .iter()
+            .all(|issue| issue.kind == ParameterIssueKind::DuplicateParameter)
+    );
+    assert!(
+        list.issues()
+            .windows(2)
+            .all(|issues| issues[0].range.start <= issues[1].range.start)
+    );
+}
+
+#[test]
 fn arbitrary_truncated_and_large_inputs_terminate() {
     for input in [
         b"; x (comment) * 0 * = utf-8''%C3; x*1*=%A9;".as_slice(),
