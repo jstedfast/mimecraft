@@ -2,9 +2,9 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use mimecraft::{
-    HeaderTooLong, MimeContentStorage, MimeEntity, MimeEntityParseOptions, MimeEvent, MimeMessage,
-    MimeParser, MimePartWriteOptions, MimePosition, MimeReader, TextFormat,
-    encodings::NewLineFormat,
+    ContentEncoding, HeaderId, HeaderList, HeaderTooLong, MimeContentStorage, MimeEntity,
+    MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser, MimePartWriteOptions, MimePosition,
+    MimeReader, TextFormat, encodings::NewLineFormat,
 };
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 
@@ -1094,6 +1094,245 @@ fn header_parser() {
 }
 
 #[test]
+fn invalid_content_type() {
+    for mime_type in ["garbage", "!%^#&^!\\t  "] {
+        assert_leaf_header_recovery(
+            "test of recovery from invalid media-type in Content-Type header",
+            &format!("Content-Type: {mime_type}; charset=utf-8\n"),
+            |message_headers, part_headers| {
+                assert_eq!(message_headers.len(), 7);
+                assert_eq!(part_headers.len(), 1);
+                let header = part_headers.get("Content-Type").unwrap();
+                // The raw Rust model reports invalid metadata instead of
+                // exposing MimeKit's application/octet-stream fallback.
+                // Recovery must still retain its parameters and payload.
+                assert!(header.parse_content_type().is_err());
+                assert!(header.decode_value().text.ends_with("; charset=utf-8"));
+            },
+        );
+    }
+}
+
+#[test]
+fn header_field_name_begins_with_colon() {
+    assert_leaf_header_recovery(
+        "test of a header line starting with ':'",
+        "Content-Type: text/plain; charset=utf-8\n: What header is this?\n",
+        |message_headers, part_headers| {
+            assert_eq!(message_headers.len(), 8);
+            assert_eq!(part_headers.len(), 1);
+            let header = message_headers.as_slice().last().unwrap();
+            // FIXME: Should this really be "valid"? Matches MimeKit.
+            assert!(!header.is_invalid());
+            assert_eq!(header.field(), Some(""));
+            assert_eq!(header.decode_value().text, "What header is this?");
+            assert_plain_utf8_headers(part_headers);
+        },
+    );
+}
+
+#[test]
+fn header_field_name_colon_colon() {
+    assert_leaf_header_recovery(
+        "test of a Content-Transfer-Encoding header with double ':'s",
+        concat!(
+            "Content-Type: text/plain; charset=utf-8\n",
+            "Content-Transfer-Encoding:: base64\n",
+            "Content-Disposition: inline; name=body.txt\n",
+        ),
+        |message_headers, part_headers| {
+            assert_eq!(message_headers.len(), 7);
+            assert_eq!(part_headers.len(), 3);
+            let header = &part_headers.as_slice()[1];
+            assert_eq!(header.id(), HeaderId::ContentTransferEncoding);
+            assert!(!header.is_invalid());
+            assert_eq!(header.decode_value().text, ": base64");
+            assert_plain_utf8_headers(part_headers);
+            let disposition = part_headers
+                .get("Content-Disposition")
+                .unwrap()
+                .parse_content_disposition()
+                .unwrap();
+            assert_eq!(disposition.disposition(), "inline");
+            assert_eq!(disposition.parameters().get("name"), Some("body.txt"));
+        },
+    );
+}
+
+fn assert_plain_utf8_headers(headers: &HeaderList) {
+    let content_type = headers
+        .get("Content-Type")
+        .unwrap()
+        .parse_content_type()
+        .unwrap();
+    assert!(content_type.is_mime_type("text", "plain"));
+    assert_eq!(content_type.charset(), Some("utf-8"));
+}
+
+fn assert_leaf_header_recovery(
+    subject: &str,
+    headers: &str,
+    inspect: fn(&HeaderList, &HeaderList),
+) {
+    let original = format!(
+        "From: mimekit@example.com\n\
+         To: mimekit@example.com\n\
+         Subject: {subject}\n\
+         Date: Tue, 12 Nov 2013 09:12:42 -0500\n\
+         MIME-Version: 1.0\n\
+         Message-ID: <54AD68C9E3B0184CAC6041320424FD1B5B81E74D@localhost.localdomain>\n\
+         X-Mailer: Microsoft Office Outlook 12.0\n\
+         {headers}\nThis is the message body.\n"
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let body = format!("This is the message body.{newline}");
+        for logged in [false, true] {
+            let message =
+                parse_recovery_message(MimeParser::from_slice(input.as_bytes()), &input, logged);
+            assert_stored_recovery_bodies(
+                message.leaf_parts(),
+                &input,
+                MimeContentStorage::Source,
+                [body.as_str()],
+            );
+            assert_leaf_header_model(message, &input, &body, format, inspect);
+            for chunk in [1, 2, 7, 4096] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let message = parse_recovery_message(parser, &input, logged);
+                assert_leaf_header_model(message, &input, &body, format, inspect);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let message = parse_recovery_message(parser, &input, logged);
+                    assert_stored_recovery_bodies(
+                        message.leaf_parts(),
+                        &input,
+                        storage,
+                        [body.as_str()],
+                    );
+                    assert_leaf_header_model(message, &input, &body, format, inspect);
+                }
+            }
+        }
+    }
+}
+
+fn assert_leaf_header_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    body: &str,
+    format: NewLineFormat,
+    inspect: fn(&HeaderList, &HeaderList),
+) {
+    let MimeEntity::Part(part) = message.body().unwrap() else {
+        panic!("expected top-level leaf")
+    };
+    inspect(message.headers(), part.headers());
+    for header in message.headers().iter().chain(part.headers().iter()) {
+        let offset = header.offset().unwrap() as usize;
+        assert_eq!(
+            header.raw(),
+            &input.as_bytes()[offset..offset + header.raw().len()]
+        );
+    }
+    assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+    assert_eq!(part.content().new_line_format(), Some(format));
+    if part.headers().contains("Content-Transfer-Encoding") {
+        // The typed getter stays strict, while stored content uses MimeKit's
+        // unspecified-encoding recovery for the unchanged malformed header.
+        assert!(part.content_transfer_encoding().is_err());
+    }
+    assert_recovery_serialization(&mut message, input, format);
+    let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+        unreachable!()
+    };
+    let mut decoded = Vec::new();
+    part.content_mut().decode_to(&mut decoded).unwrap();
+    assert_eq!(decoded, body.as_bytes());
+}
+
+#[test]
+fn garbage_before_message_headers() {
+    assert_leading_garbage(
+        concat!(
+            ">F!&^#%&^\n",
+            "From: mimekit@example.com\n",
+            "To: mimekit@example.com\n",
+            "Subject: This message has garbage before the headers\n",
+            "Date: Tue, 12 Nov 2013 09:12:42 -0500\n",
+            "MIME-Version: 1.0\n",
+            "Content-Type: text/plain; charset=utf-8\n\n",
+            "This is the message body.\n",
+        ),
+        true,
+    );
+}
+
+#[test]
+fn garbage_before_entity_headers() {
+    assert_leading_garbage(
+        concat!(
+            ">F!&^#%&^\n",
+            "MIME-Version: 1.0\n",
+            "Content-Type: text/plain; charset=utf-8\n\n",
+            "This is the message body.\n",
+        ),
+        false,
+    );
+}
+
+fn assert_leading_garbage(original: &str, message: bool) {
+    for newline in ["\n", "\r\n"] {
+        let input = original.replace('\n', newline);
+        for logged in [false, true] {
+            assert_leading_garbage_error(MimeParser::from_slice(input.as_bytes()), message, logged);
+            for chunk in [1, 2, 7, 4096] {
+                assert_leading_garbage_error(
+                    MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes())),
+                    message,
+                    logged,
+                );
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    assert_leading_garbage_error(parser, message, logged);
+                }
+            }
+        }
+    }
+}
+
+fn assert_leading_garbage_error<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    message: bool,
+    logged: bool,
+) {
+    let mut logger = |_| Ok(());
+    let error = match (message, logged) {
+        (true, true) => parser.parse_message_with_logger(&mut logger).err(),
+        (true, false) => parser.parse_message().err(),
+        (false, true) => parser.parse_entity_with_logger(&mut logger).err(),
+        (false, false) => parser.parse_entity().err(),
+    }
+    .expect("leading garbage must not produce a MIME model");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "invalid first MIME header");
+}
+
+#[test]
 fn truncated_invalid_header_after_valid_header() {
     for tail in ["Junk", "Junk\r", "Junk\r\n"] {
         let text = format!("Header-1: value 1\r\n{tail}");
@@ -1753,7 +1992,7 @@ fn assert_truncated_multipart(subject: &str, body: &str, children: &[(&str, &str
         for chunk in [1, 2, 7, 4096] {
             for logged in [false, true] {
                 let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
-                let message = parse_truncated_multipart(parser, &input, logged);
+                let message = parse_recovery_message(parser, &input, logged);
                 assert_truncated_multipart_model(message, &input, &children, format);
                 for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
                     let parser = MimeParser::with_storage(
@@ -1764,7 +2003,7 @@ fn assert_truncated_multipart(subject: &str, body: &str, children: &[(&str, &str
                         storage,
                     )
                     .unwrap();
-                    let message = parse_truncated_multipart(parser, &input, logged);
+                    let message = parse_recovery_message(parser, &input, logged);
                     assert_stored_recovery_bodies(
                         message.leaf_parts(),
                         &input,
@@ -1804,7 +2043,7 @@ fn assert_stored_recovery_bodies<'a, 'b, R: Read + Seek + 'b>(
     assert!(parts.next().is_none(), "unexpected recovered leaf");
 }
 
-fn parse_truncated_multipart<R: BufRead, C: Read + Seek>(
+fn parse_recovery_message<R: BufRead, C: Read + Seek>(
     mut parser: MimeParser<R, C>,
     input: &str,
     logged: bool,
@@ -2105,7 +2344,7 @@ fn assert_nested_multipart_recovery(original: &str, parent_boundary: bool) {
         for chunk in [1, 2, 7, 4096] {
             for logged in [false, true] {
                 let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
-                let message = parse_truncated_multipart(parser, &input, logged);
+                let message = parse_recovery_message(parser, &input, logged);
                 assert_nested_multipart_model(message, &input, &expected, format, parent_boundary);
                 for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
                     let parser = MimeParser::with_storage(
@@ -2116,7 +2355,7 @@ fn assert_nested_multipart_recovery(original: &str, parent_boundary: bool) {
                         storage,
                     )
                     .unwrap();
-                    let message = parse_truncated_multipart(parser, &input, logged);
+                    let message = parse_recovery_message(parser, &input, logged);
                     assert_stored_recovery_bodies(
                         message.leaf_parts(),
                         &input,
@@ -2480,7 +2719,7 @@ fn assert_empty_message_rfc822(closing_boundary: bool) {
         for chunk in [1, 2, 7, 4096] {
             for logged in [false, true] {
                 let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
-                let message = parse_truncated_multipart(parser, &input, logged);
+                let message = parse_recovery_message(parser, &input, logged);
                 assert_empty_message_rfc822_model(message, &input, format, &body);
                 for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
                     let parser = MimeParser::with_storage(
@@ -2491,7 +2730,7 @@ fn assert_empty_message_rfc822(closing_boundary: bool) {
                         storage,
                     )
                     .unwrap();
-                    let message = parse_truncated_multipart(parser, &input, logged);
+                    let message = parse_recovery_message(parser, &input, logged);
                     assert_stored_recovery_bodies(
                         message.leaf_parts(),
                         &input,

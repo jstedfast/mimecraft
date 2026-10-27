@@ -7187,6 +7187,16 @@ Ordinary header lines are rejected as boundary candidates before ancestor
 scanning, following MimeKit's boundary-prefix check.
 The double-boundary parser case also checks the recovered empty first child
 and exact serialization with and without logging.
+Five further upstream parser cases cover invalid Content-Type values, an empty
+header name followed by a colon, a doubled colon in Content-Transfer-Encoding,
+and rejection of ordinary garbage before message or entity headers. They run
+with Unix/DOS input, one-byte/short/full refills, logging, default/Memory/Source
+storage, and direct slices. Successful recovery retains header offsets,
+parameters, raw body bytes/source ranges, and repeatable serialization after
+the parser is dropped. Unlike MimeKit's recovered typed properties, Rust's raw
+model keeps invalid Content-Type and transfer-encoding getters fallible; the
+parser still recovers a leaf with unspecified stored encoding, without
+rewriting the malformed headers or decoding an invalid `: base64` value.
 Further upstream parser regressions cover folded recipient headers with 1,
 100, and 50,000 addresses, preserving raw folds and following-header offsets;
 Japanese ISO-2022-JP subject/body decoding; and unmunged mbox `From ` lines.
