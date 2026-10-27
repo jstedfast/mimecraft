@@ -555,6 +555,7 @@ enum Frame<C> {
     Entity {
         headers: HeaderList,
         content: Content<C>,
+        encoding: ContentEncoding,
         parsed: crate::mime_entity::ParsedEntity,
         headers_end: MimePosition,
     },
@@ -563,7 +564,6 @@ enum Frame<C> {
 
 enum Content<C> {
     Part {
-        encoding: ContentEncoding,
         bytes: Vec<u8>,
         length: u64,
     },
@@ -584,6 +584,19 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
 
     fn body_separator(&mut self, present: bool) {
         self.body_separator = present;
+    }
+
+    fn multipart_boundary(&mut self, boundary: Option<String>) {
+        let Some(Frame::Entity {
+            content: Content::Multipart { framing, .. },
+            ..
+        }) = self.stack.last_mut()
+        else {
+            unreachable!("decoded boundary belongs to the current multipart")
+        };
+        // The reader no longer needs this boundary once the multipart ends.
+        // Move it into the saved framing instead of parsing its header again.
+        framing.boundary = boundary;
     }
 
     fn boundary(&mut self, bytes: &[u8], closing: bool, end: MimePosition) {
@@ -624,13 +637,13 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                 self.stack.push(Frame::Entity {
                     headers,
                     headers_end,
+                    encoding,
                     parsed: crate::mime_entity::ParsedEntity {
                         body_separator: self.body_separator,
                         no_content: false,
                     },
                     content: match kind {
                         MimeEntityKind::Part => Content::Part {
-                            encoding,
                             bytes: Vec::new(),
                             length: 0,
                         },
@@ -666,7 +679,6 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                         Content::Part {
                             bytes: body,
                             length,
-                            ..
                         },
                     ) => {
                         assert_eq!(
@@ -699,30 +711,27 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                 let Some(Frame::Entity {
                     headers,
                     content,
+                    encoding,
                     mut parsed,
                     headers_end,
                 }) = self.stack.pop()
                 else {
                     unreachable!("entity end matches an entity frame");
                 };
-                let recovered_encoding = crate::mime_part::transfer_encoding(&headers)
-                    .is_err()
-                    .then(|| {
-                        headers
-                            .get("Content-Transfer-Encoding")
-                            .expect("invalid encoding header")
-                            .raw_value()
-                            .to_vec()
-                    });
+                // A successfully parsed encoding is never Unspecified. With a
+                // header present, this is the reader's recovery from an invalid
+                // value. Multipart framing retains its raw encoding separately.
+                let recovered_encoding = if kind != MimeEntityKind::Multipart
+                    && encoding == ContentEncoding::Unspecified
+                {
+                    headers
+                        .get("content-transfer-encoding")
+                        .map(|header| header.raw_value().to_vec())
+                } else {
+                    None
+                };
                 let mut entity: MimeEntity<C> = match (kind, content) {
-                    (
-                        MimeEntityKind::Part,
-                        Content::Part {
-                            bytes,
-                            encoding,
-                            length,
-                        },
-                    ) => {
+                    (MimeEntityKind::Part, Content::Part { bytes, length }) => {
                         // With no body, the header block's final newline also
                         // precedes the next boundary. Rust retains an empty
                         // stream rather than MimeKit's null Content.
@@ -771,19 +780,13 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                                 end.truncate(end.len() - trim);
                             }
                         }
-                        framing.boundary = headers.get("Content-Type").and_then(|header| {
-                            crate::ContentType::parse_for_reader(header.raw_value())
-                                .0
-                                .boundary()
-                                .map(str::to_owned)
-                        });
                         framing.content_type = headers
-                            .get("Content-Type")
+                            .get("content-type")
                             .expect("parsed multipart type")
                             .raw_value()
                             .to_vec();
                         framing.transfer_encoding = headers
-                            .get("Content-Transfer-Encoding")
+                            .get("content-transfer-encoding")
                             .map(|header| header.raw_value().to_vec());
                         let mut multipart =
                             Multipart::from_parts(headers, children, preamble, epilogue);

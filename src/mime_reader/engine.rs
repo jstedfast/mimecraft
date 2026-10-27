@@ -777,7 +777,7 @@ fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
         }
     }
     let content_type = headers
-        .get("Content-Type")
+        .get("content-type")
         .filter(|header| !header.is_invalid())
         .map(|header| crate::ContentType::parse_for_reader(header.raw_value()).0);
     // The logger has already reported an unknown encoding at its value's
@@ -975,9 +975,15 @@ fn finish_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
             },
         ),
         State::Epilogue { .. } => {
-            let Some(Frame::Multipart { closed: true, .. }) = stack.pop() else {
+            let Some(Frame::Multipart {
+                boundary,
+                closed: true,
+                ..
+            }) = stack.pop()
+            else {
                 unreachable!("epilogue belongs to a closed multipart")
             };
+            callback.multipart_boundary(boundary);
             reporting.emit(
                 callback,
                 MimeEvent::EntityEnd {
@@ -1016,6 +1022,7 @@ fn finish_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
                     crate::MimeCompliancePositionKind::Exact,
                 )?;
             }
+            callback.multipart_boundary(boundary);
             reporting.emit(
                 callback,
                 MimeEvent::EntityEnd {

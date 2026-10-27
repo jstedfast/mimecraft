@@ -218,6 +218,8 @@ pub(crate) trait EventSink {
 
     fn boundary(&mut self, _bytes: &[u8], _closing: bool, _end: MimePosition) {}
 
+    fn multipart_boundary(&mut self, _boundary: Option<String>) {}
+
     fn end_boundary(&mut self, _position: Option<MimePosition>) {}
 }
 

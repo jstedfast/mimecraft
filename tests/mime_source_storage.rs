@@ -78,6 +78,96 @@ fn parsed_overlapping_boundaries_round_trip_in_both_storage_modes() {
 }
 
 #[test]
+fn parsed_metadata_retains_decoded_multipart_boundaries() {
+    for (parameter, boundary) in [
+        ("boundary=b", "b"),
+        ("boundary=\"b\\-x\"", "b-x"),
+        ("boundary*=us-ascii''b%2Dx", "b-x"),
+        ("boundary*0*=us-ascii''b%2D;\r\n\tboundary*1=x", "b-x"),
+    ] {
+        for tail in [String::new(), format!("\r\n--{boundary}-- \t\r\n")] {
+            let raw = format!(
+                "cOnTeNt-TyPe: multipart/mixed; {parameter}\r\n\r\n\
+                 --{boundary} \t\r\nContent-Type: text/plain\r\n\r\nbody{tail}"
+            );
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                for chunk in [1, 7, 4096] {
+                    for logged in [false, true] {
+                        let (source, _) = Source::new(raw.as_bytes(), chunk);
+                        let mut parser = MimeParser::with_storage(source, storage).unwrap();
+                        let mut entity = if logged {
+                            parser.parse_entity_with_logger(&mut |_| Ok(())).unwrap()
+                        } else {
+                            parser.parse_entity().unwrap()
+                        };
+                        let MimeEntity::Multipart(part) = &entity else {
+                            panic!("expected multipart");
+                        };
+                        assert_eq!(part.boundary().unwrap().as_deref(), Some(boundary));
+                        assert_eq!(part.children().len(), 1);
+                        drop(parser);
+                        let mut output = Vec::new();
+                        entity.write_to(&mut output).unwrap();
+                        assert_eq!(output, raw.as_bytes(), "{parameter}/{storage:?}/{chunk}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn parsed_metadata_reuses_encoding_recovery_in_both_storage_modes() {
+    for value in [
+        None,
+        Some(""),
+        Some(" \t"),
+        Some("unknown"),
+        Some("7bit"),
+        Some("8bit"),
+        Some("binary"),
+        Some("=?us-ascii?q?7bit?="),
+        Some("=?us-ascii?q?unknown?="),
+    ] {
+        for (content_type, body) in [
+            ("text/plain", "body"),
+            ("message/rfc822", "Subject: attached\r\n\r\nbody"),
+            ("multipart/mixed; boundary=b", "--b-- \t\r\n"),
+        ] {
+            let encoding = value.map_or_else(String::new, |value| {
+                format!("cOnTeNt-TrAnSfEr-EnCoDiNg:{value}\r\n")
+            });
+            let raw = format!("Content-Type: {content_type}\r\n{encoding}\r\n{body}");
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                for chunk in [1, 7, 4096] {
+                    let (source, _) = Source::new(raw.as_bytes(), chunk);
+                    let mut entity = MimeEntity::load_with_storage(source, storage).unwrap();
+                    let mut output = Vec::new();
+                    entity.write_to(&mut output).unwrap();
+                    assert_eq!(
+                        output,
+                        raw.as_bytes(),
+                        "{content_type}/{value:?}/{storage:?}"
+                    );
+                    entity
+                        .headers_mut()
+                        .replace_all(
+                            Header::parse(b"Content-Transfer-Encoding: different-unknown").unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        entity.write_to(&mut Vec::new()).unwrap_err().kind(),
+                        io::ErrorKind::InvalidData
+                    );
+                    entity.headers_mut().remove_all("Content-Transfer-Encoding");
+                    entity.write_to(&mut Vec::new()).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn edited_or_relocated_parsed_overlaps_still_require_collision_free_boundaries() {
     for wrapper in ["", "Content-Type: message/rfc822\r\n\r\n"] {
         let raw = format!(
