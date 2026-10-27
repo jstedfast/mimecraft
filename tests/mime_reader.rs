@@ -3025,6 +3025,482 @@ fn content_length_mbox() {
 
 type ExpectedIssue = (Violation, u64, u64, PositionKind);
 
+const MESSAGE_HEADERS: &str = concat!(
+    "From: mimekit@example.org\r\n",
+    "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+    "Message-Id: <123@example.org>\r\n",
+    "MIME-Version: 1.0\r\n",
+);
+
+fn assert_reader_diagnostics(wire: &[u8], inspect: impl Fn(&[MimeComplianceIssue])) {
+    let snapshot = |event: MimeEvent<'_>| match event {
+        MimeEvent::EntityBegin {
+            headers,
+            kind,
+            encoding,
+            position,
+            headers_end,
+        } => format!(
+            "EntityBegin {:?} {kind:?} {encoding:?} {position:?} {headers_end:?}",
+            headers.as_slice()
+        ),
+        _ => format!("{event:?}"),
+    };
+    for capacity in [1, 2, 3, 7, 17, 4095, 4096] {
+        let mut reader = MimeReader::new(BufReader::with_capacity(capacity, wire));
+        let mut issues = Vec::new();
+        let mut events = Vec::new();
+        reader
+            .read_message_with_logger(
+                &mut |issue| {
+                    issues.push(issue);
+                    Ok(())
+                },
+                |event| {
+                    events.push(snapshot(event));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(reader.is_end_of_stream());
+        assert_eq!(reader.position().offset, wire.len() as u64);
+        assert_position(wire, reader.position());
+        for issue in &issues {
+            let offset = issue.stream_offset as usize;
+            assert!(offset <= wire.len(), "{issue:?}");
+            let prefix = &wire[..offset];
+            assert_eq!(
+                issue.line_number,
+                1 + prefix.iter().filter(|&&b| b == b'\n').count() as u64,
+                "{issue:?}"
+            );
+            assert_eq!(
+                issue.column_number,
+                prefix
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(offset as u64 + 1, |lf| (offset - lf) as u64,),
+                "{issue:?}"
+            );
+        }
+        inspect(&issues);
+
+        let mut plain = MimeReader::new(BufReader::with_capacity(capacity, wire));
+        let mut plain_events = Vec::new();
+        plain
+            .read_message(|event| {
+                plain_events.push(snapshot(event));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(events, plain_events);
+        assert_eq!(reader.position(), plain.position());
+    }
+}
+
+fn assert_issue_positions(wire: &[u8], actual: &[MimeComplianceIssue], expected: &[ExpectedIssue]) {
+    assert_eq!(actual.len(), expected.len(), "{actual:?}");
+    for (actual, &(violation, line, column, kind)) in actual.iter().zip(expected) {
+        let offset = wire
+            .split_inclusive(|&byte| byte == b'\n')
+            .take(line as usize - 1)
+            .map(<[u8]>::len)
+            .sum::<usize>()
+            + column as usize
+            - 1;
+        assert_eq!(
+            (
+                actual.violation,
+                actual.line_number,
+                actual.column_number,
+                actual.position_kind,
+            ),
+            (violation, line, column, kind),
+        );
+        assert_eq!(actual.stream_offset, offset as u64);
+    }
+}
+
+#[test]
+fn folded_content_transfer_encoding_position() {
+    // The value is folded onto the line after the colon. Violations identify
+    // the value, not the header start, so skipping folding whitespace must
+    // keep track of the line number as well as the column.
+    let text = concat!(
+        "From: mimekit@example.org\r\n",
+        "To: mimekit@example.org\r\n",
+        "Subject: folded Content-Transfer-Encoding\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: message/rfc822\r\n",
+        "Content-Transfer-Encoding:\r\n",
+        "\tbase64\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <123@example.org>\r\n\r\n",
+        "VGhpcyBpcyB0aGUgcmZjODIyIG1lc3NhZ2UgYm9keS4K\r\n",
+    );
+    assert_reader_diagnostics(text.as_bytes(), |issues| {
+        assert_issue_positions(
+            text.as_bytes(),
+            issues,
+            &[(
+                Violation::IllegalMessageRfc822ContentTransferEncoding,
+                7,
+                2,
+                PositionKind::Exact,
+            )],
+        );
+    });
+}
+
+#[test]
+fn invalid_content_transfer_encoding_header_at_end_of_stream() {
+    // A header without a colon at EOF must not be interpreted as a
+    // Content-Transfer-Encoding header: its value would be beyond EOF.
+    let text = b"From: a@b.c\nContent-Type: text/plain\nContent-Transfer-Encoding";
+    assert_reader_diagnostics(text, |issues| {
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| { issue.violation == Violation::InvalidContentTransferEncoding })
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.violation == Violation::InvalidHeader)
+        );
+    });
+    let message = MimeParser::from_slice(text).parse_message().unwrap();
+    let MimeEntity::Part(part) = message.body().unwrap() else {
+        panic!("expected text/plain leaf")
+    };
+    assert!(
+        part.content_type()
+            .unwrap()
+            .unwrap()
+            .is_mime_type("text", "plain")
+    );
+    assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+}
+
+#[test]
+fn invalid_content_type_header_at_end_of_stream() {
+    // A colonless header followed by a newline is never a known header;
+    // the same record at EOF must not be interpreted as one either.
+    let text = b"From: a@b.c\nContent-Transfer-Encoding: 7bit\nContent-Type";
+    assert_reader_diagnostics(text, |issues| {
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue.violation == Violation::InvalidContentType)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.violation == Violation::InvalidHeader)
+        );
+    });
+    let message = MimeParser::from_slice(text).parse_message().unwrap();
+    let MimeEntity::Part(part) = message.body().unwrap() else {
+        panic!("expected default leaf")
+    };
+    // The raw model retains the invalid record instead of synthesizing
+    // MimeKit's default text/plain Content-Type property.
+    assert!(
+        message
+            .headers()
+            .iter()
+            .any(|header| header.is_invalid() && header.raw() == b"Content-Type")
+    );
+    assert!(part.content_type().unwrap().is_none());
+    assert_eq!(part.content().encoding(), ContentEncoding::SevenBit);
+}
+
+fn embedded_header_message(header: &[u8]) -> Vec<u8> {
+    [
+        MESSAGE_HEADERS.as_bytes(),
+        b"Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\n",
+        b"Content-Type: message/rfc822\r\n\r\n",
+        header,
+        b"--b--\r\n",
+    ]
+    .concat()
+}
+
+#[test]
+fn message_part_invalid_first_line_reports_header_issues() {
+    let wire = embedded_header_message(b"\xff\0bad\r\n");
+    assert_reader_diagnostics(&wire, |issues| {
+        assert_issue_positions(
+            &wire,
+            issues,
+            &[
+                (Violation::InvalidHeader, 10, 1, PositionKind::Exact),
+                (
+                    Violation::UnexpectedNullBytesInHeader,
+                    10,
+                    2,
+                    PositionKind::Exact,
+                ),
+                (
+                    Violation::Unexpected8BitBytesInHeader,
+                    10,
+                    1,
+                    PositionKind::Exact,
+                ),
+                (
+                    Violation::MissingBodySeparator,
+                    11,
+                    1,
+                    PositionKind::ElementStart,
+                ),
+            ],
+        );
+    });
+}
+
+#[test]
+fn message_part_utf8_first_header_is_not_reported_as_body() {
+    let wire = embedded_header_message(b"Subject: caf\xc3\xa9\r\n\r\nbody\r\n");
+    assert_reader_diagnostics(&wire, |issues| assert!(issues.is_empty(), "{issues:?}"));
+}
+
+#[test]
+fn message_part_bare_linefeed_first_header_is_not_reported_as_body() {
+    let wire = embedded_header_message(b"Subject: test\nFrom: sender@example.org\r\n\r\nbody\r\n");
+    assert_reader_diagnostics(&wire, |issues| {
+        assert_issue_positions(
+            &wire,
+            issues,
+            &[(Violation::BareLinefeedInHeader, 10, 14, PositionKind::Exact)],
+        );
+    });
+}
+
+#[test]
+fn boundary_longer_than_rfc_limit_is_invalid() {
+    assert_invalid_boundary(&"x".repeat(71));
+}
+
+#[test]
+fn boundary_ending_with_space_is_invalid() {
+    assert_invalid_boundary("trailing-space ");
+}
+
+fn assert_invalid_boundary(boundary: &str) {
+    let wire = format!(
+        "{MESSAGE_HEADERS}Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\nbody\r\n"
+    );
+    assert_reader_diagnostics(wire.as_bytes(), |issues| {
+        assert_issue_positions(
+            wire.as_bytes(),
+            issues,
+            &[
+                (
+                    Violation::InvalidMultipartBoundaryParameter,
+                    5,
+                    1,
+                    PositionKind::ElementStart,
+                ),
+                (
+                    Violation::MissingMultipartBoundary,
+                    8,
+                    1,
+                    PositionKind::Exact,
+                ),
+            ],
+        );
+    });
+}
+
+#[test]
+fn mime_compliance_header_byte_positions() {
+    for newline in ["\n", "\r\n"] {
+        for padding in [0, 15, 31, 63, 127, 4090] {
+            for folded in [false, true] {
+                let prefix = format!(
+                    "X-First: ascii{newline}Subject: {}{}",
+                    "a".repeat(padding),
+                    if folded {
+                        format!("{newline}\t")
+                    } else {
+                        String::new()
+                    },
+                );
+                let wire = [
+                    prefix.as_bytes(),
+                    b"\0hello\xffworld\0\xfe",
+                    format!("{newline}X-Last: ascii{newline}{newline}").as_bytes(),
+                    b"body\0\xff",
+                    newline.as_bytes(),
+                ]
+                .concat();
+                assert_header_byte_positions(&wire, &[prefix.len()], &[prefix.len() + 6]);
+            }
+        }
+    }
+    for (wire, nulls, eight_bits) in [
+        (b"Subject: \0\xff".as_slice(), &[9][..], &[10][..]),
+        (
+            b"A: x\0\xff\0\xfe\r\nB: y\0\xfe\0\xff\r\n\r\n",
+            &[4, 14],
+            &[5, 15],
+        ),
+        (b"A: ok\r\nBad\0\xff: value\r\n\r\n", &[10], &[11]),
+        (b"Subject: \xc3\xa9\0\xf0\x9f\x98\x80\r\n\r\n", &[11], &[]),
+        (b"Subject: \xc3\xa9\r\n \xff\r\n\r\n", &[], &[14]),
+        (b"Subject: ascii\r\n\r\nbody\0\xff\r\n", &[], &[]),
+        (b"Subject: \xc3\xa9 \xf0\x9f\x98\x80 \xe2\x82", &[], &[17]),
+        (
+            b"Subject: \xc3\xa9 \xf0\x9f\x98\x80 \xc3\r\n \xa9\r\n\r\n",
+            &[],
+            &[17],
+        ),
+        (
+            b"Subject: \xc3\xa9 \xf0\x9f\x98\x80 \xff\xfe\r\n\r\n",
+            &[],
+            &[17],
+        ),
+        (
+            b"X-First: ascii\r\nBad-\xc3\xa9-\xff: value\r\n\r\n",
+            &[],
+            &[23],
+        ),
+    ] {
+        assert_header_byte_positions(wire, nulls, eight_bits);
+    }
+    // Address-specific validators are not yet wired into reader reporting.
+    // Preserve its generic byte diagnostic rather than suppressing it.
+    assert_header_byte_positions(b"From: a@\xff.example\r\n\r\n", &[], &[8]);
+
+    let malformed: &[&[u8]] = &[
+        b"\xff",
+        b"\x80",
+        b"\xc0\xaf",
+        b"\xe0\x80\x80",
+        b"\xed\xa0\x80",
+        b"\xf4\x90\x80\x80",
+        b"\xc2!",
+        b"\xe2\x82!",
+        b"\xf0\x90\x80!",
+        b"\xe2",
+        b"\xf0\x90",
+    ];
+    for newline in ["\n", "\r\n"] {
+        for padding in [0, 31, 4090] {
+            // These are raw UTF-8 bytes, including valid sequences before
+            // the malformed sequence whose first byte must be identified.
+            let prefix = [
+                format!("X-First: ascii{newline}Subject: ").as_bytes(),
+                b"\xc3\xa9 \xe6\x97\xa5 \xf0\x9f\x98\x80",
+                format!("{newline}\t{}", "a".repeat(padding)).as_bytes(),
+            ]
+            .concat();
+            for invalid in malformed {
+                let wire = [
+                    prefix.as_slice(),
+                    invalid,
+                    format!("{newline}X-Last: ascii{newline}{newline}").as_bytes(),
+                ]
+                .concat();
+                assert_header_byte_positions(&wire, &[], &[prefix.len()]);
+            }
+        }
+    }
+    let prefix = b"Content-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nX-Name: \xc3\xa9\r\n \xf0\x9f\x98\x80 ";
+    let wire = [prefix.as_slice(), b"\xff\r\n\r\nbody\r\n--x--\r\n"].concat();
+    assert_header_byte_positions(&wire, &[], &[prefix.len()]);
+}
+
+fn assert_header_byte_positions(wire: &[u8], nulls: &[usize], eight_bits: &[usize]) {
+    assert_reader_diagnostics(wire, |issues| {
+        for (violation, offsets) in [
+            (Violation::UnexpectedNullBytesInHeader, nulls),
+            (Violation::Unexpected8BitBytesInHeader, eight_bits),
+        ] {
+            let actual: Vec<_> = issues
+                .iter()
+                .filter(|issue| issue.violation == violation)
+                .collect();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|issue| issue.stream_offset as usize)
+                    .collect::<Vec<_>>(),
+                offsets,
+                "{violation:?}",
+            );
+            for issue in actual {
+                assert_eq!(issue.position_kind, PositionKind::Exact);
+                let byte = wire[issue.stream_offset as usize];
+                if violation == Violation::UnexpectedNullBytesInHeader {
+                    assert_eq!(byte, 0);
+                } else {
+                    assert!(byte >= 0x80);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn embedded_first_header_before_mbox_marker_keeps_line_ending() {
+    for newline in ["\n", "\r\n"] {
+        let header = format!("Subject: first{newline}");
+        let first =
+            format!("From first{newline}Content-Type: message/rfc822{newline}{newline}{header}");
+        let wire = format!("{first}From next{newline}Subject: next{newline}{newline}");
+        for capacity in [1, 2, 7, 4096] {
+            let mut reader = MimeReader::new(BufReader::with_capacity(capacity, wire.as_bytes()));
+            let mut found = false;
+            let mut issues = Vec::new();
+            assert!(
+                reader
+                    .read_mbox_message_with_logger(
+                        &mut |issue| {
+                            issues.push(issue);
+                            Ok(())
+                        },
+                        |event| {
+                            if let MimeEvent::EntityBegin { headers, .. } = event {
+                                for raw in headers {
+                                    if raw.raw().starts_with(b"Subject:") {
+                                        assert_eq!(raw.raw(), header.as_bytes());
+                                        assert_eq!(
+                                            raw.offset(),
+                                            Some((first.len() - header.len()) as u64)
+                                        );
+                                        found = true;
+                                    }
+                                }
+                            }
+                            Ok(())
+                        },
+                    )
+                    .unwrap()
+            );
+            assert!(found);
+            let missing: Vec<_> = issues
+                .iter()
+                .filter(|issue| issue.violation == Violation::MissingBodySeparator)
+                .copied()
+                .collect();
+            assert_issue_positions(
+                wire.as_bytes(),
+                &missing,
+                &[(
+                    Violation::MissingBodySeparator,
+                    5,
+                    1,
+                    PositionKind::ElementStart,
+                )],
+            );
+            assert!(reader.read_mbox_message(|_| Ok(())).unwrap());
+            assert!(!reader.read_mbox_message(|_| Ok(())).unwrap());
+            assert_eq!(reader.position().offset, wire.len() as u64);
+        }
+    }
+}
+
 #[test]
 fn mime_compliance_invalid_header_field_name_with_space() {
     assert_mime_compliance_violations(
@@ -3184,8 +3660,8 @@ fn mime_compliance_unexpected_8bit_bytes_in_header() {
         &[(
             Violation::Unexpected8BitBytesInHeader,
             3,
-            1,
-            PositionKind::ElementStart,
+            10,
+            PositionKind::Exact,
         )],
     );
 }
@@ -3197,15 +3673,15 @@ fn mime_compliance_valid_8bit_bytes_in_header() {
 
 #[test]
 fn mime_compliance_unexpected_8bit_bytes_in_folded_header() {
-    // The invalid 8-bit bytes are on a continuation line. Attribute the
-    // violation to the header's beginning: validation needs its full value.
+    // The 8-bit bytes live on a continuation line, not the header's first
+    // line. Retain their position while validating the complete value.
     assert_mime_compliance_violations(
         "8bit-folded-header.eml",
         &[(
             Violation::Unexpected8BitBytesInHeader,
-            3,
-            1,
-            PositionKind::ElementStart,
+            4,
+            2,
+            PositionKind::Exact,
         )],
     );
 }
@@ -3262,8 +3738,8 @@ fn mime_compliance_unexpected_null_bytes_in_header() {
         &[(
             Violation::UnexpectedNullBytesInHeader,
             5,
-            1,
-            PositionKind::LineStart,
+            36,
+            PositionKind::Exact,
         )],
     );
 }
@@ -3347,27 +3823,7 @@ fn assert_mime_compliance_violations(name: &str, expected: &[ExpectedIssue]) {
                     !matches!(issue.violation, BareLinefeedInHeader | BareLinefeedInBody)
                 })
                 .collect();
-            assert_eq!(actual.len(), expected.len(), "{name}");
-            for (actual, &(violation, line, column, kind)) in actual.iter().zip(expected) {
-                let offset = wire
-                    .split_inclusive(|&byte| byte == b'\n')
-                    .take(line as usize - 1)
-                    .map(<[u8]>::len)
-                    .sum::<usize>()
-                    + column as usize
-                    - 1;
-                assert_eq!(
-                    (
-                        actual.violation,
-                        actual.line_number,
-                        actual.column_number,
-                        actual.position_kind
-                    ),
-                    (violation, line, column, kind),
-                    "{name}"
-                );
-                assert_eq!(actual.stream_offset, offset as u64, "{name}");
-            }
+            assert_issue_positions(wire, &actual, expected);
         }
     }
 }

@@ -179,6 +179,34 @@ Content-Type: multipart/mixed; boundary=i\n\n--i\n\nbody\r\n--o--",
 }
 
 #[test]
+fn header_byte_diagnostics_survive_pauses() {
+    let wires: &[&[u8]] = &[
+        b"Subject: \xc3\xa9 \xf0\x9f\x98\x80\r\n\tvalid UTF-8\r\n\r\n",
+        b"Subject: \xc3\xa9\r\n\t\0hello\xffworld\0\xfe\r\n\r\nbody\0\xff",
+        b"Subject: \xc3\xa9 \xf0\x9f\x98\x80 \xe2\x82",
+        b"Subject: \xc3\r\n \xa9\r\n\r\n",
+        b"A: x\0\xff\0\xfe\nB: y\0\xfe\0\xff\n\n",
+        b"X-First: ascii\r\nBad\0\xff: value\r\n\r\n",
+        b"From: a@\xff.example\r\n\r\n",
+        b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+Content-Type: message/rfc822\r\n\r\n\xff\0bad\r\n--b--\r\n",
+        b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+Content-Type: message/rfc822\r\n\r\nSubject: \xc3\xa9\r\n--b--\r\n",
+    ];
+    for wire in wires {
+        for format in [MimeEventFormat::Message, MimeEventFormat::Entity] {
+            assert_splits(wire, format, Default::default());
+        }
+    }
+    assert_splits(
+        b"From first\r\nContent-Type: message/rfc822\r\n\r\nSubject: \xc3\xa9\0\xff\r\n\
+From next\r\nSubject: next\r\n\r\n",
+        MimeEventFormat::Mbox,
+        Default::default(),
+    );
+}
+
+#[test]
 fn message_bom_positions_limits_and_errors_survive_pauses() {
     let wire = b"\xef\xbb\xbfX: y\r\n\r\n\xef\xbb\xbfbody";
     let mut begins = 0;

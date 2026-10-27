@@ -7162,6 +7162,11 @@ files in `tests/data/messages` and `tests/data/mbox`. Original compliance fixtur
 in `tests/data/compliance` exercise LF/CRLF issue kinds, ordering, and positions.
 Body null/8-bit diagnostics deliberately identify the offending byte rather
 than MimeKit's buffer-dependent line-fragment start.
+Header diagnostics follow MimeKit's exact positions for the first null byte
+and first invalid UTF-8 sequence in each header, including continuation lines
+and valid multibyte sequences preceding malformed bytes. Valid RFC 6532 UTF-8
+remains accepted. Generic byte diagnostics still cover address headers until
+the address-specific compliance validators are ported.
 Additional ports cover reader content-callback ranges, physical line positions,
 empty multipart/message containers, consecutive mbox markers, and truncated
 header diagnostics. Parser cases cover truncated/raw invalid headers, bare-CR
@@ -7258,6 +7263,17 @@ content, and serialization after dropping the parser. Long markers retain their
 full bytes in reader events, not stored message headers, and exact marker-length
 limits hold across buffered and byte-fed pauses. Empty-message serialization
 stays stable through repeated reparsing. No production changes were needed.
+Further reader cases cover folded transfer-encoding value positions,
+colonless metadata records at EOF, embedded-message first-header diagnostics,
+and overlong or space-terminated multipart boundaries. The short-refill
+byte-position matrix includes malformed UTF-8, folded and nested headers,
+multiple offending bytes, EOF, and LF/CRLF input. Representative cases also
+exercise every two-way byte-fed split and one-byte feeds.
+Invalid field-name diagnostics identify non-ASCII bytes as well as controls.
+A first embedded header retains its newline when immediately followed by a
+MIME or mbox delimiter, preserving the raw record and the missing-separator
+position; a framing-only blank line still cannot create an absent message.
+Logged and unlogged reads retain identical events and final positions.
 Header-limit regressions accept an exact-sized folded header, reject one extra
 byte or an oversized field name, and verify the failing header's offset,
 including enclosing multipart/message and mbox framing, and early termination

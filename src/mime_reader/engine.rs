@@ -385,10 +385,12 @@ impl TreeParser {
                 .then(|| find_boundary(stack, line))
                 .flatten();
             // Withhold a piece so a delimiter's newline cannot become an
-            // absent message's separator. Existing headers and preambles keep theirs.
+            // absent message's separator. Only a blank pending line can be
+            // that separator; even the first header must keep its newline.
             let trim = matches!(state, State::Leaf(_) | State::Epilogue { .. })
                 || (matches!(state, State::Headers { started: false, .. })
-                    && matches!(stack.last(), Some(Frame::Message { .. })));
+                    && matches!(stack.last(), Some(Frame::Message { .. }))
+                    && matches!(pending.as_slice(), b"\n" | b"\r\n"));
             let had_pending = !pending.is_empty();
             let framing = if delimiter.is_some() && trim {
                 trim_delimiter_newline(pending)
@@ -442,10 +444,12 @@ impl TreeParser {
         let framing = if !eof
             && (matches!(state, State::Leaf(_) | State::Epilogue { .. })
                 || (matches!(state, State::Headers { started: false, .. })
-                    && matches!(stack.last(), Some(Frame::Message { .. }))))
+                    && matches!(stack.last(), Some(Frame::Message { .. }))
+                    && matches!(pending.as_slice(), b"\n" | b"\r\n")))
         {
-            // An mbox marker is an outer boundary. The preceding newline belongs
-            // to its framing, just as for MIME delimiters; EOF retains that newline.
+            // An mbox marker is an outer boundary. As with MIME delimiters,
+            // only content or an absent message's separator loses its final
+            // newline; EOF retains that newline.
             trim_delimiter_newline(pending)
         } else {
             b""

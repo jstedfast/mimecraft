@@ -260,7 +260,7 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                     // a subsequent non-blank makes the first blank invalid.
                     if matches!(byte, b' ' | b'\t') {
                         blank.get_or_insert(index);
-                    } else if blank.is_some() || byte.is_ascii_control() {
+                    } else if blank.is_some() || !byte.is_ascii() || byte.is_ascii_control() {
                         invalid = Some(blank.unwrap_or(index));
                         break;
                     }
@@ -288,13 +288,13 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                         PositionKind::LineStart,
                     )?;
                 }
-                if !null && line.contains(&0) {
+                if !null && let Some(index) = line.iter().position(|&byte| byte == 0) {
                     null = true;
                     self.issue(
                         Violation::UnexpectedNullBytesInHeader,
-                        position,
-                        1,
-                        PositionKind::LineStart,
+                        position.advance(&line[..index]),
+                        index as u64 + 1,
+                        PositionKind::Exact,
                     )?;
                 }
                 if !bare_cr
@@ -340,12 +340,16 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                     line.len() as u64 + 1
                 };
             }
-            if std::str::from_utf8(raw).is_err() {
+            // RFC 6532 permits UTF-8 in headers, so wait for the full value
+            // before reporting 8-bit bytes. Locate the first invalid sequence,
+            // not an earlier valid UTF-8 sequence or the start of the header.
+            if let Err(error) = std::str::from_utf8(raw) {
+                let (position, column) = header_byte_position(raw, start, error.valid_up_to());
                 self.issue(
                     Violation::Unexpected8BitBytesInHeader,
-                    start,
-                    1,
-                    PositionKind::ElementStart,
+                    position,
+                    column,
+                    PositionKind::Exact,
                 )?;
             }
             // An invalid raw record has no value, even if its field bytes
@@ -555,6 +559,10 @@ fn header_value_position(header: &Header, start: MimePosition) -> (MimePosition,
     // An empty value must not point into the next header: use the byte just
     // after the colon rather than the end of its whitespace.
     let index = value_start + index.unwrap_or(0);
+    header_byte_position(raw, start, index)
+}
+
+fn header_byte_position(raw: &[u8], start: MimePosition, index: usize) -> (MimePosition, u64) {
     let prefix = &raw[..index];
     let column = prefix
         .iter()
