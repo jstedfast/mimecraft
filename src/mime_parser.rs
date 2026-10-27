@@ -66,6 +66,71 @@ impl<R: BufRead> MimeParser<R> {
     }
 }
 
+impl<'a> MimeParser<&'a [u8], MimeContentStream<Cursor<&'a [u8]>>> {
+    /// Creates a parser that borrows an in-memory slice without an input buffer.
+    ///
+    /// Uses [`MimeContentStorage::Source`]: leaf bodies retain ranges in `source`
+    /// without copying their bytes. Headers, multipart framing, and the mutable
+    /// model remain owned. Bodies can be replaced with
+    /// [`MimeContentStream::Memory`] without modifying the original slice.
+    /// Use [`MimeParser::new`] with a slice instead to copy bodies into memory.
+    ///
+    /// Returned models remain readable after parser replacement or drop, but
+    /// cannot outlive `source`. [`Self::replace_source`] installs another slice.
+    /// Positions and body ranges are relative to the start of the supplied slice.
+    /// Parsing and diagnostics follow the same rules as the streaming parser.
+    ///
+    /// ```
+    /// use mimecraft::MimeParser;
+    ///
+    /// let input = b"Subject: example\r\n\r\nbody";
+    /// let mut parser = MimeParser::from_slice(input);
+    /// let mut message = parser.parse_message()?;
+    /// drop(parser);
+    /// let mut wire = Vec::new();
+    /// message.write_to(&mut wire)?;
+    /// assert_eq!(wire, input);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    ///
+    /// Borrowed bodies cannot outlive the input:
+    ///
+    /// ```compile_fail
+    /// use mimecraft::MimeParser;
+    ///
+    /// let mut message = {
+    ///     let input = b"\r\nbody".to_vec();
+    ///     MimeParser::from_slice(&input).parse_message().unwrap()
+    /// };
+    /// message.write_to(&mut Vec::new()).unwrap();
+    /// ```
+    pub fn from_slice(source: &'a [u8]) -> Self {
+        Self {
+            reader: MimeReader::new(source),
+            factory: slice_factory(&source, MimeContentStorage::Source),
+            factory_for: slice_factory,
+        }
+    }
+
+    /// Creates a slice-backed parser with explicit resource limits.
+    ///
+    /// Ownership and storage follow [`Self::from_slice`].
+    ///
+    /// # Errors
+    ///
+    /// Zero limits return `InvalidInput`.
+    pub fn from_slice_with_options(
+        source: &'a [u8],
+        options: MimeEntityParseOptions,
+    ) -> io::Result<Self> {
+        Ok(MimeParser {
+            reader: MimeReader::with_options(source, options)?,
+            factory: slice_factory(&source, MimeContentStorage::Source),
+            factory_for: slice_factory,
+        })
+    }
+}
+
 impl MimeParser<()> {
     /// Creates a parser with explicit body storage and default limits.
     ///
@@ -507,25 +572,47 @@ fn source_factory<R: Read + Seek>(
             ),
         },
         storage,
-        create: |seed, bytes, range| match seed {
-            MimeContentStream::Memory(_) => Ok(MimeContentStream::Memory(Cursor::new(bytes))),
-            MimeContentStream::Source(source) => {
-                let origin = source.start_boundary();
-                let start = origin.checked_add(range.start);
-                let end = origin.checked_add(range.end);
-                let (Some(start), Some(end)) = (start, end) else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "body source offset overflow",
-                    ));
-                };
-                Ok(MimeContentStream::Source(BoundedStream::new(
-                    source.get_ref().clone(),
-                    start,
-                    Some(end),
-                )?))
-            }
-        },
+        create: create_source_content,
+    }
+}
+
+fn slice_factory<'a>(
+    source: &&'a [u8],
+    _: MimeContentStorage,
+) -> ContentFactory<MimeContentStream<Cursor<&'a [u8]>>> {
+    let source = SharedStream::new(Cursor::new(*source)).expect("slice cursor position is valid");
+    ContentFactory {
+        seed: MimeContentStream::Source(
+            BoundedStream::new(source, 0, Some(0)).expect("empty range is valid"),
+        ),
+        storage: MimeContentStorage::Source,
+        create: create_source_content,
+    }
+}
+
+fn create_source_content<R: Read + Seek>(
+    seed: &MimeContentStream<R>,
+    bytes: Vec<u8>,
+    range: Range<u64>,
+) -> io::Result<MimeContentStream<R>> {
+    match seed {
+        MimeContentStream::Memory(_) => Ok(MimeContentStream::Memory(Cursor::new(bytes))),
+        MimeContentStream::Source(source) => {
+            let origin = source.start_boundary();
+            let start = origin.checked_add(range.start);
+            let end = origin.checked_add(range.end);
+            let (Some(start), Some(end)) = (start, end) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "body source offset overflow",
+                ));
+            };
+            Ok(MimeContentStream::Source(BoundedStream::new(
+                source.get_ref().clone(),
+                start,
+                Some(end),
+            )?))
+        }
     }
 }
 
