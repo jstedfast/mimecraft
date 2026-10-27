@@ -10,8 +10,9 @@ use std::{
 };
 
 use mimecraft::{
-    Header, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimeMessage,
-    MimeParser, MimePartWriteOptions, Multipart, encodings::NewLineFormat, io::SharedStream,
+    Header, MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityParseOptions, MimeEvent,
+    MimeMessage, MimeParser, MimePartWriteOptions, MimeReader, Multipart, encodings::NewLineFormat,
+    io::SharedStream,
 };
 
 #[test]
@@ -587,6 +588,105 @@ fn storage_loaders_preserve_header_partition_and_nested_content() {
             let mut output = Vec::new();
             message.write_to(&mut output).unwrap();
             assert_eq!(output, input);
+        }
+    }
+}
+
+#[test]
+fn parsed_message_headers_preserve_partition_indexes_and_raw_records() {
+    let input = b"Subject: outer\r\n\
+        cOnTeNt-TyPe: multipart/mixed; boundary=b\r\n\
+        sUbJeCt: duplicate\r\n\
+        Broken record\r\n\
+        X-Root: root\r\n\
+        Content-Type: text/plain\r\n\
+        Content-Vendor: extension\r\n\r\n\
+        --b\r\n\
+        Subject: wrapper\r\n\
+        Content-Type: message/rfc822\r\n\
+        X-Child: child\r\n\r\n\
+        Subject: nested\r\n\
+        Content-Type: text/plain\r\n\
+        cOnTeNt-TrAnSfEr-EnCoDiNg: 7bit\r\n\
+        X-Nested: nested\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n\
+        inner\r\n--b--\r\n";
+    for chunk in [1, 7, 4096] {
+        let mut reader = MimeReader::new(BufReader::with_capacity(chunk, input.as_slice()));
+        let mut counts = Vec::new();
+        reader
+            .read_message(|event| {
+                if let MimeEvent::EntityBegin { headers, .. } = event {
+                    // Reader callbacks still receive complete, indexed blocks.
+                    assert!(headers.get("SUBJECT").is_some());
+                    assert!(headers.get("content-type").is_some());
+                    counts.push(headers.len());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(counts, [7, 3, 5]);
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            for logged in [false, true] {
+                let (source, _) = Source::new(input.as_slice(), chunk);
+                let mut parser = MimeParser::with_storage(source, storage).unwrap();
+                let mut message = if logged {
+                    parser.parse_message_with_logger(&mut |_| Ok(())).unwrap()
+                } else {
+                    parser.parse_message().unwrap()
+                };
+                assert_eq!(
+                    message
+                        .headers()
+                        .iter()
+                        .map(Header::field)
+                        .collect::<Vec<_>>(),
+                    [Some("Subject"), Some("sUbJeCt"), None, Some("X-Root")]
+                );
+                assert_eq!(
+                    message.headers().get("SUBJECT").unwrap().raw_value(),
+                    b" outer\r\n"
+                );
+                let body = message.body().unwrap();
+                assert_eq!(
+                    body.headers().iter().map(Header::field).collect::<Vec<_>>(),
+                    [
+                        Some("cOnTeNt-TyPe"),
+                        Some("Content-Type"),
+                        Some("Content-Vendor")
+                    ]
+                );
+                for header in message.headers().iter().chain(body.headers()) {
+                    let offset = header.offset().unwrap() as usize;
+                    assert_eq!(&input[offset..offset + header.raw().len()], header.raw());
+                }
+                let MimeEntity::Multipart(multipart) = body else {
+                    panic!("expected multipart");
+                };
+                let MimeEntity::Message(wrapper) = &multipart.children()[0] else {
+                    panic!("expected message wrapper");
+                };
+                assert_eq!(wrapper.headers().len(), 3);
+                assert_eq!(
+                    wrapper.headers().get("Subject").unwrap().raw_value(),
+                    b" wrapper\r\n"
+                );
+                let nested = wrapper.message().unwrap();
+                assert_eq!(nested.headers().len(), 2);
+                assert!(!nested.headers().contains("Content-Type"));
+                let MimeEntity::Part(leaf) = nested.body().unwrap() else {
+                    panic!("expected nested leaf");
+                };
+                assert_eq!(leaf.headers().len(), 3);
+                assert!(!leaf.headers().contains("Subject"));
+                assert_eq!(
+                    leaf.content().encoding(),
+                    mimecraft::ContentEncoding::SevenBit
+                );
+                let mut output = Vec::new();
+                message.write_to(&mut output).unwrap();
+                assert_eq!(output, input, "{storage:?}/{chunk}/{logged}");
+            }
         }
     }
 }

@@ -99,6 +99,22 @@ impl<'a, L: MimeComplianceLogger + ?Sized> Reporting<'a, L> {
     }
 
     #[inline]
+    pub(crate) fn entity_begin<F: crate::mime_reader::EventSink>(
+        &mut self,
+        callback: &mut F,
+        headers: Vec<Header>,
+        kind: MimeEntityKind,
+        encoding: ContentEncoding,
+        position: MimePosition,
+        headers_end: MimePosition,
+    ) -> io::Result<()> {
+        if let Some(active) = self.0.as_mut() {
+            active.entity_begin(kind, encoding, headers_end);
+        }
+        callback.entity_begin(headers, kind, encoding, position, headers_end)
+    }
+
+    #[inline]
     pub(crate) fn content(&mut self, bytes: &[u8], position: MimePosition) -> io::Result<()> {
         if !bytes.is_empty()
             && let Some(active) = self.0.as_mut()
@@ -142,13 +158,7 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                 encoding,
                 headers_end,
                 ..
-            } => {
-                let mut body = Body::new(*encoding, *headers_end);
-                if *kind == MimeEntityKind::Part {
-                    body.validator = EncodingValidator::new(*encoding, self.options, *headers_end);
-                }
-                self.bodies.push(body);
-            }
+            } => self.entity_begin(*kind, *encoding, *headers_end),
             MimeEvent::Content {
                 bytes, position, ..
             } => self.content(bytes, *position, true)?,
@@ -159,6 +169,19 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn entity_begin(
+        &mut self,
+        kind: MimeEntityKind,
+        encoding: ContentEncoding,
+        headers_end: MimePosition,
+    ) {
+        let mut body = Body::new(encoding, headers_end);
+        if kind == MimeEntityKind::Part {
+            body.validator = EncodingValidator::new(encoding, self.options, headers_end);
+        }
+        self.bodies.push(body);
     }
 
     fn issue(

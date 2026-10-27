@@ -1065,7 +1065,13 @@ impl<R> MimePart<R> {
 pub(crate) fn transfer_encoding(
     headers: &HeaderList,
 ) -> Result<ContentEncoding, UnknownContentEncoding> {
-    match headers.get("content-transfer-encoding") {
+    transfer_encoding_from_header(headers.get("content-transfer-encoding"))
+}
+
+pub(crate) fn transfer_encoding_from_header(
+    header: Option<&Header>,
+) -> Result<ContentEncoding, UnknownContentEncoding> {
+    match header {
         Some(header) => ContentEncoding::parse(&header.decode_value().text),
         None => Ok(ContentEncoding::Unspecified),
     }

@@ -5,9 +5,9 @@ use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
 use std::ops::Range;
 
 use crate::{
-    ContentEncoding, HeaderList, MessagePart, MimeContent, MimeContentKind, MimeContentStorage,
-    MimeContentStream, MimeEntity, MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeMessage,
-    MimePart, MimePosition, MimeReader, Multipart,
+    ContentEncoding, Header, HeaderList, MessagePart, MimeContent, MimeContentKind,
+    MimeContentStorage, MimeContentStream, MimeEntity, MimeEntityKind, MimeEntityParseOptions,
+    MimeEvent, MimeMessage, MimePart, MimePosition, MimeReader, Multipart,
     io::{BoundedStream, SharedStream},
 };
 
@@ -559,7 +559,10 @@ enum Frame<C> {
         parsed: crate::mime_entity::ParsedEntity,
         headers_end: MimePosition,
     },
-    Message(Option<MimeEntity<C>>),
+    Message {
+        headers: HeaderList,
+        body: Option<MimeEntity<C>>,
+    },
 }
 
 enum Content<C> {
@@ -578,6 +581,65 @@ enum Content<C> {
 }
 
 impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
+    fn entity_begin(
+        &mut self,
+        headers: Vec<Header>,
+        kind: MimeEntityKind,
+        encoding: ContentEncoding,
+        _position: MimePosition,
+        headers_end: MimePosition,
+    ) -> io::Result<()> {
+        let headers = if let Some(Frame::Message {
+            headers: message_headers,
+            ..
+        }) = self.stack.last_mut()
+        {
+            // Like MimeKit's message and entity constructors, count Content-*
+            // headers so both final HeaderLists have the correct capacity.
+            // Ordinary child entities retain every header without partitioning.
+            let content_count = headers
+                .iter()
+                .filter(|header| header.is_content_header())
+                .count();
+            *message_headers = HeaderList::with_capacity(headers.len() - content_count);
+            let mut content_headers = HeaderList::with_capacity(content_count);
+            for header in headers {
+                if header.is_content_header() {
+                    content_headers.add(header);
+                } else {
+                    message_headers.add(header);
+                }
+            }
+            content_headers
+        } else {
+            HeaderList::from(headers)
+        };
+        self.stack.push(Frame::Entity {
+            headers,
+            headers_end,
+            encoding,
+            parsed: crate::mime_entity::ParsedEntity {
+                body_separator: self.body_separator,
+                no_content: false,
+            },
+            content: match kind {
+                MimeEntityKind::Part => Content::Part {
+                    bytes: Vec::new(),
+                    length: 0,
+                },
+                MimeEntityKind::Multipart => Content::Multipart {
+                    children: Vec::new(),
+                    preamble: Vec::new(),
+                    epilogue: Vec::new(),
+                    framing: Default::default(),
+                    boundary_end: 0,
+                },
+                MimeEntityKind::MessagePart => Content::MessagePart(None),
+            },
+        });
+        Ok(())
+    }
+
     fn end_boundary(&mut self, position: Option<MimePosition>) {
         self.end_boundary = position;
     }
@@ -623,41 +685,13 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
     fn event(&mut self, event: MimeEvent<'_>) -> io::Result<()> {
         match event {
             MimeEvent::MboxMarker { .. } => {}
-            MimeEvent::Headers { .. } => {
-                unreachable!("tree construction does not read standalone headers");
+            MimeEvent::Headers { .. } | MimeEvent::EntityBegin { .. } => {
+                unreachable!("tree construction receives plain entity headers");
             }
-            MimeEvent::MessageBegin { .. } => self.stack.push(Frame::Message(None)),
-            MimeEvent::EntityBegin {
-                headers,
-                kind,
-                encoding,
-                headers_end,
-                ..
-            } => {
-                self.stack.push(Frame::Entity {
-                    headers,
-                    headers_end,
-                    encoding,
-                    parsed: crate::mime_entity::ParsedEntity {
-                        body_separator: self.body_separator,
-                        no_content: false,
-                    },
-                    content: match kind {
-                        MimeEntityKind::Part => Content::Part {
-                            bytes: Vec::new(),
-                            length: 0,
-                        },
-                        MimeEntityKind::Multipart => Content::Multipart {
-                            children: Vec::new(),
-                            preamble: Vec::new(),
-                            epilogue: Vec::new(),
-                            framing: Default::default(),
-                            boundary_end: 0,
-                        },
-                        MimeEntityKind::MessagePart => Content::MessagePart(None),
-                    },
-                });
-            }
+            MimeEvent::MessageBegin { .. } => self.stack.push(Frame::Message {
+                headers: HeaderList::new(),
+                body: None,
+            }),
             MimeEvent::Content {
                 kind,
                 bytes,
@@ -812,16 +846,20 @@ impl<C: Read + Seek> crate::mime_reader::EventSink for Builder<'_, C> {
                         content: Content::Multipart { children, .. },
                         ..
                     }) => children.push(entity),
-                    Some(Frame::Message(body)) => *body = Some(entity),
+                    Some(Frame::Message { body, .. }) => *body = Some(entity),
                     None => self.entity = Some(entity),
                     _ => unreachable!("entity belongs to a multipart, message, or root"),
                 }
             }
             MimeEvent::MessageEnd { .. } => {
-                let Some(Frame::Message(Some(body))) = self.stack.pop() else {
+                let Some(Frame::Message {
+                    headers,
+                    body: Some(body),
+                }) = self.stack.pop()
+                else {
                     unreachable!("a complete message contains its root entity");
                 };
-                let message = MimeMessage::from_loaded_entity(body);
+                let message = MimeMessage::from_parts(headers, Some(body));
                 match self.stack.last_mut() {
                     Some(Frame::Entity {
                         content: Content::MessagePart(slot),

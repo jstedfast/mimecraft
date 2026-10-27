@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    ContentEncoding, HeaderList, HeaderParser, MimeComplianceLogger, MimeComplianceOptions,
+    ContentEncoding, Header, HeaderList, HeaderParser, MimeComplianceLogger, MimeComplianceOptions,
     encodings::NewLineFormat, mime_compliance::Reporting,
 };
 
@@ -213,6 +213,25 @@ pub struct MimeReader<R> {
 // Closure readers do not retain delimiters or allocate a second input buffer.
 pub(crate) trait EventSink {
     fn event(&mut self, event: MimeEvent<'_>) -> io::Result<()>;
+
+    // Builders partition plain records before indexing. Public reader events
+    // still expose a complete HeaderList for each entity.
+    fn entity_begin(
+        &mut self,
+        headers: Vec<Header>,
+        kind: MimeEntityKind,
+        encoding: ContentEncoding,
+        position: MimePosition,
+        headers_end: MimePosition,
+    ) -> io::Result<()> {
+        self.event(MimeEvent::EntityBegin {
+            headers: headers.into(),
+            kind,
+            encoding,
+            position,
+            headers_end,
+        })
+    }
 
     fn body_separator(&mut self, _present: bool) {}
 

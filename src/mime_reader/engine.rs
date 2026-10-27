@@ -4,9 +4,9 @@
 use std::{io, num::NonZeroUsize};
 
 use crate::{
-    ContentEncoding, Header, HeaderList, HeaderParser, MimeComplianceLogger, MimeContentKind,
+    ContentEncoding, Header, HeaderId, HeaderParser, MimeComplianceLogger, MimeContentKind,
     MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimePosition, encodings::NewLineFormat,
-    mime_part::transfer_encoding,
+    mime_part::transfer_encoding_from_header,
 };
 
 use super::{EventSink, scan};
@@ -594,7 +594,7 @@ fn complete_headers<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     check_depth(stack.len(), options, *start)?;
     callback.body_separator(parser.body_separator().is_some());
     *state = start_entity(
-        HeaderList::from(std::mem::take(headers)),
+        std::mem::take(headers),
         *start,
         end,
         stack,
@@ -652,7 +652,7 @@ fn consume_line<F: EventSink, L: MimeComplianceLogger + ?Sized>(
                 )?;
                 callback.body_separator(parser.body_separator().is_some());
                 *state = start_entity(
-                    HeaderList::from(std::mem::take(headers)),
+                    std::mem::take(headers),
                     *start,
                     position.advance(line),
                     stack,
@@ -712,7 +712,7 @@ fn emit_content<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     Ok(())
 }
 
-fn content_length(headers: &HeaderList) -> Option<u64> {
+fn content_length(headers: &[Header]) -> Option<u64> {
     headers
         .iter()
         .filter(|header| !header.is_invalid() && header.id() == crate::HeaderId::ContentLength)
@@ -738,7 +738,7 @@ fn content_length(headers: &HeaderList) -> Option<u64> {
 }
 
 fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
-    headers: HeaderList,
+    headers: Vec<Header>,
     position: MimePosition,
     headers_end: MimePosition,
     stack: &mut Vec<Frame>,
@@ -761,11 +761,7 @@ fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     if stack.is_empty() {
         // Before the first valid header, MimeKit permits only (munged) mbox
         // From-lines. A file containing ordinary garbage is not a MIME entity.
-        for header in headers
-            .as_slice()
-            .iter()
-            .take_while(|header| header.is_invalid())
-        {
+        for header in headers.iter().take_while(|header| header.is_invalid()) {
             if !options.message
                 || (!header.raw().starts_with(b"From ") && !header.raw().starts_with(b">From "))
             {
@@ -777,12 +773,18 @@ fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
         }
     }
     let content_type = headers
-        .get("content-type")
+        .iter()
+        .find(|header| header.id() == HeaderId::ContentType)
         .filter(|header| !header.is_invalid())
         .map(|header| crate::ContentType::parse_for_reader(header.raw_value()).0);
     // The logger has already reported an unknown encoding at its value's
     // position. Like MimeKit, retain the bytes and use the unspecified encoding.
-    let encoding = transfer_encoding(&headers).unwrap_or(ContentEncoding::Unspecified);
+    let encoding = transfer_encoding_from_header(
+        headers
+            .iter()
+            .find(|header| header.id() == HeaderId::ContentTransferEncoding),
+    )
+    .unwrap_or(ContentEncoding::Unspecified);
     if content_type
         .as_ref()
         .is_some_and(|value| value.is_mime_type("multipart", "*"))
@@ -797,15 +799,13 @@ fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
             .as_ref()
             .and_then(|value| value.boundary())
             .map(str::to_owned);
-        options.reporting.emit(
+        options.reporting.entity_begin(
             callback,
-            MimeEvent::EntityBegin {
-                headers,
-                kind: MimeEntityKind::Multipart,
-                encoding,
-                position,
-                headers_end,
-            },
+            headers,
+            MimeEntityKind::Multipart,
+            encoding,
+            position,
+            headers_end,
         )?;
         stack.push(Frame::Multipart {
             boundary,
@@ -837,19 +837,17 @@ fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
                     | ContentEncoding::EightBit
                     | ContentEncoding::Binary
             );
-        options.reporting.emit(
+        options.reporting.entity_begin(
             callback,
-            MimeEvent::EntityBegin {
-                headers,
-                kind: if structured {
-                    MimeEntityKind::MessagePart
-                } else {
-                    MimeEntityKind::Part
-                },
-                encoding,
-                position,
-                headers_end,
+            headers,
+            if structured {
+                MimeEntityKind::MessagePart
+            } else {
+                MimeEntityKind::Part
             },
+            encoding,
+            position,
+            headers_end,
         )?;
         if structured {
             stack.push(Frame::Message { begun: false });

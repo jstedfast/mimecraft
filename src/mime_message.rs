@@ -1847,24 +1847,6 @@ impl MimeMessage {
     }
 }
 
-impl<R> MimeMessage<R> {
-    pub(crate) fn from_loaded_entity(mut body: MimeEntity<R>) -> Self {
-        let mut headers = HeaderList::new();
-        let mut content_headers = HeaderList::new();
-        // Only a message root splits Content-* fields into its body.
-        // Ordinary descendant entities retain all of their headers.
-        for header in std::mem::take(body.headers_mut()) {
-            if header.is_content_header() {
-                content_headers.add(header);
-            } else {
-                headers.add(header);
-            }
-        }
-        *body.headers_mut() = content_headers;
-        Self::from_parts(headers, Some(body))
-    }
-}
-
 impl<R: Read + Seek> MimeMessage<R> {
     /// Reads the body in a requested format, or returns `None` when absent.
     ///
