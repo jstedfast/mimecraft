@@ -7208,6 +7208,19 @@ and serialization after dropping the parser across buffered/storage/slice and
 logging variants. Mixed-newline bodies keep their `Mixed` hint and original
 decoded text even after repeated Unix/DOS output normalization; unlike
 MimeKit's Text getter, Rust does not normalize newlines when reading text.
+Five structure-preservation cases cover CR-only invalid header lines, empty
+multipart alternatives, textual multipart epilogues, badly folded Exchange
+diagnostic headers, and header-only messages with no body. They check header
+offsets, container/leaf topology, and stable output through three reparses,
+using Unix/DOS output, fragmented reads, default/Memory/Source storage, direct
+slices, and logging. Models remain usable after their parsers are dropped.
+The CR-only fuzzer cases retain MimeKit's rationale and verify that invalid
+records never become header/body separators or lose carriage returns.
+Fixture round trips preserve the complete wire input; empty alternatives
+keep their following sibling and its content,
+and epilogue bytes remain separate from the closing delimiter's newline.
+Parsed delimiter lines retain their original endings, so ordinary fixtures
+use matching input/output newlines; the CR-only cases also exercise conversion.
 Further upstream parser regressions cover folded recipient headers with 1,
 100, and 50,000 addresses, preserving raw folds and following-header offsets;
 Japanese ISO-2022-JP subject/body decoding; and unmunged mbox `From ` lines.

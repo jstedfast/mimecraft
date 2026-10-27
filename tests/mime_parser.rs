@@ -6,7 +6,10 @@ use mimecraft::{
     MimeEntityParseOptions, MimeEvent, MimeMessage, MimeParser, MimePartWriteOptions, MimePosition,
     MimeReader, TextFormat, encodings::NewLineFormat,
 };
-use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
+use std::{
+    fmt::Write as _,
+    io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom},
+};
 
 #[derive(Debug)]
 struct ShortSource<R> {
@@ -1091,6 +1094,341 @@ fn header_parser() {
             );
         }
     }
+}
+
+#[test]
+fn carriage_return_only_header_line_round_trip() {
+    // A line made up of nothing but carriage returns is an invalid header,
+    // not the blank line ending the header block. These fuzzer-found inputs
+    // used to change structure on each round trip because the newline filter
+    // stripped one of those CRs at a time.
+    for (index, input) in [
+        "Content-Type: message/rfc822\n\r\r\nContent-Type: multipart/mixed; boundary=x\n\n\n--x\n\r",
+        "Content-Type: multipart/mixed; boundary=x\n\n--x\nContent-Type: text/plain\n\r\r\r\nX-Header: value\n\nbody\n--x--\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_structure_round_trips(input, StructureCase::CarriageReturns(index));
+    }
+}
+
+#[test]
+fn empty_multipart_alternative() {
+    assert_structure_round_trips(
+        include_str!("data/messages/empty-multipart.txt"),
+        StructureCase::EmptyAlternative,
+    );
+}
+
+#[test]
+fn multipart_epilogue_with_text() {
+    assert_structure_round_trips(
+        include_str!("data/messages/epilogue.txt"),
+        StructureCase::Epilogue,
+    );
+}
+
+#[test]
+fn issue358() {
+    // This message has a badly folded x-microsoft-exchange-diagnostics value.
+    // MimeKit's older parser mistook an already-full read-ahead buffer for EOF
+    // and aborted header parsing. The MIME headers and body must still be read.
+    assert_structure_round_trips(
+        include_str!("data/messages/issue358.txt"),
+        StructureCase::BadFold,
+    );
+}
+
+#[test]
+fn missing_message_body() {
+    assert_structure_round_trips(
+        concat!(
+            "Date: Sat, 19 Apr 2014 13:13:23 -0700\r\n",
+            "From: Jeffrey Stedfast <notifications@github.com>\r\n",
+            "Subject: Re: [MimeKit] Allow parsing of message with 0 byte body. (#51)\r\n",
+        ),
+        StructureCase::MissingBody,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum StructureCase {
+    CarriageReturns(usize),
+    EmptyAlternative,
+    Epilogue,
+    BadFold,
+    MissingBody,
+}
+
+fn assert_structure_round_trips(original: &str, case: StructureCase) {
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        // Parsed delimiter lines retain their original newlines. Normalize
+        // fixture input, not those retained markers, for each output format.
+        // Leave the CR-only fuzzer inputs untouched before their first parse.
+        let input = if matches!(case, StructureCase::CarriageReturns(_)) {
+            original.to_owned()
+        } else {
+            let newline = if format == NewLineFormat::Dos {
+                "\r\n"
+            } else {
+                "\n"
+            };
+            original.replace("\r\n", "\n").replace('\n', newline)
+        };
+        for logged in [false, true] {
+            assert_stable_structure(&input, |input| {
+                let message =
+                    parse_recovery_message(MimeParser::from_slice(input.as_bytes()), input, logged);
+                serialize_structure_case(message, input, case, format)
+            });
+            for chunk in [1, 7, 4096] {
+                assert_stable_structure(&input, |input| {
+                    let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                    let message = parse_recovery_message(parser, input, logged);
+                    serialize_structure_case(message, input, case, format)
+                });
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    assert_stable_structure(&input, |input| {
+                        let parser = MimeParser::with_storage(
+                            ShortSource {
+                                inner: Cursor::new(input.as_bytes()),
+                                chunk,
+                            },
+                            storage,
+                        )
+                        .unwrap();
+                        let message = parse_recovery_message(parser, input, logged);
+                        serialize_structure_case(message, input, case, format)
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn assert_stable_structure(original: &str, mut round_trip: impl FnMut(&str) -> (String, Vec<u8>)) {
+    let mut input = original.to_owned();
+    let mut expected = None;
+    for round in 0..=3 {
+        let (structure, output) = round_trip(&input);
+        if let Some(expected) = &expected {
+            assert_eq!(&structure, expected, "structure changed on reparse {round}");
+            assert_round_trip(
+                &format!("output changed after reparse {round}"),
+                input.as_bytes(),
+                &output,
+            );
+        } else {
+            expected = Some(structure);
+        }
+        input = String::from_utf8(output).unwrap();
+    }
+}
+
+fn describe_structure<R>(message: &MimeMessage<R>) -> String {
+    let mut output = format!("message headers={}\n", message.headers().len());
+    let mut iter = message.iter();
+    while let Some(entity) = iter.next() {
+        let indent = "  ".repeat(iter.depth().unwrap());
+        let content_type = entity
+            .headers()
+            .get("Content-Type")
+            .map(|header| header.parse_content_type().unwrap());
+        // MimeKit materializes the default text/plain Content-Type. The Rust
+        // model leaves it absent; describe that same implicit leaf type here.
+        let mime_type =
+            content_type.map_or_else(|| "text/plain".to_owned(), |value| value.mime_type());
+        writeln!(
+            output,
+            "{indent}{mime_type} headers={}",
+            entity.headers().len()
+        )
+        .unwrap();
+        if let MimeEntity::Message(part) = entity
+            && let Some(message) = part.message()
+        {
+            writeln!(
+                output,
+                "{indent}  message headers={}",
+                message.headers().len()
+            )
+            .unwrap();
+        }
+    }
+    output
+}
+
+fn serialize_structure_case<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    case: StructureCase,
+    format: NewLineFormat,
+) -> (String, Vec<u8>) {
+    let structure = describe_structure(&message);
+    for headers in std::iter::once(message.headers()).chain(message.iter().map(MimeEntity::headers))
+    {
+        for header in headers {
+            let offset = header.offset().unwrap() as usize;
+            assert_eq!(
+                header.raw(),
+                &input.as_bytes()[offset..offset + header.raw().len()]
+            );
+        }
+    }
+    match case {
+        StructureCase::CarriageReturns(0) => {
+            assert_eq!(
+                structure,
+                "message headers=1\nmessage/rfc822 headers=2\n  message headers=0\n  text/plain headers=0\n"
+            );
+            let invalid = &message.headers().as_slice()[0];
+            assert!(invalid.is_invalid());
+            assert_eq!(invalid.raw(), b"\r\r\n");
+            let MimeEntity::Message(wrapper) = message.body().unwrap() else {
+                panic!("expected message/rfc822 wrapper")
+            };
+            assert!(matches!(
+                wrapper.message().unwrap().body(),
+                Some(MimeEntity::Part(_))
+            ));
+        }
+        StructureCase::CarriageReturns(_) => {
+            assert_eq!(
+                structure,
+                "message headers=0\nmultipart/mixed headers=1\n  text/plain headers=3\n"
+            );
+            let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+                panic!("expected multipart/mixed")
+            };
+            let MimeEntity::Part(part) = &multipart.children()[0] else {
+                panic!("expected text/plain child")
+            };
+            let invalid = &part.headers().as_slice()[1];
+            assert!(invalid.is_invalid());
+            assert_eq!(invalid.raw(), b"\r\r\r\n");
+            assert_eq!(
+                part.headers().get("X-Header").unwrap().decode_value().text,
+                "value"
+            );
+        }
+        StructureCase::EmptyAlternative => {
+            assert_eq!(
+                structure,
+                "message headers=7\nmultipart/mixed headers=1\n  multipart/alternative headers=1\n  text/plain headers=1\n"
+            );
+            let MimeEntity::Multipart(outer) = message.body().unwrap() else {
+                panic!("expected multipart/mixed")
+            };
+            assert_eq!(outer.children().len(), 2);
+            let MimeEntity::Multipart(alternative) = &outer.children()[0] else {
+                panic!("expected multipart/alternative")
+            };
+            assert!(alternative.children().is_empty());
+            assert!(matches!(&outer.children()[1], MimeEntity::Part(_)));
+        }
+        StructureCase::Epilogue => {
+            let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+                panic!("expected multipart/mixed")
+            };
+            assert_eq!(multipart.children().len(), 2);
+            let expected = concat!(
+                "Peter Urka <pcu@umich.edu>\n",
+                "Dept. of Chemistry, Univ. of Michigan\n",
+                "Newt-thought is right-thought.  Go Newt!\n\n",
+            );
+            assert_eq!(
+                multipart.epilogue_text().unwrap().replace("\r\n", "\n"),
+                expected
+            );
+            // MimeKit's RawEpilogue includes the closing delimiter's newline.
+            // Rust stores that newline with the delimiter, not the epilogue.
+            assert!(multipart.epilogue().starts_with(b"Peter Urka"));
+            assert_eq!(
+                multipart.epilogue(),
+                &input.as_bytes()[input.rfind("Peter Urka <pcu@umich.edu>").unwrap()..]
+            );
+        }
+        StructureCase::BadFold => {
+            // Make sure the top-level MIME part is multipart/alternative.
+            let MimeEntity::Multipart(multipart) = message.body().unwrap() else {
+                panic!("expected multipart/alternative")
+            };
+            assert!(
+                multipart
+                    .content_type()
+                    .unwrap()
+                    .unwrap()
+                    .is_mime_type("multipart", "alternative")
+            );
+            assert_eq!(multipart.children().len(), 2);
+            for (child, subtype) in multipart.children().iter().zip(["plain", "html"]) {
+                let MimeEntity::Part(part) = child else {
+                    panic!("expected text/{subtype} child")
+                };
+                assert!(
+                    part.content_type()
+                        .unwrap()
+                        .unwrap()
+                        .is_mime_type("text", subtype)
+                );
+            }
+            let headers = message.headers().as_slice();
+            let index = headers
+                .iter()
+                .position(|header| header.matches_field("x-microsoft-exchange-diagnostics"))
+                .unwrap();
+            let invalid = &headers[index + 1];
+            assert!(invalid.is_invalid());
+            assert_eq!(
+                invalid.offset(),
+                Some(headers[index].offset().unwrap() + headers[index].raw().len() as u64)
+            );
+            assert!(message.headers().contains("X-Antivirus-Status"));
+        }
+        StructureCase::MissingBody => {
+            assert_eq!(structure, "message headers=3\ntext/plain headers=0\n");
+            assert!(matches!(message.body(), Some(MimeEntity::Part(_))));
+        }
+    }
+    let mut output = Vec::new();
+    message
+        .write_to_with_options(
+            &mut output,
+            &MimePartWriteOptions {
+                new_line_format: format,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    if !matches!(case, StructureCase::CarriageReturns(_)) {
+        assert_round_trip("structure fixture", input.as_bytes(), &output);
+    }
+    // Mutable body access discards parsed framing; inspect content only after
+    // verifying serialization of the unchanged model.
+    if matches!(case, StructureCase::EmptyAlternative) {
+        let MimeEntity::Multipart(multipart) = message.body_mut().unwrap() else {
+            unreachable!()
+        };
+        let MimeEntity::Part(part) = &mut multipart.children_mut()[1] else {
+            unreachable!()
+        };
+        let mut decoded = Vec::new();
+        part.content_mut().decode_to(&mut decoded).unwrap();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap().replace("\r\n", "\n"),
+            "This part should be on the same level as the multipart/alternative and not a child.\n"
+        );
+    }
+    if matches!(case, StructureCase::MissingBody) {
+        let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+            unreachable!()
+        };
+        let mut decoded = Vec::new();
+        part.content_mut().decode_to(&mut decoded).unwrap();
+        assert!(decoded.is_empty());
+    }
+    (structure, output)
 }
 
 #[test]
