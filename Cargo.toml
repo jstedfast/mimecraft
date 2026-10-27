@@ -7,11 +7,13 @@ license = "MIT AND Unicode-3.0"
 publish = false
 
 [dependencies]
+criterion = { version = "0.8.2", default-features = false, optional = true }
 encoding_rs = "0.8"
 fluent-uri = "0.4"
 getrandom = "0.4"
 idna = "1.1"
 memchr = "2"
+metabench = { version = "0.2.1", optional = true }
 unicode-general-category = "1.1"
 
 [dev-dependencies]
@@ -21,6 +23,7 @@ serde_json = "1"
 [features]
 default = ["simd"]
 simd = []
+bench-metabench = ["dep:criterion", "dep:metabench"]
 
 [profile.release]
 lto = "fat"
@@ -33,3 +36,13 @@ harness = false
 [[bench]]
 name = "mime_reader"
 harness = false
+
+[[bench]]
+name = "base64_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
+name = "mime_reader_metabench"
+harness = false
+required-features = ["bench-metabench"]

@@ -8171,14 +8171,17 @@ Content-Length-aware parsing mode. Nesting generators preserve the upstream
 wire format; only those cases raise the depth limit to include the final leaf.
 
 Each parser workload reports the original `MimeParser_*` default-copying
-baseline plus a `MimeParser_Source_*` variant. The source-backed variant uses
-the explicit-storage constructor with borrowed seekable `Cursor` input,
-including shared-source setup in its timing. Both use the same fixture bytes
-without cloning the input. Reader baselines
-remain `MimeReader_*`; the 1,000-level reader-only workload stays reader-only.
+baseline plus `MimeParser_Source_*` and `MimeParser_Slice_*` variants. The
+buffered source-backed variant uses the explicit-storage constructor with
+borrowed seekable `Cursor` input; the slice variant uses `from_slice_with_options`
+without an input staging buffer. Both include shared-source setup in their
+timing and retain body ranges without cloning the input. Reader baselines
+remain `MimeReader_*`, with `MimeReader_Slice_*` passing the fixture slice
+directly to the reader. The 1,000-level workload stays reader-only.
 
 Fixtures are loaded/generated outside timing. Each iteration creates a fresh
-4 KiB buffered in-memory source and reader/parser; reader callbacks do no work,
+reader/parser; buffered variants use a 4 KiB input buffer, while slice variants
+read directly from the fixture. Reader callbacks do no work,
 and parser timing includes source setup, model construction, and drop.
 Bodies are not read or decoded after parsing: `Source` measures scanning and
 retaining body ranges, whereas `Memory` also copies encoded bodies. Each mbox
@@ -8189,6 +8192,67 @@ samples of at least 100 ms report median input MiB/s and messages/s. The existin
 timing harness is retained; it does not reproduce BenchmarkDotNet's allocation
 diagnostics or statistical machinery. Async and
 LegacyMimeParser variants are not included.
+
+#### Optional metabench targets
+
+The original `base64` and `mime_reader` targets remain available without any
+benchmark framework. Separate `base64_metabench` and `mime_reader_metabench`
+targets are enabled by `--features bench-metabench`; their optional dependencies
+are not compiled by ordinary library builds or the original benchmark commands.
+Both harnesses use the same fixtures, generators, and operations under
+`benches/support`, covering all 21 Base64 and 27 MIME cases.
+The MIME metabench target also includes six `headers/HeaderList_Get` cases:
+lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
+lookups. Header lists are prepared outside measurement; each operation performs
+1,000 lookups without constructing or parsing headers.
+
+```text
+cargo bench --features bench-metabench --bench mime_reader_metabench -- --criterion
+cargo bench --features bench-metabench --bench mime_reader_metabench -- --allocations
+cargo bench --features bench-metabench --bench base64_metabench -- --allocations
+cargo bench --features bench-metabench --bench base64_metabench --bench mime_reader_metabench -- --test
+```
+
+Criterion timing and allocation tracking work on Windows as well as Linux.
+Instruction counting uses Gungraun/Callgrind and requires Linux (including WSL),
+Valgrind, and the runner version matching metabench's locked Gungraun dependency:
+
+```text
+cargo install gungraun-runner --version 0.19.4 --locked
+cargo bench --features bench-metabench --bench mime_reader_metabench -- --gungraun
+cargo bench --features bench-metabench --bench base64_metabench -- --gungraun
+```
+
+Install Valgrind using the Linux distribution's package manager. In WSL, use
+Linux Rust and a Linux build, not a Windows benchmark executable. Keep compiler
+flags and features fixed for comparisons; `--no-default-features` selects the
+library's scalar paths. The local `.cargo/config.toml` may select CPU instructions
+unsupported by the installed Valgrind. In that case explicitly use
+`RUSTFLAGS="-C target-cpu=x86-64"` for both builds on x86-64 Linux; do not compare
+against a baseline built with different flags. Instruction counts complement
+throughput measurements, rather than predicting elapsed time or guaranteeing
+identical counts across compilers, CPUs, SIMD dispatch, and allocators.
+
+Native cases and Criterion registrations use matching identities. Fixture I/O,
+generation, correctness checks, and reusable Base64 output allocation occur
+outside measurement. MIME measurements still include fresh reader/source setup,
+model construction and destruction; source-backed bodies are not decoded.
+The metabench allocator adds a tracking-flag check even when not collecting
+allocations, and workload entry points are non-inlined. Compare metabench results
+against other metabench runs, not absolute timings from the original harness.
+
+For a focused allocation run, append a Criterion-style name filter:
+
+```text
+cargo bench --features bench-metabench --bench mime_reader_metabench -- --allocations --criterion-arg StarTrekMessage
+```
+
+Gungraun accepts its own filter via `--gungraun-arg`; use `--gungraun --list`
+to inspect native names. `--test` is a smoke run, not a performance measurement.
+Reports are written under `target/metabench/<target>/`; preserve a report and
+select it with `--baseline <report.json>` for an explicit comparison. The previous
+report is otherwise the automatic baseline. Use separate output paths with
+`--output <path>` for engine/feature configurations you want to retain.
 
 These are cached in-memory workloads without decoding, storage, network I/O,
 or application processing. Results are not a throughput guarantee or a direct
