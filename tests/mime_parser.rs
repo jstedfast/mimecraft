@@ -1333,6 +1333,304 @@ fn assert_leading_garbage_error<R: BufRead, C: Read + Seek>(
 }
 
 #[test]
+fn invalid_header_after_mbox_marker() {
+    for input in [
+        "From - \nThis is not a header\nSubject: test\n\nbody\n",
+        "From - \n>From munged\nThis is not a header\n",
+    ] {
+        assert_leading_garbage(input, true);
+    }
+}
+
+#[test]
+fn message_stream_with_only_mbox_markers() {
+    for (input, mbox) in [
+        ("From sender@example.com Mon Jan  1 00:00:00 2024", false),
+        ("From sender@example.com Mon Jan  1 00:00:00 2024\n", false),
+        (
+            concat!(
+                "From sender@example.com Mon Jan  1 00:00:00 2024\n",
+                ">From sender@example.com Mon Jan  1 00:00:00 2024\n",
+            ),
+            false,
+        ),
+        (
+            concat!(
+                "From sender@example.com Mon Jan  1 00:00:00 2024\n",
+                ">From sender@example.com Mon Jan  1 00:00:00 2024",
+            ),
+            true,
+        ),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let input = input.replace('\n', newline);
+            assert_marker_eof(input.as_bytes(), mbox);
+        }
+    }
+}
+
+#[test]
+fn truncated_mbox_marker() {
+    assert_marker_eof(b"From <incomplete mbox marker>", true);
+}
+
+#[test]
+fn truncated_mbox_marker_ending_with_carriage_return() {
+    // This used to loop forever in MimeKit because the trailing '\r' was
+    // never consumed. Exercise EOF after that byte, including one-byte reads.
+    for input in [
+        b"From \r".as_slice(),
+        b"From <incomplete mbox marker>\r",
+        b"From \0: \x01\0\x10\0\r\xff\r\r",
+    ] {
+        assert_marker_eof(input, true);
+    }
+}
+
+fn assert_marker_eof(input: &[u8], mbox: bool) {
+    for logged in [false, true] {
+        assert_marker_eof_parser(MimeParser::from_slice(input), input, mbox, logged);
+        for chunk in [1, 2, 7, 4096] {
+            assert_marker_eof_parser(
+                MimeParser::new(BufReader::with_capacity(chunk, input)),
+                input,
+                mbox,
+                logged,
+            );
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let parser = MimeParser::with_storage(
+                    ShortSource {
+                        inner: Cursor::new(input),
+                        chunk,
+                    },
+                    storage,
+                )
+                .unwrap();
+                assert_marker_eof_parser(parser, input, mbox, logged);
+            }
+        }
+    }
+}
+
+fn assert_marker_eof_parser<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &[u8],
+    mbox: bool,
+    logged: bool,
+) {
+    let mut logger = |_| Ok(());
+    let error = match (mbox, logged) {
+        (true, true) => parser.parse_mbox_message_with_logger(&mut logger).err(),
+        (true, false) => parser.parse_mbox_message().err(),
+        (false, true) => parser.parse_message_with_logger(&mut logger).err(),
+        (false, false) => parser.parse_message().err(),
+    }
+    .expect("a marker without a message must not produce a MIME model");
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    assert_eq!(
+        parser.position(),
+        MimePosition {
+            offset: input.len() as u64,
+            line: 1 + input.iter().filter(|&&byte| byte == b'\n').count() as u64,
+        }
+    );
+    assert!(!parser.is_end_of_stream());
+    let error = if mbox {
+        parser.parse_mbox_message().err()
+    } else {
+        parser.parse_message().err()
+    }
+    .expect("a failed source must not be reused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn mime_part_basic() {
+    let original = concat!(
+        "Content-Type: application/octet-stream; name=rawData.dat\n",
+        "Content-Disposition: inline; filename=rawData.dat\n",
+        "Content-Transfer-Encoding: quoted-printable\n\n",
+        "This is some raw data.\n",
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let body = format!("This is some raw data.{newline}");
+        for logged in [false, true] {
+            let entity =
+                parse_recovery_entity(MimeParser::from_slice(input.as_bytes()), &input, logged);
+            assert_stored_recovery_bodies(
+                entity.leaf_parts(),
+                &input,
+                MimeContentStorage::Source,
+                [body.as_str()],
+            );
+            assert_basic_part_model(entity, &input, &body, format);
+            for chunk in [1, 2, 7, 4096] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let entity = parse_recovery_entity(parser, &input, logged);
+                assert_basic_part_model(entity, &input, &body, format);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let entity = parse_recovery_entity(parser, &input, logged);
+                    assert_stored_recovery_bodies(
+                        entity.leaf_parts(),
+                        &input,
+                        storage,
+                        [body.as_str()],
+                    );
+                    assert_basic_part_model(entity, &input, &body, format);
+                }
+            }
+        }
+    }
+}
+
+fn parse_recovery_entity<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    logged: bool,
+) -> MimeEntity<C> {
+    let entity = if logged {
+        parser.parse_entity_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_entity()
+    }
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    entity
+}
+
+fn assert_basic_part_model<R: Read + Seek>(
+    mut entity: MimeEntity<R>,
+    input: &str,
+    body: &str,
+    format: NewLineFormat,
+) {
+    let MimeEntity::Part(part) = &entity else {
+        panic!("expected application/octet-stream leaf")
+    };
+    assert_eq!(part.headers().len(), 3);
+    let content_type = part.content_type().unwrap().unwrap();
+    assert!(content_type.is_mime_type("application", "octet-stream"));
+    assert_eq!(content_type.name(), Some("rawData.dat"));
+    let disposition = part.content_disposition().unwrap().unwrap();
+    assert_eq!(disposition.disposition(), "inline");
+    assert_eq!(disposition.file_name(), Some("rawData.dat"));
+    assert_eq!(
+        part.content_transfer_encoding().unwrap(),
+        ContentEncoding::QuotedPrintable
+    );
+    assert_eq!(part.content().encoding(), ContentEncoding::QuotedPrintable);
+    assert_eq!(part.content().new_line_format(), Some(format));
+    let mut offset = 0;
+    for header in part.headers() {
+        assert_eq!(header.offset(), Some(offset as u64));
+        assert_eq!(
+            header.raw(),
+            &input.as_bytes()[offset..offset + header.raw().len()]
+        );
+        offset += header.raw().len();
+    }
+    assert_recovery_output(input, format, |output, options| {
+        entity.write_to_with_options(output, options)
+    });
+    let MimeEntity::Part(part) = &mut entity else {
+        unreachable!()
+    };
+    let mut decoded = Vec::new();
+    part.content_mut().decode_to(&mut decoded).unwrap();
+    assert_eq!(decoded, body.as_bytes());
+}
+
+#[test]
+fn mime_part_content_with_mixed_line_endings() {
+    let body = concat!(
+        "This is a normal line of text.\r\n",
+        "This line ends with a bare LF.\n",
+        "And this line ends with CRLF.\r\n",
+    );
+    let input = format!(
+        "From: mimekit@example.com\r\n\
+         To: mimekit@example.com\r\n\
+         Subject: content with mixed line endings\r\n\
+         Date: Sat, Dec 21 2024 09:12:42 -0500\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n{body}"
+    );
+    for logged in [false, true] {
+        let message =
+            parse_recovery_message(MimeParser::from_slice(input.as_bytes()), &input, logged);
+        assert_stored_recovery_bodies(
+            message.leaf_parts(),
+            &input,
+            MimeContentStorage::Source,
+            [body],
+        );
+        assert_mixed_line_endings_model(message, &input, body);
+        for chunk in [1, 2, 7, 4096] {
+            let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+            let message = parse_recovery_message(parser, &input, logged);
+            assert_mixed_line_endings_model(message, &input, body);
+            for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                let parser = MimeParser::with_storage(
+                    ShortSource {
+                        inner: Cursor::new(input.as_bytes()),
+                        chunk,
+                    },
+                    storage,
+                )
+                .unwrap();
+                let message = parse_recovery_message(parser, &input, logged);
+                assert_stored_recovery_bodies(message.leaf_parts(), &input, storage, [body]);
+                assert_mixed_line_endings_model(message, &input, body);
+            }
+        }
+    }
+}
+
+fn assert_mixed_line_endings_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    body: &str,
+) {
+    assert_eq!(message.headers().len(), 5);
+    let MimeEntity::Part(part) = message.body().unwrap() else {
+        panic!("expected text/plain leaf")
+    };
+    assert_eq!(part.headers().len(), 1);
+    assert_plain_utf8_headers(part.headers());
+    assert_eq!(part.content().new_line_format(), Some(NewLineFormat::Mixed));
+    let header = part.headers().get("Content-Type").unwrap();
+    assert_eq!(header.decode_value().text, "text/plain; charset=utf-8");
+    assert_eq!(
+        header.offset(),
+        Some(input.find("Content-Type:").unwrap() as u64)
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let expected = input.replace("\r\n", "\n").replace('\n', newline);
+        assert_recovery_serialization(&mut message, &expected, format);
+    }
+    // MimeKit's Text getter normalizes to the platform newline. Rust keeps
+    // the decoded content's original line endings, independently of writing.
+    assert_eq!(
+        message.text_body(TextFormat::Plain).unwrap().as_deref(),
+        Some(body)
+    );
+    let MimeEntity::Part(part) = message.body().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(part.content().new_line_format(), Some(NewLineFormat::Mixed));
+}
+
+#[test]
 fn truncated_invalid_header_after_valid_header() {
     for tail in ["Junk", "Junk\r", "Junk\r\n"] {
         let text = format!("Header-1: value 1\r\n{tail}");

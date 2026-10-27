@@ -7197,6 +7197,17 @@ the parser is dropped. Unlike MimeKit's recovered typed properties, Rust's raw
 model keeps invalid Content-Type and transfer-encoding getters fallible; the
 parser still recovers a leaf with unspecified stored encoding, without
 rewriting the malformed headers or decoding an invalid `: base64` value.
+Six subsequent cases cover invalid headers after mbox From-lines, streams
+containing only markers, truncated markers with and without trailing CR,
+standalone quoted-printable MIME leaves, and mixed body line endings.
+Marker EOF errors consume the available input, report `UnexpectedEof`, and
+leave the failed source unusable until replacement, rather than inventing an
+empty message. The trailing-CR case retains MimeKit's nontermination regression
+rationale. Leaf cases check metadata, header offsets, retained body ranges,
+and serialization after dropping the parser across buffered/storage/slice and
+logging variants. Mixed-newline bodies keep their `Mixed` hint and original
+decoded text even after repeated Unix/DOS output normalization; unlike
+MimeKit's Text getter, Rust does not normalize newlines when reading text.
 Further upstream parser regressions cover folded recipient headers with 1,
 100, and 50,000 addresses, preserving raw folds and following-header offsets;
 Japanese ISO-2022-JP subject/body decoding; and unmunged mbox `From ` lines.

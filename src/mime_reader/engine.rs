@@ -577,6 +577,9 @@ fn complete_headers<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     if !options.allow_header_only && parser.body_separator().is_none() {
         return Ok(());
     }
+    // EOF before any valid top-level headers can leave only (munged) mbox
+    // From-lines: ordinary leading garbage is a parse error. As in MimeKit,
+    // a stream consisting solely of From-lines does not contain a message.
     if stack.is_empty()
         && options.message
         && parser.body_separator().is_none()
