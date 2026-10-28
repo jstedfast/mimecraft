@@ -2010,10 +2010,12 @@ when resuming elsewhere. `get_ref`/`into_inner` expose only the physical buffere
 source, and `replace_source` discards reader-owned lookahead, so save
 `pending_input()` first if extracting a partial archive.
 
-This is **not yet complete MimeKit reader/parser parity**. Entity/message parsing
-uses default malformed-message recovery and optional compliance diagnostics;
-Persistent-source parsing and async APIs remain
-deferred. `HeaderList::load` continues to support independent raw header blocks.
+The applicable synchronous MimeKit reader/parser regression batch is complete,
+with the intentional API and recovery differences documented below.
+Entity/message parsing uses default malformed-message recovery and optional
+compliance diagnostics. Source-backed storage is implemented; async APIs and
+further compliance-validator implementation remain deferred.
+`HeaderList::load` continues to support independent raw header blocks.
 
 Zero limits return `InvalidInput` before I/O. Exceeded limits return `InvalidData`.
 Entity/message parsing also rejects invalid initial headers with `InvalidData`,
@@ -7148,8 +7150,8 @@ Single/text/multipart ownership and writing, complete entity-tree loading, a mes
 with raw header partitioning and load/write APIs, and explicit attached-message
 ownership and writing are also implemented. A synchronous event reader and
 owned-model parser share default malformed-message recovery and explicit limits.
-Persistent-source behavior remains deferred. Explicit mbox iteration and
-header-only EOF loading are implemented.
+Source-backed storage, explicit mbox iteration, and header-only EOF loading
+are implemented.
 MimeKit.Cryptography, including DKIM, ARC, and DMARC, is excluded.
 `LegacyMimeParser` and its associated event-argument types will not be ported;
 parser behavior is being adapted from the current `MimeReader` implementation.
@@ -7298,6 +7300,18 @@ return no partial tree and cannot be reused without replacing the source.
 Coverage includes LF/CRLF, short refills, slices, logging, default/Memory/Source
 storage, exact depth-issue positions, and byte-fed splits for homogeneous and
 mixed nesting. No production changes were needed.
+Four further upstream cases cover a missing Content-Type subtype, a truncated
+header name, a lone CR between status groups, and consecutive mbox markers.
+They retain the established raw-model differences: malformed standalone
+headers and status-group records remain available instead of throwing, and
+the typed Content-Type getter rejects the missing subtype while preserving
+the raw filename parameter. A lone CR is not silently treated as a separator.
+Adjacent mbox markers yield an empty message followed by the populated message,
+with physical positions accounting for the five-byte next-marker lookahead.
+Coverage includes LF/CRLF, short refills, slices, logging, retained header
+offsets, and repeated serialization after parser drop; message cases also
+exercise default/Memory/Source storage and every two-way byte-fed split.
+No production changes were needed.
 Header-limit regressions accept an exact-sized folded header, reject one extra
 byte or an oversized field name, and verify the failing header's offset,
 including enclosing multipart/message and mbox framing, and early termination
@@ -7350,8 +7364,8 @@ The empty-encoding regression exposed and fixed wrapper serialization rejecting
 unchanged recovered encoding headers. Focused writer cases also enforce strict
 validation of authored/changed values without invalidating recovery on unrelated
 edits. Applicable upstream comments and compatibility rationale are retained.
-This is not yet the full upstream MimeReader/MimeParser test port; additional
-reader/parser cases remain deferred. Source-storage cases also cover shared
+The applicable synchronous MimeReader/MimeParser regression batch is complete.
+Source-storage cases also cover shared
 mbox cursors, owned/borrowed lifetime, nonzero source origins, buffered source
 replacement, concurrent decoding, backing-source reads, and seek/read failures.
 Opt-in Content-Length-aware mbox parsing compares the original `content-length`
@@ -7362,6 +7376,53 @@ From-marker case, numeric-prefix and duplicate-header rules, thresholds inside
 prefixes and buffered chunks, nested lengths, EOF, resource limits, source
 replacement, and fallible callbacks/loggers.
 No LegacyMimeParser tests are included.
+
+The closeout adds canonical short-read multipart and mixed-newline mbox cases,
+split-CRLF body diagnostics, parser option/reporting/position forwarding, and
+mixed-container and implied `multipart/digest` depth boundaries. The exact
+root-inclusive budget retains the complete tree without diagnostics; lower
+budgets report one precise depth issue and fail without a partial model.
+The implied message wrapper charges a level at its opening delimiter, and its
+embedded root charges another at its first header. Reader cases add exact
+bare-LF body positions, binary null/8-bit acceptance, invalid raw-header byte
+positions, and missing required fields at separators and EOF. Missing-field
+checks distinguish Message/Mbox from Entity/Headers and embedded messages;
+Content-Type or transfer encoding requires MIME-Version, but disposition alone
+does not. Byte-fed counterparts cover short-read mbox input, CRLF splits,
+binary bodies, required-field diagnostics, and implied-depth failures.
+Applicable upstream comments are retained. No production changes were needed.
+
+The final name audit reconciles 123 unique synchronous parser names and 63
+reader names from the local upstream sources. These are names, not expanded
+parameterized executions; the reader count includes an inactive historical
+case. Of the 32 previously unmatched names, 14 now have direct regression
+ports; the remaining 18 map to existing coverage or deliberate exclusions:
+
+| Upstream family (`Test` prefix omitted) | Rust coverage or disposition |
+| --- | --- |
+| Parser `ShortReads`, `CrLfSplitAcrossReadsIsNotBareLinefeed` | Direct snake_case ports across slices, short reads, logging, and default/Memory/Source storage. |
+| Parser `MimeComplianceMimeDepthLimitExceeded`, `MimeComplianceMimeDepthLimitExceededImpliedContentType` | Direct ports adapted to fatal, root-inclusive limits rather than MimeKit's flattened leaves. |
+| Parser `MimeParserForwardsReaderProperties` | Direct port of options, compliance policy, logger effects, positions, and EOF; nullable setters are not a Rust API. |
+| Reader `BareLinefeedsInBodyPositions`, `BinaryContentTransferEncodingAcceptsNullAnd8BitBytes`, `InvalidHeaderFieldReportsNullByte` | Direct ports; standalone raw headers remain available, including invalid records. |
+| Reader `MimeComplianceMissingHeaders`, `MimeComplianceMissingHeadersMbox`, `MimeComplianceMissingHeadersIncompleteHeader`, `MimeComplianceMissingMimeVersion`, `MimeComplianceMissingHeadersIgnoresEmbeddedMessages`, `MimeComplianceMissingHeadersIgnoresEntitiesAndHeaders` | Direct ports with exact issue order, positions, scope, and logged/unlogged event parity. |
+| Parser/reader `ArgumentExceptions` | Rust types rule out null/wrong-type arguments; `option_validation_precedes_io_and_limits_remain_strict` and source/storage error tests cover runtime validation. |
+| Parser `ContentStorageLifetime` | `storage_loaders_keep_owned_sources_until_content_is_released`, borrowed-source/failure counterparts, and `storage_keeps_ranges_or_copies_and_releases_last_owner`. |
+| Parser `JwzPersistentMbox` | `jwz_mbox` checks upstream offset goldens, model topology, bodies, and serialization in all storage modes. |
+| Parser `SimpleMbox`, `SimpleMboxWithByteOrderMark` | Simple-mbox corpus/garbage-prefix cases and `mbox_byte_order_mark_keeps_source_ranges_and_replacement_origins`. |
+| Parser `StatusGroupParserNoStatusGroups` | Existing no-content, blank-line, LF, and lone-CR status-group cases. |
+| Parser `RejectedSetStream` | `rejected_replacement_preserves_mbox_state_and_old_bodies`. |
+| Parser `SetStreamContentStorage`, `SetStreamPersistentOverloads` | Storage constructors and replacement/lifetime cases. Rust replacement retains storage/options; changing storage requires a new parser, not a C# overload or implicit reset to Memory. |
+| Parser `MaxMimeDepthMatchesLegacyMimeParser` | `max_mime_depth_matches_reader` compares shared reader/model behavior across the full boundary; LegacyMimeParser itself is excluded. |
+| Parser `MimeParserForwardsAllCallbacks`, `MimeParserIsNotAMimeReader` | C# protected virtual forwarding/inheritance checks do not apply. Rust reader events and private model assembly are covered by nested topology/offset goldens. |
+| Parser `LegacyPersistentNonseekableCompatibility` | Excluded Legacy-only fallback behavior; source-backed Rust constructors require seeking. |
+| Parser `MboxMarkerAsyncCallbacksNotUsedBySyncParse` | Excluded async virtual-dispatch API; synchronous callbacks and byte-feed pauses are covered separately. |
+| Reader `ReadToEosReturnsBufferedAndUnreadInput` | `standalone_headers_preserve_raw_blocks_separators_and_unread_bodies` checks `into_inner().read_to_end()` across every buffer capacity. |
+| Reader `NextGrowSize` | C# array-growth formula is not a Rust API; Vec-backed header growth, refill boundaries, and limits have behavioral coverage. |
+| Reader `MimeComplianceInvalidMimeVersion` | Inactive upstream `CAN_DETECT_MIME_VERSION_ISSUES` block, not an active parity requirement; the active missing-version case is ported. |
+
+This closes the bounded parser/reader batch, not every MimeKit feature.
+Async/Legacy APIs remain excluded from this batch, and further compliance
+reporting implementation/performance work remains paused.
 
 ### Sans-I/O MIME parsing
 

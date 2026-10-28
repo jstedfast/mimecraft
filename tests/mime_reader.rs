@@ -3033,7 +3033,32 @@ const MESSAGE_HEADERS: &str = concat!(
 );
 
 fn assert_reader_diagnostics(wire: &[u8], inspect: impl Fn(&[MimeComplianceIssue])) {
+    assert_reader_diagnostics_mode(wire, DiagnosticRead::Message, inspect);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DiagnosticRead {
+    Message,
+    Mbox,
+    Entity,
+    Headers,
+}
+
+fn assert_reader_diagnostics_mode(
+    wire: &[u8],
+    mode: DiagnosticRead,
+    inspect: impl Fn(&[MimeComplianceIssue]),
+) {
     let snapshot = |event: MimeEvent<'_>| match event {
+        MimeEvent::Headers {
+            headers,
+            position,
+            headers_end,
+            body_separator,
+        } => format!(
+            "Headers {:?} {position:?} {headers_end:?} {body_separator:?}",
+            headers.as_slice()
+        ),
         MimeEvent::EntityBegin {
             headers,
             kind,
@@ -3050,20 +3075,34 @@ fn assert_reader_diagnostics(wire: &[u8], inspect: impl Fn(&[MimeComplianceIssue
         let mut reader = MimeReader::new(BufReader::with_capacity(capacity, wire));
         let mut issues = Vec::new();
         let mut events = Vec::new();
-        reader
-            .read_message_with_logger(
-                &mut |issue| {
-                    issues.push(issue);
-                    Ok(())
-                },
-                |event| {
-                    events.push(snapshot(event));
-                    Ok(())
-                },
-            )
-            .unwrap();
-        assert!(reader.is_end_of_stream());
-        assert_eq!(reader.position().offset, wire.len() as u64);
+        let mut logger = |issue| {
+            issues.push(issue);
+            Ok(())
+        };
+        let mut capture = |event: MimeEvent<'_>| {
+            events.push(snapshot(event));
+            Ok(())
+        };
+        match mode {
+            DiagnosticRead::Message => reader
+                .read_message_with_logger(&mut logger, &mut capture)
+                .unwrap(),
+            DiagnosticRead::Entity => reader
+                .read_entity_with_logger(&mut logger, &mut capture)
+                .unwrap(),
+            DiagnosticRead::Headers => reader
+                .read_headers_with_logger(&mut logger, &mut capture)
+                .unwrap(),
+            DiagnosticRead::Mbox => assert!(
+                reader
+                    .read_mbox_message_with_logger(&mut logger, &mut capture)
+                    .unwrap()
+            ),
+        }
+        if mode != DiagnosticRead::Headers {
+            assert!(reader.is_end_of_stream());
+            assert_eq!(reader.position().offset, wire.len() as u64);
+        }
         assert_position(wire, reader.position());
         for issue in &issues {
             let offset = issue.stream_offset as usize;
@@ -3087,14 +3126,26 @@ fn assert_reader_diagnostics(wire: &[u8], inspect: impl Fn(&[MimeComplianceIssue
 
         let mut plain = MimeReader::new(BufReader::with_capacity(capacity, wire));
         let mut plain_events = Vec::new();
-        plain
-            .read_message(|event| {
-                plain_events.push(snapshot(event));
-                Ok(())
-            })
-            .unwrap();
+        let mut capture = |event: MimeEvent<'_>| {
+            plain_events.push(snapshot(event));
+            Ok(())
+        };
+        match mode {
+            DiagnosticRead::Message => plain.read_message(&mut capture).unwrap(),
+            DiagnosticRead::Entity => plain.read_entity(&mut capture).unwrap(),
+            DiagnosticRead::Headers => plain.read_headers(&mut capture).unwrap(),
+            DiagnosticRead::Mbox => assert!(plain.read_mbox_message(&mut capture).unwrap()),
+        }
         assert_eq!(events, plain_events);
         assert_eq!(reader.position(), plain.position());
+        if mode == DiagnosticRead::Headers {
+            let end = reader.position().offset as usize;
+            for mut source in [reader.into_inner(), plain.into_inner()] {
+                let mut remainder = Vec::new();
+                source.read_to_end(&mut remainder).unwrap();
+                assert_eq!(remainder, &wire[end..]);
+            }
+        }
     }
 }
 
@@ -3118,6 +3169,177 @@ fn assert_issue_positions(wire: &[u8], actual: &[MimeComplianceIssue], expected:
             (violation, line, column, kind),
         );
         assert_eq!(actual.stream_offset, offset as u64);
+    }
+}
+
+#[test]
+fn bare_linefeeds_in_body_positions() {
+    // Alternate CRLF and bare LF on different body lines. Computing every
+    // diagnostic from a buffer's start instead of the current scan position
+    // used to report the body's start and even negative columns in MimeKit.
+    let wire = concat!(
+        "From: mimekit@example.org\r\nTo: mimekit@example.org\r\n",
+        "Subject: bare linefeeds in the body\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <123@example.org>\r\n\r\n",
+        "This line is properly terminated.\r\nThis line is not.\n",
+        "Another properly terminated line.\r\nAnd this one is not either.\n",
+    );
+    assert_reader_diagnostics(wire.as_bytes(), |issues| {
+        assert_issue_positions(
+            wire.as_bytes(),
+            issues,
+            &[
+                (
+                    Violation::BareLinefeedInBody,
+                    8,
+                    "This line is not.".len() as u64 + 1,
+                    PositionKind::Exact,
+                ),
+                (
+                    Violation::BareLinefeedInBody,
+                    10,
+                    "And this one is not either.".len() as u64 + 1,
+                    PositionKind::Exact,
+                ),
+            ],
+        );
+    });
+}
+
+#[test]
+fn binary_content_transfer_encoding_accepts_null_and_8bit_bytes() {
+    let mut wire =
+        format!("{MESSAGE_HEADERS}Content-Transfer-Encoding: binary\r\n\r\n").into_bytes();
+    wire.extend_from_slice(b"\xff\0\r\n");
+    assert_reader_diagnostics(&wire, |issues| assert!(issues.is_empty(), "{issues:?}"));
+}
+
+#[test]
+fn invalid_header_field_reports_null_byte() {
+    let wire = b"Bad\0\xff\r\n\r\n";
+    // Standalone Rust header loading retains the invalid first record rather
+    // than throwing. Its generic UTF-8 diagnostic also remains enabled.
+    assert_reader_diagnostics_mode(wire, DiagnosticRead::Headers, |issues| {
+        assert_issue_positions(
+            wire,
+            issues,
+            &[
+                (Violation::InvalidHeader, 1, 4, PositionKind::Exact),
+                (
+                    Violation::UnexpectedNullBytesInHeader,
+                    1,
+                    4,
+                    PositionKind::Exact,
+                ),
+                (
+                    Violation::Unexpected8BitBytesInHeader,
+                    1,
+                    5,
+                    PositionKind::Exact,
+                ),
+            ],
+        );
+    });
+}
+
+#[test]
+fn mime_compliance_missing_headers() {
+    let wire = b"Subject: missing headers\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+    assert_reader_diagnostics(wire, |issues| {
+        assert_issue_positions(
+            wire,
+            issues,
+            &[
+                (Violation::MissingDate, 3, 1, PositionKind::LineStart),
+                (Violation::MissingFrom, 3, 1, PositionKind::LineStart),
+                (Violation::MissingMessageId, 3, 1, PositionKind::LineStart),
+                (Violation::MissingMimeVersion, 3, 1, PositionKind::LineStart),
+            ],
+        );
+    });
+}
+
+#[test]
+fn mime_compliance_missing_headers_mbox() {
+    let wire = b"From sender@example.org Tue Nov 12 09:12:42 2013\r\nSubject: missing headers\r\n\r\nbody\r\n";
+    // The mbox marker is not a From header and does not count as one.
+    assert_reader_diagnostics_mode(wire, DiagnosticRead::Mbox, |issues| {
+        assert_issue_positions(
+            wire,
+            issues,
+            &[
+                (Violation::MissingDate, 3, 1, PositionKind::LineStart),
+                (Violation::MissingFrom, 3, 1, PositionKind::LineStart),
+                (Violation::MissingMessageId, 3, 1, PositionKind::LineStart),
+            ],
+        );
+    });
+}
+
+#[test]
+fn mime_compliance_missing_headers_incomplete_header() {
+    let wire = b"Subject: missing headers";
+    // An interrupted header has no terminating line; missing fields are
+    // reported at the exact position where the stream ended.
+    let column = wire.len() as u64 + 1;
+    assert_reader_diagnostics(wire, |issues| {
+        assert_issue_positions(
+            wire,
+            issues,
+            &[
+                (Violation::IncompleteHeader, 1, column, PositionKind::Exact),
+                (Violation::MissingDate, 1, column, PositionKind::Exact),
+                (Violation::MissingFrom, 1, column, PositionKind::Exact),
+                (Violation::MissingMessageId, 1, column, PositionKind::Exact),
+            ],
+        );
+    });
+}
+
+#[test]
+fn mime_compliance_missing_mime_version() {
+    for (header, expected) in [
+        ("Subject: not a MIME message\r\n", false),
+        ("Content-Disposition: inline\r\n", false),
+        ("Content-Type: text/plain\r\n", true),
+        ("Content-Transfer-Encoding: 7bit\r\n", true),
+    ] {
+        let wire = format!(
+            "From: mimekit@example.org\r\nDate: Tue, 12 Nov 2013 09:12:42 -0500\r\n\
+             Message-Id: <123@example.org>\r\n{header}\r\nbody\r\n"
+        );
+        assert_reader_diagnostics(wire.as_bytes(), |issues| {
+            let expected = if expected {
+                &[(Violation::MissingMimeVersion, 5, 1, PositionKind::LineStart)][..]
+            } else {
+                &[]
+            };
+            assert_issue_positions(wire.as_bytes(), issues, expected);
+        });
+    }
+}
+
+#[test]
+fn mime_compliance_missing_headers_ignores_embedded_messages() {
+    // Embedded messages are frequently trimmed copies of the original, so
+    // only the top-level message is checked for missing headers.
+    let wire = format!(
+        "{MESSAGE_HEADERS}Content-Type: message/rfc822\r\n\r\n\
+         Subject: embedded\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+    );
+    assert_reader_diagnostics(wire.as_bytes(), |issues| {
+        assert!(issues.is_empty(), "{issues:?}")
+    });
+}
+
+#[test]
+fn mime_compliance_missing_headers_ignores_entities_and_headers() {
+    let wire = b"Subject: missing headers\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+    for mode in [DiagnosticRead::Entity, DiagnosticRead::Headers] {
+        assert_reader_diagnostics_mode(wire, mode, |issues| {
+            assert!(issues.is_empty(), "{issues:?}")
+        });
     }
 }
 

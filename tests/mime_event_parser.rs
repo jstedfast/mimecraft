@@ -241,6 +241,109 @@ fn leading_marker_recovery_survives_pauses() {
 }
 
 #[test]
+fn malformed_metadata_and_adjacent_markers_survive_pauses() {
+    let missing_subtype = include_str!("data/messages/missing-subtype.txt").replace("\r\n", "\n");
+    let double_marker = concat!(
+        "From - \nFrom -\nFrom: sender@example.com\n",
+        "To: recipient@example.com\nSubject: test message\n\nBody text\n",
+    );
+    for (original, format) in [
+        (missing_subtype.as_str(), MimeEventFormat::Message),
+        (missing_subtype.as_str(), MimeEventFormat::Entity),
+        (double_marker, MimeEventFormat::Mbox),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let wire = original.replace('\n', newline);
+            assert!(
+                sync(wire.as_bytes(), format, Default::default())
+                    .error
+                    .is_none()
+            );
+            assert_splits(wire.as_bytes(), format, Default::default());
+        }
+    }
+}
+
+#[test]
+fn short_reads_and_required_header_diagnostics_survive_pauses() {
+    let mbox = concat!(
+        "From sender@example.com Sat Jan  1 00:00:00 2022\n",
+        "Subject: First\n\nbody one\n\n",
+        "From sender@example.com Sat Jan  1 00:00:01 2022\n",
+        "Subject: Second\n\nbody two\n\n",
+        "From sender@example.com Sat Jan  1 00:00:02 2022\r\n",
+        "Subject: Third\r\n\r\nbody three\r\n",
+    );
+    for (wire, format) in [
+        (mbox, MimeEventFormat::Mbox),
+        ("Subject: missing headers", MimeEventFormat::Message),
+        (
+            "Subject: missing headers\r\n\r\nbody\r\n",
+            MimeEventFormat::Message,
+        ),
+        (
+            "Content-Type: text/plain\r\n\r\nbody\r\n",
+            MimeEventFormat::Message,
+        ),
+        (
+            "Content-Disposition: inline\r\n\r\nbody\r\n",
+            MimeEventFormat::Message,
+        ),
+    ] {
+        let expected = sync(wire.as_bytes(), format, Default::default());
+        assert!(expected.error.is_none());
+        assert!(!expected.issues.is_empty());
+        assert_splits(wire.as_bytes(), format, Default::default());
+    }
+
+    let headers = concat!(
+        "From: sender@example.org\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <1@example.org>\r\n",
+        "MIME-Version: 1.0\r\n",
+    );
+    for body in [
+        b"Content-Type: text/plain\r\n\r\nfirst\r\nsecond\r\nthird\r\n".as_slice(),
+        b"Content-Transfer-Encoding: binary\r\n\r\n\xff\0\r\n",
+    ] {
+        let wire = [headers.as_bytes(), body].concat();
+        let expected = sync(&wire, MimeEventFormat::Message, Default::default());
+        assert!(expected.error.is_none());
+        assert!(expected.issues.is_empty(), "{:?}", expected.issues);
+        assert_splits(&wire, MimeEventFormat::Message, Default::default());
+    }
+}
+
+#[test]
+fn implied_message_depth_survives_pauses() {
+    let wire = concat!(
+        "From: sender@example.org\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <1@example.org>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=a\r\n\r\n",
+        "--a\r\nContent-Type: multipart/digest; boundary=b\r\n\r\n",
+        "--b\r\nX-Implied-Type: message/rfc822\r\n\r\n",
+        "Subject: embedded\r\n\r\nhidden\r\n--b--\r\n--a--\r\n",
+    );
+    // multipart/digest implies a message/rfc822 wrapper; both that wrapper
+    // and its embedded root must charge a level across pauses.
+    for limit in 1..=4 {
+        let options = MimeEntityParseOptions {
+            max_depth: limit,
+            ..Default::default()
+        };
+        let expected = sync(wire.as_bytes(), MimeEventFormat::Message, options);
+        assert_eq!(
+            expected.error,
+            (limit < 4).then_some(io::ErrorKind::InvalidData)
+        );
+        assert_eq!(expected.issues.len(), usize::from(limit < 4));
+        assert_splits(wire.as_bytes(), MimeEventFormat::Message, options);
+    }
+}
+
+#[test]
 fn nested_depth_boundaries_survive_pauses() {
     // Include both homogeneous chains and mixed wrappers so every entity,
     // rather than just message or multipart containers, charges one level.

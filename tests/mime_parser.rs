@@ -2,9 +2,10 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use mimecraft::{
-    ContentEncoding, HeaderId, HeaderList, HeaderTooLong, MimeComplianceIssue,
-    MimeCompliancePositionKind, MimeComplianceViolation, MimeContentStorage, MimeEntity,
-    MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeMessage, MimeParser,
+    ContentEncoding, HeaderId, HeaderList, HeaderTooLong, MimeComplianceContext,
+    MimeComplianceIssue, MimeComplianceOptions, MimeCompliancePositionKind,
+    MimeComplianceViolation, MimeContentStorage, MimeEntity, MimeEntityKind,
+    MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeMessage, MimeParser,
     MimePartWriteOptions, MimePosition, MimeReader, TextFormat, encodings::NewLineFormat,
 };
 use std::{
@@ -1081,6 +1082,187 @@ fn assert_refill_mbox_messages<R: BufRead, C: Read + Seek>(
 }
 
 #[test]
+fn short_reads() {
+    let mbox = concat!(
+        "From sender@example.com Sat Jan  1 00:00:00 2022\n",
+        "Subject: First\n\nbody one\n\n",
+        "From sender@example.com Sat Jan  1 00:00:01 2022\n",
+        "Subject: Second\n\nbody two\n\n",
+        "From sender@example.com Sat Jan  1 00:00:02 2022\r\n",
+        "Subject: Third\r\n\r\nbody three\r\n",
+    );
+    let multipart = concat!(
+        "From: sender@example.org\r\nSubject: Short reads\r\nMIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n",
+        "--b\r\nContent-Type: text/plain\r\n\r\nfirst part\r\n",
+        "--b\r\n\r\nsecond part\r\n--b--\r\n",
+    );
+    for (wire, mbox) in [(mbox, true), (multipart, false)] {
+        let expected =
+            summarize_short_reads(MimeParser::from_slice(wire.as_bytes()), wire, mbox, false);
+        assert_eq!(expected.len(), if mbox { 3 } else { 1 });
+        if mbox {
+            for (summary, subject, body) in [
+                (&expected[0], "First", "body one\n"),
+                (&expected[1], "Second", "body two\n"),
+                (&expected[2], "Third", "body three\r\n"),
+            ] {
+                assert_eq!(summary.0, subject);
+                assert_eq!(summary.1, [body.as_bytes()]);
+            }
+        } else {
+            assert_eq!(expected[0].0, "Short reads");
+            assert_eq!(expected[0].1, [b"first part".as_slice(), b"second part"]);
+        }
+        for logged in [false, true] {
+            for chunk in [1, 2, 3, 4, 5, 7, 4096] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, wire.as_bytes()));
+                assert_eq!(summarize_short_reads(parser, wire, mbox, logged), expected);
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(wire.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    assert_eq!(summarize_short_reads(parser, wire, mbox, logged), expected);
+                }
+            }
+        }
+    }
+}
+
+type ShortReadSummary = (String, Vec<Vec<u8>>, Vec<u8>);
+
+fn summarize_short_reads<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    wire: &str,
+    mbox: bool,
+    logged: bool,
+) -> Vec<ShortReadSummary> {
+    let mut messages = Vec::new();
+    loop {
+        let message = if mbox {
+            if logged {
+                parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+            } else {
+                parser.parse_mbox_message()
+            }
+            .unwrap()
+        } else {
+            Some(
+                if logged {
+                    parser.parse_message_with_logger(&mut |_| Ok(()))
+                } else {
+                    parser.parse_message()
+                }
+                .unwrap(),
+            )
+        };
+        let Some(message) = message else { break };
+        messages.push(message);
+        if !mbox {
+            break;
+        }
+    }
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, wire.len() as u64);
+    drop(parser);
+    messages
+        .into_iter()
+        .map(|mut message| {
+            let subject = message.subject().unwrap().text;
+            let mut serialized = Vec::new();
+            message
+                .write_to_with_options(
+                    &mut serialized,
+                    &MimePartWriteOptions {
+                        new_line_format: NewLineFormat::Unix,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let parts: Vec<_> = match message.body_mut().unwrap() {
+                MimeEntity::Multipart(multipart) => multipart.children_mut().iter_mut().collect(),
+                leaf => vec![leaf],
+            };
+            let bodies = parts
+                .into_iter()
+                .map(|part| {
+                    let MimeEntity::Part(part) = part else {
+                        panic!("expected leaf")
+                    };
+                    let mut decoded = Vec::new();
+                    part.content_mut().decode_to(&mut decoded).unwrap();
+                    decoded
+                })
+                .collect();
+            (subject, bodies, serialized)
+        })
+        .collect()
+}
+
+#[test]
+fn cr_lf_split_across_reads_is_not_bare_linefeed() {
+    let body: String = (0..50)
+        .map(|i| format!("line number {i} of the body with some text\r\n"))
+        .collect();
+    let wire = format!(
+        "From: sender@example.org\r\nDate: Tue, 12 Nov 2013 09:12:42 -0500\r\n\
+         Message-Id: <1@example.org>\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain\r\n\r\n{body}"
+    );
+    assert_split_crlf(MimeParser::from_slice(wire.as_bytes()), &wire, &body);
+    for chunk in [1, 2, 3, 5, 7, 11, 13, 4096] {
+        assert_split_crlf(
+            MimeParser::new(BufReader::with_capacity(chunk, wire.as_bytes())),
+            &wire,
+            &body,
+        );
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let parser = MimeParser::with_storage(
+                ShortSource {
+                    inner: Cursor::new(wire.as_bytes()),
+                    chunk,
+                },
+                storage,
+            )
+            .unwrap();
+            assert_split_crlf(parser, &wire, &body);
+        }
+    }
+}
+
+fn assert_split_crlf<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    wire: &str,
+    body: &str,
+) {
+    let mut issues = Vec::new();
+    let mut message = parser
+        .parse_message_with_logger(&mut |issue| {
+            issues.push(issue);
+            Ok(())
+        })
+        .unwrap();
+    assert!(issues.is_empty(), "{issues:?}");
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, wire.len() as u64);
+    drop(parser);
+    let MimeEntity::Part(part) = message.body().unwrap() else {
+        panic!("expected text leaf")
+    };
+    assert_eq!(part.content().new_line_format(), Some(NewLineFormat::Dos));
+    assert_recovery_serialization(&mut message, wire, NewLineFormat::Dos);
+    assert_eq!(
+        message.text_body(TextFormat::Plain).unwrap().as_deref(),
+        Some(body)
+    );
+}
+
+#[test]
 fn header_parser() {
     let data = b"Header-1: value 1\r\nHeader-2: value 2\r\nHeader-3: value 3\r\n\r\n";
     for capacity in [1, 7, 4096] {
@@ -1483,6 +1665,224 @@ fn max_mime_depth_matches_reader() {
     ));
 }
 
+#[test]
+fn mime_compliance_mime_depth_limit_exceeded() {
+    let wire = concat!(
+        "From: sender@example.org\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <1@example.org>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"a\"\r\n\r\n",
+        "--a\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n",
+        "--b\r\nContent-Type: multipart/mixed; boundary=\"c\"\r\n\r\n",
+        "--c\r\nContent-Type: text/plain\r\n\r\nhidden\r\n--c--\r\n",
+        "--b\r\nContent-Type: message/rfc822\r\n\r\n",
+        "From: inner@example.org\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <2@example.org>\r\n",
+        "Subject: also beyond the limit\r\n\r\nhidden\r\n",
+        "--b--\r\n--a--\r\n",
+    );
+    use MimeEntityKind::{MessagePart, Multipart, Part};
+    assert_mixed_depth_cases(
+        wire,
+        &[(2, Some("--b\r\n")), (3, Some("--c\r\n")), (4, None)],
+        &[
+            (Multipart, 0),
+            (Multipart, 1),
+            (Multipart, 2),
+            (Part, 3),
+            (MessagePart, 2),
+            (Part, 3),
+        ],
+    );
+}
+
+#[test]
+fn mime_compliance_mime_depth_limit_exceeded_implied_content_type() {
+    let wire = concat!(
+        "From: sender@example.org\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <1@example.org>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"a\"\r\n\r\n",
+        "--a\r\nContent-Type: multipart/digest; boundary=\"b\"\r\n\r\n",
+        "--b\r\nX-Implied-Type: message/rfc822\r\n\r\n",
+        "From: inner@example.org\r\n",
+        "Date: Tue, 12 Nov 2013 09:12:42 -0500\r\n",
+        "Message-Id: <2@example.org>\r\n",
+        "Subject: beyond the limit\r\n\r\nhidden\r\n",
+        "--b--\r\n--a--\r\n",
+    );
+    // message/rfc822 is implied by multipart/digest. The wrapper charges a
+    // level at its opening delimiter, and its embedded root charges another
+    // at the first inner header, even without an explicit Content-Type.
+    use MimeEntityKind::{MessagePart, Multipart, Part};
+    assert_mixed_depth_cases(
+        wire,
+        &[
+            (2, Some("--b\r\n")),
+            (3, Some("From: inner@example.org")),
+            (4, None),
+        ],
+        &[(Multipart, 0), (Multipart, 1), (MessagePart, 2), (Part, 3)],
+    );
+}
+
+fn assert_mixed_depth_cases(
+    wire: &str,
+    cases: &[(usize, Option<&str>)],
+    expected: &[(MimeEntityKind, usize)],
+) {
+    for &(limit, marker) in cases {
+        let options = MimeEntityParseOptions {
+            max_depth: limit,
+            ..Default::default()
+        };
+        for logged in [false, true] {
+            assert_mixed_depth_parse(
+                MimeParser::from_slice_with_options(wire.as_bytes(), options).unwrap(),
+                wire,
+                marker,
+                expected,
+                logged,
+            );
+            for chunk in [1, 7, 4096] {
+                assert_mixed_depth_parse(
+                    MimeParser::with_options(
+                        BufReader::with_capacity(chunk, wire.as_bytes()),
+                        options,
+                    )
+                    .unwrap(),
+                    wire,
+                    marker,
+                    expected,
+                    logged,
+                );
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    assert_mixed_depth_parse(
+                        MimeParser::with_storage_and_options(
+                            ShortSource {
+                                inner: Cursor::new(wire.as_bytes()),
+                                chunk,
+                            },
+                            storage,
+                            options,
+                        )
+                        .unwrap(),
+                        wire,
+                        marker,
+                        expected,
+                        logged,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn assert_mixed_depth_parse<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    wire: &str,
+    marker: Option<&str>,
+    expected: &[(MimeEntityKind, usize)],
+    logged: bool,
+) {
+    let mut issues = Vec::new();
+    let result = if logged {
+        parser.parse_message_with_logger(&mut |issue| {
+            issues.push(issue);
+            Ok(())
+        })
+    } else {
+        parser.parse_message()
+    };
+    if let Some(marker) = marker {
+        // Unlike MimeKit's flattened opaque leaf, Rust's root-inclusive
+        // hard limit rejects the parse without returning a partial model.
+        let error = result.err().expect("depth limit must reject the model");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "MIME entity depth limit exceeded");
+        if logged {
+            let offset = wire.find(marker).unwrap();
+            assert_eq!(issues.len(), 1, "{issues:?}");
+            let issue = &issues[0];
+            assert_eq!(
+                issue.violation,
+                MimeComplianceViolation::MimeDepthLimitExceeded
+            );
+            assert_eq!(issue.stream_offset, offset as u64);
+            assert_eq!(
+                issue.line_number,
+                1 + wire[..offset].bytes().filter(|&b| b == b'\n').count() as u64
+            );
+            assert_eq!(issue.column_number, 1);
+            assert_eq!(
+                issue.position_kind,
+                MimeCompliancePositionKind::ElementStart
+            );
+        }
+        assert!(!parser.is_end_of_stream());
+        assert_eq!(
+            parser.parse_message().err().unwrap().kind(),
+            io::ErrorKind::InvalidInput,
+        );
+    } else {
+        // At the limit, the entire tree is retained and nothing is reported.
+        assert!(issues.is_empty(), "{issues:?}");
+        let mut message = result.unwrap();
+        assert!(parser.is_end_of_stream());
+        assert_eq!(parser.position().offset, wire.len() as u64);
+        drop(parser);
+        let mut iter = message.iter();
+        let mut actual = Vec::new();
+        while let Some(entity) = iter.next() {
+            let kind = match entity {
+                MimeEntity::Multipart(_) => MimeEntityKind::Multipart,
+                MimeEntity::Message(_) => MimeEntityKind::MessagePart,
+                MimeEntity::Part(_) => MimeEntityKind::Part,
+            };
+            actual.push((kind, iter.depth().unwrap()));
+        }
+        assert_eq!(actual, expected);
+        assert_recovery_serialization(&mut message, wire, NewLineFormat::Dos);
+    }
+}
+
+#[test]
+fn mime_parser_forwards_reader_properties() {
+    let wire = b"From: sender@example.com\r\nThis is not a header\r\n\r\nBody\r\n";
+    let options = MimeEntityParseOptions {
+        max_depth: 17,
+        ..Default::default()
+    };
+    let compliance = MimeComplianceOptions {
+        context: MimeComplianceContext::Storage,
+        ..Default::default()
+    };
+    let mut parser = MimeParser::with_options(wire.as_slice(), options).unwrap();
+    parser.set_compliance_options(compliance);
+    assert_eq!(parser.options().max_depth, 17);
+    assert_eq!(*parser.compliance_options(), compliance);
+    assert_eq!(parser.position(), MimePosition::default());
+    assert!(!parser.is_end_of_stream());
+    let mut issues = Vec::new();
+    parser
+        .parse_message_with_logger(&mut |issue| {
+            issues.push(issue);
+            Ok(())
+        })
+        .unwrap();
+    assert!(!issues.is_empty());
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue.context == compliance.context)
+    );
+    assert_eq!(parser.position().offset, wire.len() as u64);
+    assert!(parser.is_end_of_stream());
+}
+
 struct NestedDepthCase {
     input: String,
     body: String,
@@ -1831,6 +2231,24 @@ fn invalid_content_type() {
 }
 
 #[test]
+fn missing_subtype() {
+    let input = include_str!("data/messages/missing-subtype.txt").replace("\r\n", "\n");
+    assert_leaf_message_recovery(&input, |message_headers, part_headers| {
+        assert_eq!(message_headers.len(), 5);
+        assert_eq!(part_headers.len(), 1);
+        let header = part_headers.get("Content-Type").unwrap();
+        // MimeKit exposes application/octet-stream with the recovered name.
+        // Rust's typed getter remains strict; retain the malformed type and
+        // its filename parameter in the raw header rather than rewriting it.
+        assert!(header.parse_content_type().is_err());
+        assert_eq!(
+            header.decode_value().text,
+            "application-x-gzip; name=\"document.xml.gz\""
+        );
+    });
+}
+
+#[test]
 fn header_field_name_begins_with_colon() {
     assert_leaf_header_recovery(
         "test of a header line starting with ':'",
@@ -1901,9 +2319,13 @@ fn assert_leaf_header_recovery(
          X-Mailer: Microsoft Office Outlook 12.0\n\
          {headers}\nThis is the message body.\n"
     );
+    assert_leaf_message_recovery(&original, inspect);
+}
+
+fn assert_leaf_message_recovery(original: &str, inspect: fn(&HeaderList, &HeaderList)) {
     for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
         let input = original.replace('\n', newline);
-        let body = format!("This is the message body.{newline}");
+        let (_, body) = input.split_once(&newline.repeat(2)).unwrap();
         for logged in [false, true] {
             let message =
                 parse_recovery_message(MimeParser::from_slice(input.as_bytes()), &input, logged);
@@ -1911,13 +2333,13 @@ fn assert_leaf_header_recovery(
                 message.leaf_parts(),
                 &input,
                 MimeContentStorage::Source,
-                [body.as_str()],
+                [body],
             );
-            assert_leaf_header_model(message, &input, &body, format, inspect);
+            assert_leaf_header_model(message, &input, body, format, inspect);
             for chunk in [1, 2, 7, 4096] {
                 let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
                 let message = parse_recovery_message(parser, &input, logged);
-                assert_leaf_header_model(message, &input, &body, format, inspect);
+                assert_leaf_header_model(message, &input, body, format, inspect);
                 for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
                     let parser = MimeParser::with_storage(
                         ShortSource {
@@ -1928,13 +2350,8 @@ fn assert_leaf_header_recovery(
                     )
                     .unwrap();
                     let message = parse_recovery_message(parser, &input, logged);
-                    assert_stored_recovery_bodies(
-                        message.leaf_parts(),
-                        &input,
-                        storage,
-                        [body.as_str()],
-                    );
-                    assert_leaf_header_model(message, &input, &body, format, inspect);
+                    assert_stored_recovery_bodies(message.leaf_parts(), &input, storage, [body]);
+                    assert_leaf_header_model(message, &input, body, format, inspect);
                 }
             }
         }
@@ -2877,6 +3294,111 @@ fn assert_leading_marker_model<R: Read + Seek>(
 }
 
 #[test]
+fn double_mbox_marker() {
+    let original = concat!(
+        "From - \nFrom -\nFrom: sender@example.com\n",
+        "To: recipient@example.com\nSubject: test message\n\nBody text\n",
+    );
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        for logged in [false, true] {
+            assert_double_mbox_marker(
+                MimeParser::from_slice(input.as_bytes()),
+                &input,
+                format,
+                logged,
+            );
+            for chunk in [1, 2, 7, 4096] {
+                assert_double_mbox_marker(
+                    MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes())),
+                    &input,
+                    format,
+                    logged,
+                );
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    assert_double_mbox_marker(parser, &input, format, logged);
+                }
+            }
+        }
+    }
+}
+
+fn assert_double_mbox_marker<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    format: NewLineFormat,
+    logged: bool,
+) {
+    let first_end = input.find('\n').unwrap() + 1;
+    let second_start = first_end + input[first_end..].find('\n').unwrap() + 1;
+    let mut messages = Vec::new();
+    for (index, end) in [first_end, input.len()].into_iter().enumerate() {
+        let message = if logged {
+            parser.parse_mbox_message_with_logger(&mut |_| Ok(()))
+        } else {
+            parser.parse_mbox_message()
+        }
+        .unwrap()
+        .unwrap();
+        let pending = if index == 0 { b"From ".as_slice() } else { b"" };
+        assert_eq!(parser.pending_input(), pending);
+        assert_eq!(parser.position().offset, (end + pending.len()) as u64);
+        assert_eq!(parser.is_end_of_stream(), index == 1);
+        messages.push(message);
+    }
+    for _ in 0..2 {
+        assert!(parser.parse_mbox_message().unwrap().is_none());
+        assert_eq!(parser.position().offset, input.len() as u64);
+    }
+    drop(parser);
+
+    for (index, mut message) in messages.into_iter().enumerate() {
+        let MimeEntity::Part(part) = message.body().unwrap() else {
+            panic!("expected default leaf")
+        };
+        assert!(part.headers().is_empty());
+        assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+        let body = if index == 0 {
+            assert!(message.headers().is_empty());
+            ""
+        } else {
+            assert_eq!(message.headers().len(), 3);
+            assert_eq!(message.subject().unwrap().text, "test message");
+            let mut offset = second_start;
+            for header in message.headers() {
+                assert_eq!(header.offset(), Some(offset as u64));
+                assert_eq!(
+                    header.raw(),
+                    &input.as_bytes()[offset..offset + header.raw().len()]
+                );
+                offset += header.raw().len();
+            }
+            &input[input.find("Body text").unwrap()..]
+        };
+        assert_eq!(message.leaf_parts().count(), 1);
+        if index == 0 {
+            assert_header_only_serialization(&mut message, "", format);
+        } else {
+            assert_recovery_serialization(&mut message, &input[second_start..], format);
+        }
+        let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+            unreachable!()
+        };
+        let mut decoded = Vec::new();
+        part.content_mut().decode_to(&mut decoded).unwrap();
+        assert_eq!(decoded, body.as_bytes());
+    }
+}
+
+#[test]
 fn invalid_header_after_mbox_marker() {
     for input in [
         "From - \nThis is not a header\nSubject: test\n\nbody\n",
@@ -3195,6 +3717,50 @@ fn truncated_invalid_header_after_valid_header() {
 }
 
 #[test]
+fn truncated_header_name() {
+    for input in ["Header-1", "Header-1\r", "Header-1\n", "Header-1\r\n"] {
+        for logged in [false, true] {
+            assert_truncated_header_name(MimeParser::from_slice(input.as_bytes()), input, logged);
+            for capacity in [1, 2, 7, 4096] {
+                assert_truncated_header_name(
+                    MimeParser::new(BufReader::with_capacity(capacity, input.as_bytes())),
+                    input,
+                    logged,
+                );
+            }
+        }
+    }
+}
+
+fn assert_truncated_header_name<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    input: &str,
+    logged: bool,
+) {
+    let headers = if logged {
+        parser.parse_headers_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_headers()
+    }
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    assert_eq!(parser.position().offset, input.len() as u64);
+    // Unlike MimeKit's ParseHeaders, standalone Rust header loading retains
+    // an invalid first record, just like HeaderList::load.
+    assert_eq!(headers.len(), 1);
+    let header = &headers.as_slice()[0];
+    assert!(header.is_invalid());
+    assert_eq!(header.id(), HeaderId::Unknown);
+    assert_eq!(header.offset(), Some(0));
+    assert_eq!(header.raw(), input.as_bytes());
+    assert!(header.raw_value().is_empty());
+    assert_eq!(
+        parser.parse_headers().unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
 fn truncated_header() {
     assert_single_header("Header-1: value 1");
 }
@@ -3310,6 +3876,85 @@ fn status_group_parser_trailing_blank_lines() {
     // Trailing blank lines must not create an empty status group.
     assert_status_groups(
         "Reporting-MTA: dns; mm1\r\n\r\nFinal-Recipient: rfc822; user@example.com\r\n\r\n\r\n\r\n",
+    );
+}
+
+#[test]
+fn status_group_parser_lone_carriage_return_separator() {
+    for newline in ["\n", "\r\n"] {
+        let input = format!(
+            "Reporting-MTA: dns; mm1{newline}{newline}\
+             \rFinal-Recipient: rfc822; user@example.com{newline}"
+        );
+        for logged in [false, true] {
+            assert_lone_cr_status_separator(
+                MimeParser::from_slice(input.as_bytes()),
+                newline,
+                logged,
+            );
+            for capacity in [1, 2, 7, 4096] {
+                assert_lone_cr_status_separator(
+                    MimeParser::new(BufReader::with_capacity(capacity, input.as_bytes())),
+                    newline,
+                    logged,
+                );
+            }
+        }
+    }
+}
+
+fn assert_lone_cr_status_separator<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    newline: &str,
+    logged: bool,
+) {
+    let group = if logged {
+        parser.parse_status_group_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_status_group()
+    }
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        parser.position().offset,
+        ("Reporting-MTA: dns; mm1".len() + newline.len() * 2) as u64
+    );
+
+    // A lone CR is not a blank line, so MimeKit's SkipBlankLines stops here.
+    // Rust likewise must not skip it, but retains the resulting malformed
+    // record in a raw status group instead of rejecting the header block.
+    let malformed = if logged {
+        parser.parse_status_group_with_logger(&mut |_| Ok(()))
+    } else {
+        parser.parse_status_group()
+    }
+    .unwrap()
+    .unwrap();
+    assert!(parser.is_end_of_stream());
+    for _ in 0..2 {
+        assert!(parser.parse_status_group().unwrap().is_none());
+    }
+    drop(parser);
+    assert_eq!(group.len(), 1);
+    let header = group.get("Reporting-MTA").unwrap();
+    assert_eq!(header.offset(), Some(0));
+    assert_eq!(header.decode_value().text, "dns; mm1");
+    assert_eq!(
+        header.raw(),
+        format!("Reporting-MTA: dns; mm1{newline}").as_bytes()
+    );
+    assert_eq!(malformed.len(), 1);
+    assert!(!malformed.contains("Final-Recipient"));
+    let header = &malformed.as_slice()[0];
+    assert!(header.is_invalid());
+    assert_eq!(header.id(), HeaderId::Unknown);
+    assert_eq!(
+        header.offset(),
+        Some(("Reporting-MTA: dns; mm1".len() + newline.len() * 2) as u64)
+    );
+    assert_eq!(
+        header.raw(),
+        format!("\rFinal-Recipient: rfc822; user@example.com{newline}").as_bytes()
     );
 }
 
