@@ -7286,6 +7286,18 @@ default/Memory/Source storage. Growing preheaders cross 4 KiB and 8 KiB refill
 boundaries; representative messages also exercise every two-way byte-fed split.
 EnsureNewLine does not append a newline to an EOF-truncated header when there
 is no body. Existing production behavior satisfies these cases.
+Deep-nesting parser cases now cover 64 message/rfc822 wrappers and 64 multipart
+containers, checking iterator depths, retained headers, innermost content/source
+ranges, and repeated serialization after the parser is dropped. A five-level
+sweep compares reader event types and model structure across the full depth
+boundary, retaining MimeKit's off-by-one regression rationale.
+Rust's positive, root-inclusive depth budget remains a hard limit: 64
+containers plus their innermost leaf require a budget of 65, while a budget of
+64 fails rather than returning MimeKit's opaque truncated leaf. Rejected parses
+return no partial tree and cannot be reused without replacing the source.
+Coverage includes LF/CRLF, short refills, slices, logging, default/Memory/Source
+storage, exact depth-issue positions, and byte-fed splits for homogeneous and
+mixed nesting. No production changes were needed.
 Header-limit regressions accept an exact-sized folded header, reject one extra
 byte or an oversized field name, and verify the failing header's offset,
 including enclosing multipart/message and mbox framing, and early termination

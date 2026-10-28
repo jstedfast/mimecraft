@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use mimecraft::{
-    ContentEncoding, HeaderId, HeaderList, HeaderTooLong, MimeContentStorage, MimeEntity,
-    MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeMessage, MimeParser,
+    ContentEncoding, HeaderId, HeaderList, HeaderTooLong, MimeComplianceIssue,
+    MimeCompliancePositionKind, MimeComplianceViolation, MimeContentStorage, MimeEntity,
+    MimeEntityKind, MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeMessage, MimeParser,
     MimePartWriteOptions, MimePosition, MimeReader, TextFormat, encodings::NewLineFormat,
 };
 use std::{
@@ -1446,6 +1447,367 @@ fn serialize_structure_case<R: Read + Seek>(
         assert!(decoded.is_empty());
     }
     (structure, output)
+}
+
+#[test]
+fn deeply_nested_message_rfc822_parts() {
+    assert_nested_depth_cases(false, 64, &[64, 65]);
+}
+
+#[test]
+fn deeply_nested_multiparts() {
+    assert_nested_depth_cases(true, 64, &[64, 65]);
+}
+
+#[test]
+fn max_mime_depth_matches_reader() {
+    // The reader's entity callbacks and the parser's model must agree at the
+    // depth boundary. Checking only the deepest level and one below it can
+    // hide off-by-one errors, so sweep the entire boundary as MimeKit does.
+    // Rust counts the root and rejects excess depth instead of returning an
+    // opaque truncated tree; zero is an invalid option, not a truncation level.
+    for multipart in [false, true] {
+        assert_nested_depth_cases(multipart, 5, &[1, 2, 3, 4, 5, 6, 7]);
+    }
+    let options = MimeEntityParseOptions {
+        max_depth: 0,
+        ..Default::default()
+    };
+    assert!(matches!(
+        MimeReader::with_options(b"\r\n".as_slice(), options),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput
+    ));
+    assert!(matches!(
+        MimeParser::with_options(b"\r\n".as_slice(), options),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput
+    ));
+}
+
+struct NestedDepthCase {
+    input: String,
+    body: String,
+    header_offsets: Vec<usize>,
+    multipart: bool,
+    format: NewLineFormat,
+}
+
+fn nested_depth_case(multipart: bool, nesting: usize, format: NewLineFormat) -> NestedDepthCase {
+    let newline = if format == NewLineFormat::Dos {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut input = format!(
+        "From: tester1@contoso.com{newline}\
+         To: tester1@contoso.com{newline}\
+         Subject: test of a deeply nested multipart message{newline}\
+         Date: Tue, 12 Nov 2013 09:12:42 -0500{newline}\
+         Message-ID: <root@contoso.com>{newline}\
+         MIME-Version: 1.0{newline}"
+    );
+    let mut header_offsets = vec![0];
+    for index in 0..nesting {
+        if multipart {
+            write!(
+                input,
+                "Content-Type: multipart/mixed;{newline}\
+                 \tboundary=\"----=_NextPart_000_{index:04}_01CE98CE.6E826F90\"{newline}\
+                 {newline}------=_NextPart_000_{index:04}_01CE98CE.6E826F90{newline}"
+            )
+            .unwrap();
+        } else {
+            write!(input, "Content-Type: message/rfc822{newline}{newline}").unwrap();
+        }
+        header_offsets.push(input.len());
+        if !multipart {
+            write!(
+                input,
+                "From: tester1@contoso.com{newline}\
+                 To: tester1@contoso.com{newline}\
+                 Subject: embedded message {}{newline}\
+                 Date: Tue, 12 Nov 2013 08:12:42 -0500{newline}\
+                 Message-ID: <embedded-{index}@contoso.com>{newline}\
+                 MIME-Version: 1.0{newline}",
+                index + 1
+            )
+            .unwrap();
+        }
+    }
+    write!(
+        input,
+        "Content-Type: text/plain; charset=\"us-ascii\"{newline}\
+         Content-Transfer-Encoding: 7bit{newline}{newline}"
+    )
+    .unwrap();
+    let kind = if multipart { "multipart" } else { "rfc822" };
+    let body = format!("This is the innermost part of a deeply nested {kind} message.{newline}");
+    input.push_str(&body);
+    if multipart {
+        input.push_str(newline);
+        for index in (0..nesting).rev() {
+            write!(
+                input,
+                "------=_NextPart_000_{index:04}_01CE98CE.6E826F90--{newline}"
+            )
+            .unwrap();
+        }
+    }
+    NestedDepthCase {
+        input,
+        body,
+        header_offsets,
+        multipart,
+        format,
+    }
+}
+
+fn assert_nested_depth_cases(multipart: bool, nesting: usize, limits: &[usize]) {
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        let case = nested_depth_case(multipart, nesting, format);
+        for &limit in limits {
+            let options = MimeEntityParseOptions {
+                max_depth: limit,
+                ..Default::default()
+            };
+            assert_nested_reader_depth(&case, options);
+            for logged in [false, true] {
+                let parser =
+                    MimeParser::from_slice_with_options(case.input.as_bytes(), options).unwrap();
+                if let Some(message) = parse_nested_depth_case(parser, &case, limit, logged) {
+                    assert_stored_recovery_bodies(
+                        message.leaf_parts(),
+                        &case.input,
+                        MimeContentStorage::Source,
+                        [case.body.as_str()],
+                    );
+                    assert_nested_depth_model(message, &case);
+                }
+                for chunk in [1, 7, 4096] {
+                    let parser = MimeParser::with_options(
+                        BufReader::with_capacity(chunk, case.input.as_bytes()),
+                        options,
+                    )
+                    .unwrap();
+                    if let Some(message) = parse_nested_depth_case(parser, &case, limit, logged) {
+                        assert_nested_depth_model(message, &case);
+                    }
+                    for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                        let parser = MimeParser::with_storage_and_options(
+                            ShortSource {
+                                inner: Cursor::new(case.input.as_bytes()),
+                                chunk,
+                            },
+                            storage,
+                            options,
+                        )
+                        .unwrap();
+                        if let Some(message) = parse_nested_depth_case(parser, &case, limit, logged)
+                        {
+                            assert_stored_recovery_bodies(
+                                message.leaf_parts(),
+                                &case.input,
+                                storage,
+                                [case.body.as_str()],
+                            );
+                            assert_nested_depth_model(message, &case);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn assert_depth_issues(issues: &[MimeComplianceIssue], case: &NestedDepthCase, limit: usize) {
+    let depth_issues: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue.violation == MimeComplianceViolation::MimeDepthLimitExceeded)
+        .collect();
+    if limit >= case.header_offsets.len() {
+        assert!(depth_issues.is_empty());
+        return;
+    }
+    assert_eq!(depth_issues.len(), 1);
+    let issue = depth_issues[0];
+    let offset = if case.multipart {
+        // An opening delimiter establishes the child before its headers are
+        // consumed, so the hard limit is reported at that delimiter.
+        case.input[..case.header_offsets[limit] - 1]
+            .rfind('\n')
+            .unwrap()
+            + 1
+    } else {
+        case.header_offsets[limit]
+    };
+    assert_eq!(issue.stream_offset, offset as u64);
+    assert_eq!(
+        issue.line_number,
+        1 + case.input.as_bytes()[..offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count() as u64,
+    );
+    assert_eq!(issue.column_number, 1);
+    assert_eq!(
+        issue.position_kind,
+        MimeCompliancePositionKind::ElementStart
+    );
+}
+
+fn assert_nested_reader_depth(case: &NestedDepthCase, options: MimeEntityParseOptions) {
+    let mut reader = MimeReader::with_options(case.input.as_bytes(), options).unwrap();
+    let mut issues = Vec::new();
+    let mut entities = Vec::new();
+    let result = reader.read_message_with_logger(
+        &mut |issue| {
+            issues.push(issue);
+            Ok(())
+        },
+        |event| {
+            if let MimeEvent::EntityBegin { kind, position, .. } = event {
+                entities.push((kind, position.offset as usize));
+            }
+            Ok(())
+        },
+    );
+    let expected: Vec<_> = case
+        .header_offsets
+        .iter()
+        .enumerate()
+        .take(options.max_depth)
+        .map(|(index, &offset)| {
+            let kind = if index + 1 == case.header_offsets.len() {
+                MimeEntityKind::Part
+            } else if case.multipart {
+                MimeEntityKind::Multipart
+            } else {
+                MimeEntityKind::MessagePart
+            };
+            (kind, offset)
+        })
+        .collect();
+    assert_eq!(entities, expected);
+    assert_depth_issues(&issues, case, options.max_depth);
+    if options.max_depth < case.header_offsets.len() {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "MIME entity depth limit exceeded");
+        assert!(!reader.is_end_of_stream());
+        assert_eq!(
+            reader
+                .read_message(|_| panic!("failed reader must not emit events"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
+        );
+    } else {
+        result.unwrap();
+        assert!(reader.is_end_of_stream());
+        assert_eq!(reader.position().offset, case.input.len() as u64);
+    }
+}
+
+fn parse_nested_depth_case<R: BufRead, C: Read + Seek>(
+    mut parser: MimeParser<R, C>,
+    case: &NestedDepthCase,
+    limit: usize,
+    logged: bool,
+) -> Option<MimeMessage<C>> {
+    let mut issues = Vec::new();
+    let result = if logged {
+        parser.parse_message_with_logger(&mut |issue| {
+            issues.push(issue);
+            Ok(())
+        })
+    } else {
+        parser.parse_message()
+    };
+    if logged {
+        assert_depth_issues(&issues, case, limit);
+    }
+    if limit < case.header_offsets.len() {
+        let error = result
+            .err()
+            .expect("excess nesting must not return a partial tree");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "MIME entity depth limit exceeded");
+        assert!(!parser.is_end_of_stream());
+        assert_eq!(
+            parser.parse_message().err().unwrap().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        None
+    } else {
+        let message = result.unwrap();
+        assert!(parser.is_end_of_stream());
+        assert_eq!(parser.position().offset, case.input.len() as u64);
+        Some(message)
+    }
+}
+
+fn assert_nested_depth_model<R: Read + Seek>(mut message: MimeMessage<R>, case: &NestedDepthCase) {
+    let nesting = case.header_offsets.len() - 1;
+    assert_eq!(message.headers().len(), 6);
+    let mut iter = message.iter();
+    let mut count = 0;
+    while let Some(entity) = iter.next() {
+        assert_eq!(iter.depth(), Some(count));
+        match entity {
+            MimeEntity::Multipart(part) => {
+                assert!(case.multipart && count < nesting);
+                assert_eq!(part.children().len(), 1);
+                assert!(part.preamble().is_empty());
+                assert!(part.epilogue().is_empty());
+                assert_eq!(part.headers().len(), 1);
+            }
+            MimeEntity::Message(part) => {
+                assert!(!case.multipart && count < nesting);
+                assert_eq!(part.headers().len(), 1);
+                let inner = part.message().unwrap();
+                assert_eq!(inner.headers().len(), 6);
+                assert_eq!(
+                    inner.subject().unwrap().text,
+                    format!("embedded message {}", count + 1)
+                );
+                assert_eq!(
+                    inner.headers().as_slice()[0].offset(),
+                    Some(case.header_offsets[count + 1] as u64),
+                );
+            }
+            MimeEntity::Part(part) => {
+                assert_eq!(count, nesting);
+                let content_type = part.content_type().unwrap().unwrap();
+                assert!(content_type.is_mime_type("text", "plain"));
+                assert_eq!(content_type.charset(), Some("us-ascii"));
+                assert_eq!(part.content().encoding(), ContentEncoding::SevenBit);
+                assert_eq!(part.headers().len(), 2);
+            }
+        }
+        for header in entity.headers() {
+            let offset = header.offset().unwrap() as usize;
+            assert_eq!(
+                header.raw(),
+                &case.input.as_bytes()[offset..offset + header.raw().len()]
+            );
+        }
+        count += 1;
+    }
+    assert_eq!(count, nesting + 1);
+    assert_eq!(message.leaf_parts().count(), 1);
+    assert_recovery_serialization(&mut message, &case.input, case.format);
+    let mut entity = message.body_mut().unwrap();
+    loop {
+        entity = match entity {
+            MimeEntity::Multipart(part) => &mut part.children_mut()[0],
+            MimeEntity::Message(part) => part.message_mut().unwrap().body_mut().unwrap(),
+            MimeEntity::Part(part) => {
+                let mut decoded = Vec::new();
+                part.content_mut().decode_to(&mut decoded).unwrap();
+                assert_eq!(decoded, case.body.as_bytes());
+                break;
+            }
+        };
+    }
 }
 
 #[test]

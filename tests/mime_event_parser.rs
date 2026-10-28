@@ -241,6 +241,44 @@ fn leading_marker_recovery_survives_pauses() {
 }
 
 #[test]
+fn nested_depth_boundaries_survive_pauses() {
+    // Include both homogeneous chains and mixed wrappers so every entity,
+    // rather than just message or multipart containers, charges one level.
+    for mode in 0..3 {
+        for newline in ["\n", "\r\n"] {
+            let mut wire = String::new();
+            let mut boundaries = Vec::new();
+            for index in 0..5 {
+                if mode == 0 || (mode == 2 && index % 2 == 0) {
+                    wire.push_str(&format!(
+                        "Content-Type: multipart/mixed; boundary=b{index}{newline}\
+                         {newline}--b{index}{newline}"
+                    ));
+                    boundaries.push(index);
+                } else {
+                    wire.push_str(&format!("Content-Type: message/rfc822{newline}{newline}"));
+                }
+            }
+            wire.push_str(&format!("Content-Type: text/plain{newline}{newline}leaf"));
+            for index in boundaries.into_iter().rev() {
+                wire.push_str(&format!("{newline}--b{index}--"));
+            }
+            for limit in 1..=7 {
+                let options = MimeEntityParseOptions {
+                    max_depth: limit,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    sync(wire.as_bytes(), MimeEventFormat::Message, options).error,
+                    (limit < 6).then_some(io::ErrorKind::InvalidData),
+                );
+                assert_splits(wire.as_bytes(), MimeEventFormat::Message, options);
+            }
+        }
+    }
+}
+
+#[test]
 fn message_bom_positions_limits_and_errors_survive_pauses() {
     let wire = b"\xef\xbb\xbfX: y\r\n\r\n\xef\xbb\xbfbody";
     let mut begins = 0;
