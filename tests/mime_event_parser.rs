@@ -207,6 +207,40 @@ From next\r\nSubject: next\r\n\r\n",
 }
 
 #[test]
+fn leading_marker_recovery_survives_pauses() {
+    let wires = [
+        concat!(
+            "Content-Type: message/rfc822\r\n\r\n",
+            ">From first preheader\r\n",
+            ">From second preheader line is longer\r\n",
+            "From: sender@example.org\r\n",
+            "Subject: preheader resize\r\n\r\nbody\r\n",
+        ),
+        "From - \r\n>From munged\r\nSubject: test\r\n\r\nbody\r\n",
+        "From sender@example.com Mon Jan  1 00:00:00 2024\r\nSubject: test",
+        "From sender@example.com Mon Jan  1 00:00:00 2024\r\n\r\n",
+    ];
+    for original in wires {
+        for wire in [original.to_owned(), original.replace("\r\n", "\n")] {
+            assert!(
+                sync(
+                    wire.as_bytes(),
+                    MimeEventFormat::Message,
+                    Default::default()
+                )
+                .error
+                .is_none()
+            );
+            assert_splits(
+                wire.as_bytes(),
+                MimeEventFormat::Message,
+                Default::default(),
+            );
+        }
+    }
+}
+
+#[test]
 fn message_bom_positions_limits_and_errors_survive_pauses() {
     let wire = b"\xef\xbb\xbfX: y\r\n\r\n\xef\xbb\xbfbody";
     let mut begins = 0;

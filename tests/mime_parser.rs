@@ -2314,6 +2314,207 @@ fn message_byte_order_mark_is_not_repeated_for_nested_messages() {
 }
 
 #[test]
+fn pre_header_buffer_resizes_for_multiple_invalid_leading_headers() {
+    let original = concat!(
+        "Content-Type: message/rfc822\r\n\r\n",
+        ">From first preheader\r\n",
+        ">From second preheader line is longer\r\n",
+        "From: sender@example.org\r\n",
+        "Subject: preheader resize\r\n\r\nbody\r\n",
+    );
+    assert_leading_marker_recovery(original, true, 2, Some("preheader resize"));
+    for padding in [31, 4090, 8193] {
+        let input = original.replace(
+            ">From second preheader line is longer",
+            &format!(
+                ">From second preheader line is longer {}",
+                "x".repeat(padding)
+            ),
+        );
+        assert_leading_marker_recovery(&input, true, 2, Some("preheader resize"));
+    }
+}
+
+#[test]
+fn munged_mbox_markers_before_headers() {
+    assert_leading_marker_recovery(
+        "From - \r\n>From munged\r\nSubject: test\r\n\r\nbody\r\n",
+        false,
+        2,
+        Some("test"),
+    );
+}
+
+#[test]
+fn message_stream_with_mbox_marker_followed_by_message() {
+    for (tail, subject) in [("Subject: test", Some("test")), ("\r\n", None)] {
+        let input = format!("From sender@example.com Mon Jan  1 00:00:00 2024\r\n{tail}");
+        assert_leading_marker_recovery(&input, false, 1, subject);
+    }
+}
+
+fn assert_leading_marker_recovery(
+    original: &str,
+    embedded: bool,
+    invalid_headers: usize,
+    subject: Option<&str>,
+) {
+    let original = original.replace("\r\n", "\n");
+    for (format, newline) in [(NewLineFormat::Unix, "\n"), (NewLineFormat::Dos, "\r\n")] {
+        let input = original.replace('\n', newline);
+        let separator = newline.repeat(2);
+        let body = input.rsplit_once(&separator).map_or("", |(_, body)| body);
+        for logged in [false, true] {
+            let message =
+                parse_recovery_message(MimeParser::from_slice(input.as_bytes()), &input, logged);
+            assert_stored_recovery_bodies(
+                message.leaf_parts(),
+                &input,
+                MimeContentStorage::Source,
+                [body],
+            );
+            assert_leading_marker_model(
+                message,
+                &input,
+                format,
+                embedded,
+                invalid_headers,
+                subject,
+            );
+            for chunk in [1, 2, 7, 4096] {
+                let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+                let message = parse_recovery_message(parser, &input, logged);
+                assert_leading_marker_model(
+                    message,
+                    &input,
+                    format,
+                    embedded,
+                    invalid_headers,
+                    subject,
+                );
+                for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+                    let parser = MimeParser::with_storage(
+                        ShortSource {
+                            inner: Cursor::new(input.as_bytes()),
+                            chunk,
+                        },
+                        storage,
+                    )
+                    .unwrap();
+                    let message = parse_recovery_message(parser, &input, logged);
+                    assert_stored_recovery_bodies(message.leaf_parts(), &input, storage, [body]);
+                    assert_leading_marker_model(
+                        message,
+                        &input,
+                        format,
+                        embedded,
+                        invalid_headers,
+                        subject,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn assert_leading_marker_model<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    input: &str,
+    format: NewLineFormat,
+    embedded: bool,
+    invalid_headers: usize,
+    subject: Option<&str>,
+) {
+    let newline = if format == NewLineFormat::Dos {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let separator = newline.repeat(2);
+    let (inner, mut offset) = if embedded {
+        assert!(message.headers().is_empty());
+        let MimeEntity::Message(wrapper) = message.body().unwrap() else {
+            panic!("expected message/rfc822 wrapper")
+        };
+        assert_eq!(wrapper.headers().len(), 1);
+        assert!(
+            wrapper
+                .content_type()
+                .unwrap()
+                .unwrap()
+                .is_mime_type("message", "rfc822")
+        );
+        let header = wrapper.headers().get("Content-Type").unwrap();
+        assert_eq!(header.offset(), Some(0));
+        assert_eq!(
+            header.raw(),
+            format!("Content-Type: message/rfc822{newline}").as_bytes()
+        );
+        (
+            wrapper.message().unwrap(),
+            input.find(&separator).unwrap() + separator.len(),
+        )
+    } else {
+        (&message, 0)
+    };
+    assert_eq!(
+        inner.headers().len(),
+        invalid_headers + usize::from(subject.is_some()) + usize::from(embedded)
+    );
+    assert_eq!(inner.headers().contains("Subject"), subject.is_some());
+    if let Some(subject) = subject {
+        assert_eq!(inner.subject().unwrap().text, subject);
+    }
+    if embedded {
+        assert_eq!(
+            inner.headers().get("From").unwrap().decode_value().text,
+            "sender@example.org"
+        );
+    }
+    // MimeKit accumulates invalid leading records in Message.MboxMarker.
+    // The Rust raw-header model retains them in order instead, including
+    // their newlines, so growing preheaders must not lose or rewrite bytes.
+    for (index, header) in inner.headers().iter().enumerate() {
+        let line = input[offset..].split_inclusive('\n').next().unwrap();
+        assert_eq!(header.offset(), Some(offset as u64));
+        assert_eq!(header.raw(), line.as_bytes());
+        assert_eq!(header.is_invalid(), index < invalid_headers);
+        if header.is_invalid() {
+            assert!(header.raw_value().is_empty());
+            assert_eq!(header.id(), HeaderId::Unknown);
+        }
+        offset += line.len();
+    }
+    let MimeEntity::Part(part) = inner.body().unwrap() else {
+        panic!("expected default leaf")
+    };
+    assert!(part.headers().is_empty());
+    assert_eq!(part.content().encoding(), ContentEncoding::Unspecified);
+    assert_eq!(message.leaf_parts().count(), 1);
+    // Unlike the actual marker consumed by mbox iteration, a leading
+    // From-line parsed as an invalid header remains in serialized output.
+    if input.ends_with('\n') {
+        assert_recovery_serialization(&mut message, input, format);
+    } else {
+        assert_header_only_serialization(&mut message, input, format);
+    }
+    let mut entity = message.body_mut().unwrap();
+    if embedded {
+        let MimeEntity::Message(wrapper) = entity else {
+            unreachable!()
+        };
+        entity = wrapper.message_mut().unwrap().body_mut().unwrap();
+    }
+    let MimeEntity::Part(part) = entity else {
+        unreachable!()
+    };
+    let mut decoded = Vec::new();
+    part.content_mut().decode_to(&mut decoded).unwrap();
+    let body = input.rsplit_once(&separator).map_or("", |(_, body)| body);
+    assert_eq!(decoded, body.as_bytes());
+}
+
+#[test]
 fn invalid_header_after_mbox_marker() {
     for input in [
         "From - \nThis is not a header\nSubject: test\n\nbody\n",
@@ -3402,6 +3603,29 @@ fn assert_recovery_serialization<R: Read + Seek>(
     });
 }
 
+fn assert_header_only_serialization<R: Read + Seek>(
+    message: &mut MimeMessage<R>,
+    input: &str,
+    format: NewLineFormat,
+) {
+    // An absent body writes nothing, even with EnsureNewLine. Do not invent
+    // a newline after an incomplete header or retained leading marker.
+    for ensure_new_line in [false, true, false] {
+        let mut output = Vec::new();
+        message
+            .write_to_with_options(
+                &mut output,
+                &MimePartWriteOptions {
+                    new_line_format: format,
+                    ensure_new_line,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_round_trip("header-only recovery", input.as_bytes(), &output);
+    }
+}
+
 fn assert_recovery_output(
     input: &str,
     format: NewLineFormat,
@@ -4212,20 +4436,7 @@ fn assert_munged_rfc822_model<R: Read + Seek>(
     } else {
         // MimeKit writes the marker verbatim, and null Content writes no body,
         // even with EnsureNewLine. Do not invent a newline after the marker.
-        for ensure_new_line in [false, true, false] {
-            let mut output = Vec::new();
-            message
-                .write_to_with_options(
-                    &mut output,
-                    &MimePartWriteOptions {
-                        new_line_format: format,
-                        ensure_new_line,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-            assert_round_trip("munged marker at EOF", expected.as_bytes(), &output);
-        }
+        assert_header_only_serialization(&mut message, expected, format);
     }
     let MimeEntity::Message(wrapper) = message.body_mut().unwrap() else {
         unreachable!()

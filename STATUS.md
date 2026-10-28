@@ -7274,6 +7274,18 @@ A first embedded header retains its newline when immediately followed by a
 MIME or mbox delimiter, preserving the raw record and the missing-separator
 position; a framing-only blank line still cannot create an absent message.
 Logged and unlogged reads retain identical events and final positions.
+Three further parser cases cover growing invalid leading headers inside an
+embedded message, munged mbox-style lines before ordinary message headers,
+and a leading marker followed by either an EOF-truncated Subject or an empty
+message. Unlike MimeKit's separate Message.MboxMarker, the Rust model retains
+these records as invalid raw headers and serializes them unchanged; actual
+mbox iteration still consumes its marker separately. Coverage checks original
+offsets, header order, payload/source ranges, and repeated serialization after
+the parser is dropped across LF/CRLF, short refills, slices, logging, and
+default/Memory/Source storage. Growing preheaders cross 4 KiB and 8 KiB refill
+boundaries; representative messages also exercise every two-way byte-fed split.
+EnsureNewLine does not append a newline to an EOF-truncated header when there
+is no body. Existing production behavior satisfies these cases.
 Header-limit regressions accept an exact-sized folded header, reject one extra
 byte or an oversized field name, and verify the failing header's offset,
 including enclosing multipart/message and mbox framing, and early termination
