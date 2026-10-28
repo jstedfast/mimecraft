@@ -31,12 +31,52 @@ macro_rules! html_ids {
             }
 
             fn lookup(name: &str) -> Self {
-                $table
-                    .binary_search_by(|(candidate, _)| {
-                        candidate.bytes().map(|byte| byte.to_ascii_lowercase())
-                            .cmp(name.bytes().map(|byte| byte.to_ascii_lowercase()))
-                    })
-                    .map_or(Self::Unknown, |index| $table[index].1)
+                let id = Self::lookup_exact(name);
+                if id != Self::Unknown {
+                    return id;
+                }
+                const MAX_LENGTH: usize = {
+                    let mut maximum = 0;
+                    $(if $name.len() > maximum { maximum = $name.len(); })*
+                    maximum
+                };
+                if name.len() > MAX_LENGTH {
+                    return Self::Unknown;
+                }
+                // Fold once, not during every comparison in a binary search.
+                // The match lets the compiler partition names by length.
+                let mut buffer = [0; MAX_LENGTH];
+                let normalized = &mut buffer[..name.len()];
+                normalized.copy_from_slice(name.as_bytes());
+                normalized.make_ascii_lowercase();
+                let normalized = std::str::from_utf8(normalized)
+                    .expect("ASCII folding preserves UTF-8");
+                Self::lookup_exact(normalized)
+            }
+
+            fn lookup_exact(name: &str) -> Self {
+                match name {
+                    $($name => Self::$id,)*
+                    _ => Self::Unknown,
+                }
+            }
+
+            pub(super) fn take_name(name: &mut String) -> (Self, std::borrow::Cow<'static, str>) {
+                let (id, canonical) = Self::canonical_name(name);
+                // Canonical names need no per-token allocation, and the scanner
+                // keeps its buffer. Preserve every other spelling verbatim.
+                let value = if let Some(canonical) = canonical {
+                    name.clear();
+                    std::borrow::Cow::Borrowed(canonical)
+                } else {
+                    std::borrow::Cow::Owned(std::mem::take(name))
+                };
+                (id, value)
+            }
+
+            pub(super) fn canonical_name(name: &str) -> (Self, Option<&'static str>) {
+                let id = Self::from_name(name);
+                (id, (id != Self::Unknown && name == id.as_str()).then(|| id.as_str()))
             }
         }
 
@@ -46,7 +86,7 @@ macro_rules! html_ids {
             }
         }
 
-        // Keep names sorted ignoring ASCII case for allocation-free lookup.
+        #[cfg(test)]
         const $table: &[(&str, $type)] = &[$(($name, $type::$id),)*];
     };
 }
@@ -461,5 +501,54 @@ mod tests {
         }
         assert!(!HtmlTagId::Unknown.is_empty_element());
         assert!(!HtmlTagId::Unknown.is_formatting_element());
+    }
+
+    #[test]
+    fn folded_lookup_matches_the_name_tables() {
+        for &(name, expected) in TAG_IDS {
+            let mixed: String = name
+                .bytes()
+                .enumerate()
+                .map(|(i, byte)| {
+                    char::from(if i % 2 == 0 {
+                        byte.to_ascii_uppercase()
+                    } else {
+                        byte
+                    })
+                })
+                .collect();
+            assert_eq!(HtmlTagId::from_name(&mixed), expected);
+        }
+        for &(name, expected) in ATTRIBUTE_IDS {
+            let mixed: String = name
+                .bytes()
+                .enumerate()
+                .map(|(i, byte)| {
+                    char::from(if i % 2 == 0 {
+                        byte.to_ascii_uppercase()
+                    } else {
+                        byte
+                    })
+                })
+                .collect();
+            assert_eq!(HtmlAttributeId::from_name(&mixed), expected);
+        }
+        for name in [
+            "",
+            "unknown",
+            "Unknown",
+            "CLASS\0",
+            "d\u{130}v",
+            "\u{e9}",
+            "\u{1f600}",
+            "abcdefghijklmnopqrstuvwxyz",
+        ] {
+            assert_eq!(HtmlTagId::from_name(name), HtmlTagId::Unknown, "{name}");
+            assert_eq!(
+                HtmlAttributeId::from_name(name),
+                HtmlAttributeId::Unknown,
+                "{name}"
+            );
+        }
     }
 }

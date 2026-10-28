@@ -9,6 +9,12 @@
 //! decoding with opt-in reference diagnostics, and plain/flowed HTML rendering,
 //! plus an in-memory HTML writer, known tag/attribute identifiers, checked
 //! attribute collections, and owned HTML token serialization.
+//! A separate token-consuming HTML structural controller tracks namespace
+//! transitions, implicit closures, and lexical content-mode selection without
+//! parsing HTML text or constructing a DOM.
+//! A sans-I/O UTF-8 HTML tokenizer uses that controller to select lexical states,
+//! preserving partial input across chunks. A synchronous `BufRead` adapter
+//! drives the same engine without embedding I/O in the scanner.
 //! Enriched-text HTML conversion adds character and paragraph formatting,
 //! validated parameters, malformed-command recovery, and explicit resource limits.
 //! A byte-oriented streaming RTF tokenizer supplies owned tokens, keyword
@@ -24,8 +30,8 @@
 //! A separate raw RTF HTML extractor recovers unfiltered encapsulated markup
 //! without changing either RTF renderer's behavior.
 //! Decoded RTF hyperlink-field instructions can be parsed without allocating.
-//! HTML tokenization/filtering, HTML-input conversion, and streaming-output
-//! converters are deferred.
+//! HTML filtering, HTML-input conversion, async reader adapters, and
+//! streaming-output converters are deferred.
 
 mod enriched_to_html;
 mod flowed_to_html;
@@ -36,8 +42,14 @@ mod html_attribute_collection;
 mod html_entities;
 mod html_entity_decoder;
 mod html_ids;
+mod html_namespace;
+mod html_open_element_stack;
+mod html_string;
 mod html_tag_context;
 mod html_token;
+mod html_tokenizer;
+mod html_tokenizer_reader;
+mod html_tree_construction;
 mod html_utils;
 mod html_writer;
 mod plain_text_previewer;
@@ -70,10 +82,20 @@ pub use html_entity_decoder::{
     html_decode_with_options,
 };
 pub use html_ids::{HtmlAttributeId, HtmlTagId};
+pub use html_namespace::HtmlNamespace;
 pub use html_tag_context::HtmlTagContext;
 pub use html_token::{
     HtmlCommentToken, HtmlDataToken, HtmlDocTypeError, HtmlDocTypeToken, HtmlTagToken, HtmlToken,
     HtmlTokenKind,
+};
+pub use html_tokenizer::{
+    HtmlSourcePosition, HtmlTokenizer, HtmlTokenizerError, HtmlTokenizerOptions,
+    HtmlTokenizerResult,
+};
+pub use html_tokenizer_reader::HtmlTokenizerReader;
+pub use html_tree_construction::{
+    HtmlClosedElement, HtmlContentMode, HtmlTagDisposition, HtmlTagResult, HtmlTreeConstruction,
+    InvalidHtmlElementDepth,
 };
 pub use html_utils::{HtmlAttributeQuote, html_attribute_encode, html_encode};
 pub use html_writer::{HtmlWriter, HtmlWriterError, HtmlWriterState};

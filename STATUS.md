@@ -3376,9 +3376,154 @@ clearing its identifier. `force_quirks_mode` is metadata only and does not
 affect output.
 
 **Tokens are representations, not sanitizers.** Raw names, comments, script
-contents, CDATA, and already-encoded data must be trusted. HTML tokenization,
-reusable tokenizer buffers, token-filtering callbacks, and HTML-input converters
-remain deferred; this milestone provides owned tokens and serialization only.
+contents, CDATA, and already-encoded data must be trusted. The tokenizer described
+below also preserves malformed attribute names without weakening public checked
+constructors. Reusable token objects, token-filtering callbacks, and HTML-input
+converters remain deferred.
+
+### HTML structural token state
+
+`text::HtmlTreeConstruction` ports MimeKit's structural controller as a
+reusable consumer of existing `HtmlTagToken` values. This is the structural
+prerequisite for the HTML tokenizer, not a character-scanning tokenizer or DOM.
+
+`process_tag` returns `HtmlTagResult`: the following `HtmlContentMode`
+(`Data`, `RcData`, `RawText`, `ScriptData`, or `PlainText`), the
+`HtmlTagDisposition` (`Normal`, `Ignored`, or `AttributesMerged`), and whether
+the tag broke out of foreign content. A normal result does not necessarily
+mean an element was inserted. `last_tag` is absent before the first tag.
+
+The controller retains SVG/MathML integration points, foreign breakouts,
+scope boundaries, implied list/paragraph/table closures, head/noscript and
+frameset rules, form-pointer lifetime, and formatting-end-tag stack effects.
+HTML non-void elements ignore self-closing spelling. Foreign self-closing
+elements are not pushed. Consumers must use the returned lexical mode when
+identifying subsequent tokens; a tag-name-only scanner is not equivalent.
+
+`process_character_data` accepts decoded ordinary data or CDATA, skipping
+HTML whitespace; it is not for RCDATA, RAWTEXT, or script contents.
+Non-whitespace data can imply body and close head-noscript, while NUL does
+not disallow framesets. `tracks_character_data`, `is_in_foreign_content`,
+`is_noscript_open`, and `is_in_frameset` expose structural decisions.
+Scripting defaults to enabled and can be configured for subsequent tokens.
+
+`set_track_closed_elements(true)` collects `HtmlClosedElement` runs in
+innermost-first order. Each includes original name, repeat count, and foreign
+status. A tag clears the preceding collection; character data may append.
+Explicit end-tag targets and stack-only adoption/form rearrangements are not
+reported as implicit closures. Clearing or disabling collection does not
+alter structural state.
+
+The private stack uses cached scope/name indexes and an amortized-growth
+`Vec`, folding consecutive identical elements before applying the depth
+limit. The default limit is 4096 distinct entries, not physical element count.
+Checked construction and limit changes reject zero with
+`InvalidHtmlElementDepth`. Overflow is sticky and selects literal plaintext
+through EOF, including overflow during implied table insertion or formatting
+replacement. Unlike MimeKit's internal helper, this public API defensively
+ignores subsequent tags and character data after overflow rather than
+continuing to mutate incomplete structural state. Raising the limit does
+not recover the failed controller.
+
+`HtmlNamespace` recognizes the six HTML/MathML/SVG/XLink/XML/XMLNS URLs.
+`from_url` returns `None` for unknown URLs and does not trim them.
+`html_namespace` instead retains MimeKit's unknown-declaration-to-HTML
+fallback and last-non-null xmlns selection; it is separate from the current
+node's namespace. Duplicate encoding/type attributes use the first value.
+Names and namespace URLs use ASCII case-insensitive matching, consistent
+with existing Rust identifiers rather than .NET Unicode ordinal folding.
+
+Applicable upstream inline rationale is retained. All direct
+`HtmlOpenElementStackTests` and `HtmlTreeConstructionTests` cases are ported,
+with additional namespace/duplicate-attribute, head/template/frameset, scope,
+form, depth, and implicit-closure regressions. Stack caches are also checked
+against linear searches after mixed mutations. Formatting regressions adapt
+`HtmlTokenizerTests`' adoption-agency sequences, including folded runs, the
+eight-pass outer limit, and retained inner-node boundaries.
+
+**This is not a sanitizer or complete HTML tree builder.** As in MimeKit,
+there is no DOM reparenting, active-formatting reconstruction, foster
+parenting, or complete select/template insertion-mode implementation.
+HTML character scanning now uses this controller as described below.
+HTML-to-text, HTML rewriting/filtering and callbacks, HTML previews, and the
+remaining streaming text adapters are still deferred.
+
+### Sans-I/O HTML tokenization
+
+`text::HtmlTokenizer` ports MimeKit's character scanner as an I/O-independent
+engine. `push(&[u8])` copies input, `next_token()` returns an owned `Token`,
+`NeedInput`, or `EndOfInput`, and `finish()` explicitly signals final input.
+Empty chunks and repeated needs-input polls never trigger EOF recovery.
+Finishing is idempotent; additional input is rejected. Partial UTF-8 scalars,
+character references, markup, and structural state survive suspension.
+
+`HtmlTokenizerReader<R: BufRead>` is a thin synchronous driver over that
+engine, supplying at most 4096 bytes per refill. `Interrupted` is retried;
+other source errors preserve the engine for a later retry. `into_parts()`
+returns both source and engine so buffered input is not silently lost.
+A future async adapter can drive exactly the same scanner; no async runtime
+dependency or async adapter is added in this batch.
+
+The scanner includes data, RCDATA, RAWTEXT, plaintext, script escape and
+double-escape states, attributes, character references, comments, bogus
+declarations, DOCTYPE, and foreign CDATA. The structural controller selects
+modes for SVG/MathML integration, forms, tables, noscript, framesets, formatting
+closures, and depth overflow. A recognized tag name alone does not determine
+whether its contents are raw text.
+
+Tag/attribute spelling, ordered duplicates, malformed attribute names, and
+DOCTYPE keyword/identifier delimiters are retained. Attribute references
+always decode; data/RCDATA decoding is chosen at construction and stays fixed
+across partial tokens. Even when preserving references in output, the scanner
+interprets them when structural state needs to distinguish whitespace from
+visible text. Truncated tags default to encoded literal text, with an option
+to discard them; that option does not discard comments or bare `<`/`</`.
+Raw and script end-tag mismatches reconsume the unmatched character rather
+than hiding subsequent markup. Serialization protects a preceding valueless
+attribute when a malformed following name begins with `=`.
+
+The input contract is strict UTF-8, not MimeKit's charset/BOM-detecting stream
+overloads. There is no BOM removal or newline normalization. Invalid UTF-8
+is a sticky error; a valid incomplete scalar waits for input and only fails
+at explicit EOF. Positions count UTF-8 bytes and Unicode-scalar columns,
+with LF advancing the line. Malformed HTML instead uses lexical recovery.
+Owned token payloads can grow with token length; the default 4096-entry
+structural limit is not a total-memory or token-size cap. After structural
+overflow, remaining literal data is encoded on output even if decoding is off.
+
+The scanner validates contiguous UTF-8 spans once and scans ordinary text,
+names, values, comments, and script runs in bulk, adapting MimeKit's run
+scanners and line-position updates. Complete ordinary tags build attributes
+directly from validated spans; references, NUL, quoted `>`, and incomplete or
+malformed closing syntax retain the resumable state-machine path. Lookahead,
+partial scalars, and errors remain ordered relative to emitted tokens.
+Canonical tag/attribute and stack names reuse static spellings without
+changing case or unknown names. Rare DOCTYPE metadata is boxed internally
+so it does not enlarge every returned token; public token variants and
+constructors are unchanged. Short character-data and attribute-value strings
+use `CompactString` internally (up to 24 bytes inline on 64-bit targets),
+retaining scanner scratch capacity when possible; longer strings still
+transfer their allocations. This avoids
+per-value heap allocation without tying tokens to the scanner lifetime or
+changing their thread-safety traits. No unsafe UTF-8 conversion is used.
+
+Applicable upstream inline rationale is retained. Coverage includes 160
+canonical context/reconsumption/adoption cases, 35 canonical DOCTYPE assertion
+sets, and all nine original non-charset document fixtures with expected token
+descriptions and serialized output. Document inputs are transcoded to UTF-8
+for the explicit engine contract. Partition checks compare full token values
+at every split of the small context cases, in bytewise/17-byte/4096-byte
+document chunks, and at every character-boundary prefix of 158 canonical
+recovery inputs. Additional cases cover strict UTF-8, empty chunks, repeated
+polls, explicit EOF, source errors at every byte, interrupted reads, source
+handoff, source positions, malformed attributes, and serialization boundaries.
+Long Unicode/newline runs, direct-tag fallback after preceding attributes,
+ring-buffer scalar splits, and deferred/sticky UTF-8 errors additionally
+exercise the optimized paths, including per-token scalar positions.
+
+This remains a tokenizer, not a sanitizer or full DOM parser. HTML compliance
+logging, charset/BOM adapters, token-reuse optimizations, HTML-to-text,
+HTML rewriting/filtering, HTML previews, and async adapters remain deferred.
 
 ### HTML character-reference decoding
 
@@ -7791,8 +7936,25 @@ inheritance, and explicit data constructors replace internal encoding/context
 flags. Applicable comments preserve the bogus-comment slash restoration,
 trailing-less-than protection, and DOCTYPE name/quote rationale. Checked
 DOCTYPE setters retain keyword transitions and reject unrepresentable values
-atomically. String output replaces `TextWriter`; tokenization and reusable
-character buffers are not included.
+atomically. String output replaces `TextWriter`; tokenization is a separate
+engine and reusable token objects are not included.
+The structural token controller ports `Text/HtmlTreeConstruction.cs`,
+`Text/HtmlOpenElementStack.cs`, and `Text/HtmlNamespace.cs`, with all direct
+upstream stack/controller regressions and selected structural sequences from
+`HtmlTokenizerTests.cs`. A public token-consumer API replaces the internal
+helper; checked positive limits, terminal post-overflow behavior, `Option`
+lookups, ASCII matching, and amortized vector growth are explicit adaptations.
+Applicable namespace, scope, form-pointer, folding, and adoption-agency
+comments are retained.
+HTML character scanning ports `Text/HtmlTokenizer.cs` and its lexical states,
+using `UnitTests/Text/HtmlTokenizerTests.cs` and the nine non-charset
+`UnitTests/TestData/html` document/token/output fixtures. A strict-UTF-8
+feed/poll engine replaces scanner-owned `TextReader` I/O, with a thin `BufRead`
+adapter sharing all lexical state. Explicit needs-input/EOF outcomes preserve
+partial tokens across arbitrary byte partitions and recoverable reader errors.
+Applicable raw-end-tag reconsumption, reference, declaration, DOCTYPE, and
+depth-overflow comments are retained; charset/BOM detection and compliance
+reporting are not part of this port.
 RTF tokenization ports `Text/RtfTokenizer.cs` and `Text/RtfKeyword.cs`, with
 canonical tokens, malformed recovery, and lexical positions from
 `UnitTests/Text/RtfTokenizerTests.cs` and `RtfInterpreterComplianceTests.cs`.
@@ -8311,6 +8473,8 @@ cargo bench --bench base64 --no-default-features
 cargo bench --bench base64
 cargo bench --bench mime_reader
 cargo bench --bench mime_reader --no-default-features
+cargo bench --bench html
+cargo bench --bench html --no-default-features
 ```
 
 The base64 benchmark, which needs no extra benchmarking framework, compares scalar-only and runtime-dispatched
@@ -8358,14 +8522,35 @@ timing harness is retained; it does not reproduce BenchmarkDotNet's allocation
 diagnostics or statistical machinery. Async and
 LegacyMimeParser variants are not included.
 
+The `html` benchmark ports `HtmlTokenizer_ReadAllTokens` from MimeKit's
+`Benchmarks/Text/HtmlBenchmarks.cs`. Both original documents are preserved
+byte-for-byte under `benches/data/html`: `test.html` and
+`Gimhae_Kim_clan.utf-8.html`. Stable harness IDs are `test_html` and
+`Gimhae_Kim_clan_utf_8_html`. Like upstream's `File.ReadAllText` setup,
+loading removes a UTF-8 BOM and replaces malformed UTF-8 before measurement.
+This differs from MimeKit's Windows-1252 tokenizer-test setup: the benchmark
+decodes 32 malformed bytes in `test.html` as replacement characters, while
+the Korean page has a UTF-8 BOM. Neither line endings nor original fixture
+bytes are normalized.
+
+Each HTML operation creates a fresh `HtmlTokenizerReader` over the decoded
+string and counts and drops all owned tokens. Scanner/source setup, token
+allocation, and destruction are included; fixture loading/decoding is not.
+Canonical counts (7,972 and 1,911 tokens), complete byte consumption, and EOF
+are checked outside measurement. The standalone harness reports median
+decoded-UTF-8 MiB/s and documents/s over five warmed-up samples, matching the
+existing timing harness. The three `HtmlToHtml` conversion/string/callback
+benchmarks are explicitly deferred until that converter is ported.
+
 #### Optional metabench targets
 
-The original `base64` and `mime_reader` targets remain available without any
-benchmark framework. Separate `base64_metabench` and `mime_reader_metabench`
+The `base64`, `mime_reader`, and `html` targets remain available without any
+benchmark framework. Separate `base64_metabench`, `mime_reader_metabench`,
+and `html_metabench`
 targets are enabled by `--features bench-metabench`; their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
-Both harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 21 Base64 and 27 MIME cases.
+These harnesses use the same fixtures, generators, and operations under
+`benches/support`, covering all 21 Base64, 27 MIME, and two HTML cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs
@@ -8376,6 +8561,9 @@ cargo bench --features bench-metabench --bench mime_reader_metabench -- --criter
 cargo bench --features bench-metabench --bench mime_reader_metabench -- --allocations
 cargo bench --features bench-metabench --bench base64_metabench -- --allocations
 cargo bench --features bench-metabench --bench base64_metabench --bench mime_reader_metabench -- --test
+cargo bench --features bench-metabench --bench html_metabench -- --criterion
+cargo bench --features bench-metabench --bench html_metabench -- --allocations
+cargo bench --features bench-metabench --bench html_metabench -- --test
 ```
 
 Criterion timing and allocation tracking work on Windows as well as Linux.
@@ -8402,6 +8590,8 @@ Native cases and Criterion registrations use matching identities. Fixture I/O,
 generation, correctness checks, and reusable Base64 output allocation occur
 outside measurement. MIME measurements still include fresh reader/source setup,
 model construction and destruction; source-backed bodies are not decoded.
+HTML measurements include fresh scanner setup and owned token creation/drop,
+preserving upstream's emphasis on per-document allocation as well as throughput.
 The metabench allocator adds a tracking-flag check even when not collecting
 allocations, and workload entry points are non-inlined. Compare metabench results
 against other metabench runs, not absolute timings from the original harness.

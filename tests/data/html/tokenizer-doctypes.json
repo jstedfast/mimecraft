@@ -1,0 +1,302 @@
+{
+  "source": "MimeKit UnitTests/Text/HtmlTokenizerTests.cs",
+  "cases": [
+    {
+      "name": "TestDocTypeNameParseError",
+      "content": "<!DOCTYPE HTML\u0000>",
+      "assertions": {
+        "Name": "HTML\ufffd",
+        "ForceQuirksMode": false
+      }
+    },
+    {
+      "name": "TestDocTypeNameSpace",
+      "content": "<!DOCTYPE HTML >",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": false
+      }
+    },
+    {
+      "name": "TestDocTypeNameSpaceBogus",
+      "content": "<!DOCTYPE HTML BOGUS>",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": true
+      }
+    },
+    {
+      "name": "TestAfterDocTypeNameShortBogusKeyword",
+      "content": "<!DOCTYPE HTML BOG><div class=x></DIV></p>",
+      "assertions": {
+        "Name": "HTML"
+      }
+    },
+    {
+      "name": "TestAfterDocTypeNameBogusDocType",
+      "content": "<!DOCTYPE HTML PUBLISH>",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": true
+      }
+    },
+    {
+      "name": "TestBogusDocTypeAfterName",
+      "content": "<!DOCTYPE HTML BOGUS >",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": true
+      }
+    },
+    {
+      "name": "TestDocTypeNamePublicX",
+      "content": "<!DOCTYPE HTML PUBLICX>",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": true
+      }
+    },
+    {
+      "name": "TestDocTypePublicIdentifierQuotedParseError",
+      "content": "<!DOCTYPE HTML PUBLIC \"public-identifier\u0000\">",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": false,
+        "PublicKeyword": "PUBLIC",
+        "PublicIdentifier": "public-identifier\ufffd"
+      }
+    },
+    {
+      "name": "TestDocTypeSystemIdentifierQuotedParseError",
+      "content": "<!DOCTYPE HTML SYSTEM \"system-identifier\u0000\">",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": false,
+        "SystemKeyword": "SYSTEM",
+        "SystemIdentifier": "system-identifier\ufffd"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterPublicKeyword",
+      "content": "<!DOCTYPE HTML PuBlIc",
+      "assertions": {
+        "Name": "HTML",
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeBeforePublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc ",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc"
+      }
+    },
+    {
+      "name": "TestIncompleteDocTypeBeforePublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc  >",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc"
+      }
+    },
+    {
+      "name": "TestInvalidDocTypeBeforePublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc  value>",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc"
+      }
+    },
+    {
+      "name": "TestIncompleteDocTypePublicIdentifierQuoted",
+      "content": "<!DOCTYPE HTML PuBlIc \"value>",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypePublicIdentifierQuoted",
+      "content": "<!DOCTYPE HTML PuBlIc \"value",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterPublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypePublicWithoutSpace",
+      "content": "<!DOCTYPE HTML PuBlIc\"value\">",
+      "assertions": {
+        "ForceQuirksMode": false,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeQuoteAfterPublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"\">",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeCharAfterPublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"x>",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeBetweenPublicAndSystemIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\" ",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestInvalidDocTypeBetweenPublicAndSystemIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"  x>",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeBetweenPublicAndSystemIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"  >",
+      "assertions": {
+        "ForceQuirksMode": false,
+        "PublicKeyword": "PuBlIc",
+        "PublicIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeNamePublicClose",
+      "content": "<!DOCTYPE HTML PuBlIc>",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "PublicKeyword": "PuBlIc"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterSystemKeyword",
+      "content": "<!DOCTYPE HTML SySTeM",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "SystemKeyword": "SySTeM"
+      }
+    },
+    {
+      "name": "TestDocTypeSystemWithoutSpace",
+      "content": "<!DOCTYPE HTML SySTeM\"value\">",
+      "assertions": {
+        "ForceQuirksMode": false,
+        "SystemKeyword": "SySTeM",
+        "SystemIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeBeforeSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM ",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "SystemKeyword": "SySTeM"
+      }
+    },
+    {
+      "name": "TestDocTypeBeforeSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM  >",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "SystemKeyword": "SySTeM"
+      }
+    },
+    {
+      "name": "TestDocTypeBeforeSystemIdentifierX",
+      "content": "<!DOCTYPE HTML SySTeM  x>",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "SystemKeyword": "SySTeM"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "SystemKeyword": "SySTeM",
+        "SystemIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeQuoteAfterSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value\"\">",
+      "assertions": {
+        "ForceQuirksMode": false,
+        "SystemKeyword": "SySTeM",
+        "SystemIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeCharAfterSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value\"x>",
+      "assertions": {
+        "ForceQuirksMode": false,
+        "SystemKeyword": "SySTeM",
+        "SystemIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value\" ",
+      "assertions": {
+        "ForceQuirksMode": true,
+        "SystemKeyword": "SySTeM",
+        "SystemIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestTruncatedBogusDocType",
+      "content": "<!DOCTYPE HTML SySTeM \"value\" x",
+      "assertions": {
+        "ForceQuirksMode": false,
+        "SystemKeyword": "SySTeM",
+        "SystemIdentifier": "value"
+      }
+    },
+    {
+      "name": "TestDocTypeNameSystemX",
+      "content": "<!DOCTYPE HTML SYSTEMX>",
+      "assertions": {
+        "ForceQuirksMode": true
+      }
+    },
+    {
+      "name": "TestDocTypeNameSystem",
+      "content": "<!DOCTYPE HTML SYSTEM>",
+      "assertions": {
+        "ForceQuirksMode": true
+      }
+    }
+  ]
+}

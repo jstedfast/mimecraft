@@ -7,6 +7,7 @@ license = "MIT AND Unicode-3.0"
 publish = false
 
 [dependencies]
+compact_str = "0.10.0"
 criterion = { version = "0.8.2", default-features = false, optional = true }
 encoding_rs = "0.8"
 fluent-uri = "0.4"
@@ -38,11 +39,20 @@ name = "mime_reader"
 harness = false
 
 [[bench]]
+name = "html"
+harness = false
+
+[[bench]]
 name = "base64_metabench"
 harness = false
 required-features = ["bench-metabench"]
 
 [[bench]]
 name = "mime_reader_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
+name = "html_metabench"
 harness = false
 required-features = ["bench-metabench"]

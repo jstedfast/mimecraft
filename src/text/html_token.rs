@@ -3,7 +3,10 @@
 
 use std::{error::Error, fmt};
 
-use super::{HtmlAttributeCollection, HtmlAttributeQuote, HtmlTagId, html_utils::encode_into};
+use super::{
+    HtmlAttributeCollection, HtmlAttributeQuote, HtmlTagId, html_string::HtmlString,
+    html_utils::encode_into,
+};
 
 /// The kind of content represented by an [`HtmlToken`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +35,8 @@ pub enum HtmlTokenKind {
 /// Tokens are **not sanitized**. Comments, raw data, script data, CDATA, and tag
 /// names are written verbatim, even when they contain markup delimiters. Use
 /// [`HtmlDataToken::from_text`] to encode plain character data. Tag attributes
-/// remain checked and their values are escaped.
+/// created by callers remain checked; tokenizer-originated names may be
+/// malformed. Attribute values are escaped.
 ///
 /// ```
 /// use mimecraft::text::{HtmlDataToken, HtmlToken, HtmlWriter};
@@ -189,16 +193,24 @@ impl HtmlCommentToken {
 /// These constructors do not tokenize or verify the supplied context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HtmlDataToken {
-    data: String,
+    data: HtmlString,
     encode_entities: bool,
     is_data_state: bool,
 }
 
 impl HtmlDataToken {
+    pub(super) fn from_tokenizer(data: &mut String, encode: bool, data_state: bool) -> Self {
+        Self {
+            data: HtmlString::take(data),
+            encode_entities: encode,
+            is_data_state: !encode && data_state,
+        }
+    }
+
     /// Creates already-encoded or intentionally raw character data.
     pub fn new(data: impl Into<String>) -> Self {
         Self {
-            data: data.into(),
+            data: HtmlString::from(data.into()),
             encode_entities: false,
             is_data_state: false,
         }
@@ -246,16 +258,16 @@ impl HtmlDataToken {
     }
 }
 
-/// A complete HTML tag with an immutable name and ordered, checked attributes.
+/// A complete HTML tag with an immutable name and ordered attributes.
 ///
 /// Unlike [`super::HtmlWriter`]'s name-based operations, token tag names are
 /// **not validated**: MimeKit's token constructors preserve arbitrary names.
 /// Names must be trusted. Attributes still use [`super::HtmlAttribute`]'s
-/// checked constructors; tokenizer-originated unchecked attributes are deferred.
+/// checked constructors; the tokenizer can also preserve malformed names.
 /// Empty-element spelling is explicit, not inferred from the recognized name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HtmlTagToken {
-    name: String,
+    name: std::borrow::Cow<'static, str>,
     attributes: HtmlAttributeCollection,
     id: HtmlTagId,
     empty: bool,
@@ -263,6 +275,22 @@ pub struct HtmlTagToken {
 }
 
 impl HtmlTagToken {
+    pub(super) fn from_tokenizer(
+        name: &mut String,
+        attributes: Vec<super::HtmlAttribute>,
+        empty: bool,
+        end: bool,
+    ) -> Self {
+        let (id, name) = HtmlTagId::take_name(name);
+        Self {
+            name,
+            attributes: attributes.into(),
+            id,
+            empty,
+            end,
+        }
+    }
+
     /// Creates a start tag closed with `>`, preserving name and attribute order.
     pub fn start(name: impl Into<String>, attributes: impl Into<HtmlAttributeCollection>) -> Self {
         Self::new(name.into(), attributes.into(), false, false)
@@ -281,7 +309,7 @@ impl HtmlTagToken {
     fn new(name: String, attributes: HtmlAttributeCollection, empty: bool, end: bool) -> Self {
         Self {
             id: HtmlTagId::from_name(&name),
-            name,
+            name: name.into(),
             attributes,
             empty,
             end,
@@ -319,9 +347,16 @@ impl HtmlTagToken {
             output.push('/');
         }
         output.push_str(&self.name);
-        for attribute in &self.attributes {
-            // Checked names cannot begin with '=' and be reparsed as the
-            // preceding valueless attribute's value.
+        for (index, attribute) in self.attributes.iter().enumerate() {
+            // Give the preceding valueless attribute an explicit empty value
+            // so a tokenizer-originated name beginning with '=' cannot be
+            // reparsed as its value.
+            if index > 0
+                && self.attributes[index - 1].value().is_none()
+                && attribute.name().starts_with('=')
+            {
+                output.push_str("=\"\"");
+            }
             output.push(' ');
             output.push_str(attribute.name());
             if let Some(value) = attribute.value() {
@@ -379,30 +414,39 @@ impl Error for HtmlDocTypeError {}
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HtmlDocTypeToken {
-    raw_tag_name: String,
+    // DOCTYPE is rare. Keep its strings out of the inline HtmlToken payload so
+    // every data/tag token does not copy space for six unrelated strings.
+    pub(super) metadata: Box<DocTypeMetadata>,
+    /// Quirks-mode metadata; changing this flag does not change serialization.
+    pub force_quirks_mode: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DocTypeMetadata {
+    pub(super) raw_tag_name: String,
     name: Option<String>,
     public_identifier: Option<String>,
     system_identifier: Option<String>,
-    public_keyword: Option<String>,
-    system_keyword: Option<String>,
-    // Original identifier delimiters, when supplied by a future tokenizer.
-    public_identifier_quote: HtmlAttributeQuote,
-    system_identifier_quote: HtmlAttributeQuote,
-    /// Quirks-mode metadata; changing this flag does not change serialization.
-    pub force_quirks_mode: bool,
+    pub(super) public_keyword: Option<String>,
+    pub(super) system_keyword: Option<String>,
+    // Preserve original identifier delimiters when supplied by the tokenizer.
+    pub(super) public_identifier_quote: HtmlAttributeQuote,
+    pub(super) system_identifier_quote: HtmlAttributeQuote,
 }
 
 impl Default for HtmlDocTypeToken {
     fn default() -> Self {
         Self {
-            raw_tag_name: "DOCTYPE".into(),
-            name: None,
-            public_identifier: None,
-            system_identifier: None,
-            public_keyword: None,
-            system_keyword: None,
-            public_identifier_quote: HtmlAttributeQuote::Double,
-            system_identifier_quote: HtmlAttributeQuote::Double,
+            metadata: Box::new(DocTypeMetadata {
+                raw_tag_name: "DOCTYPE".into(),
+                name: None,
+                public_identifier: None,
+                system_identifier: None,
+                public_keyword: None,
+                system_keyword: None,
+                public_identifier_quote: HtmlAttributeQuote::Double,
+                system_identifier_quote: HtmlAttributeQuote::Double,
+            }),
             force_quirks_mode: false,
         }
     }
@@ -416,27 +460,27 @@ impl HtmlDocTypeToken {
 
     /// Returns the document type name, not the `DOCTYPE` keyword.
     pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+        self.metadata.name.as_deref()
     }
 
     /// Returns the unencoded public identifier.
     pub fn public_identifier(&self) -> Option<&str> {
-        self.public_identifier.as_deref()
+        self.metadata.public_identifier.as_deref()
     }
 
     /// Returns the unencoded system identifier.
     pub fn system_identifier(&self) -> Option<&str> {
-        self.system_identifier.as_deref()
+        self.metadata.system_identifier.as_deref()
     }
 
     /// Returns the PUBLIC keyword, retained even after clearing its identifier.
     pub fn public_keyword(&self) -> Option<&str> {
-        self.public_keyword.as_deref()
+        self.metadata.public_keyword.as_deref()
     }
 
     /// Returns the SYSTEM keyword, if established by an identifier edit.
     pub fn system_keyword(&self) -> Option<&str> {
-        self.system_keyword.as_deref()
+        self.metadata.system_keyword.as_deref()
     }
 
     /// Sets or clears the name, preserving the supplied spelling.
@@ -452,7 +496,7 @@ impl HtmlDocTypeToken {
         }) {
             return Err(HtmlDocTypeError::InvalidName);
         }
-        self.name = value;
+        self.metadata.name = value;
         Ok(())
     }
 
@@ -470,13 +514,13 @@ impl HtmlDocTypeToken {
             return Err(HtmlDocTypeError::InvalidPublicIdentifier);
         }
         if value.is_some() {
-            if self.public_keyword.is_none() {
-                self.public_keyword = Some("PUBLIC".into());
+            if self.metadata.public_keyword.is_none() {
+                self.metadata.public_keyword = Some("PUBLIC".into());
             }
-        } else if self.system_identifier.is_some() {
-            self.system_keyword = Some("SYSTEM".into());
+        } else if self.metadata.system_identifier.is_some() {
+            self.metadata.system_keyword = Some("SYSTEM".into());
         }
-        self.public_identifier = value;
+        self.metadata.public_identifier = value;
         Ok(())
     }
 
@@ -494,16 +538,22 @@ impl HtmlDocTypeToken {
             return Err(HtmlDocTypeError::InvalidSystemIdentifier);
         }
         if value.is_some() {
-            if self.public_identifier.is_none() && self.system_keyword.is_none() {
-                self.system_keyword = Some("SYSTEM".into());
+            if self.metadata.public_identifier.is_none() && self.metadata.system_keyword.is_none() {
+                self.metadata.system_keyword = Some("SYSTEM".into());
             }
         } else {
-            self.system_keyword = None;
+            self.metadata.system_keyword = None;
         }
-        self.system_identifier = value;
+        self.metadata.system_identifier = value;
         Ok(())
     }
 
+    fn write_to(&self, output: &mut String) {
+        self.metadata.write_to(output);
+    }
+}
+
+impl DocTypeMetadata {
     fn write_to(&self, output: &mut String) {
         output.push_str("<!");
         output.push_str(&self.raw_tag_name);
@@ -555,16 +605,24 @@ fn write_identifier(output: &mut String, identifier: &str, preferred: HtmlAttrib
 
 #[cfg(test)]
 mod tests {
-    use super::{HtmlAttributeQuote, HtmlDocTypeToken, HtmlToken};
+    use super::{HtmlAttributeQuote, HtmlDocTypeToken, HtmlTagToken, HtmlToken};
+
+    #[test]
+    fn rare_doctype_metadata_does_not_inflate_every_token() {
+        assert!(
+            std::mem::size_of::<HtmlToken>()
+                <= std::mem::size_of::<HtmlTagToken>() + std::mem::size_of::<usize>()
+        );
+    }
 
     #[test]
     fn doctype_preserves_original_keywords_and_usable_quotes() {
         let mut token = HtmlDocTypeToken::new();
-        token.raw_tag_name = "DoCtYpE".into();
-        token.public_keyword = Some("PuBlIc".into());
-        token.system_keyword = Some("SyStEm".into());
-        token.public_identifier_quote = HtmlAttributeQuote::Single;
-        token.system_identifier_quote = HtmlAttributeQuote::Single;
+        token.metadata.raw_tag_name = "DoCtYpE".into();
+        token.metadata.public_keyword = Some("PuBlIc".into());
+        token.metadata.system_keyword = Some("SyStEm".into());
+        token.metadata.public_identifier_quote = HtmlAttributeQuote::Single;
+        token.metadata.system_identifier_quote = HtmlAttributeQuote::Single;
         token.set_name(Some("HTML".into())).unwrap();
         token.set_public_identifier(Some("plain".into())).unwrap();
         token.set_system_identifier(Some("it's".into())).unwrap();

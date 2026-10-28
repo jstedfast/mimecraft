@@ -1,0 +1,1445 @@
+{
+  "source": "MimeKit UnitTests/Text/HtmlTokenizerTests.cs",
+  "cases": [
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/0",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript><math></noscript></head><script><t>",
+      "expected": "Tag(head) Tag(noscript) Tag(math) EndTag(noscript) EndTag(head) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/1",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<noscript><math></noscript><script><t>",
+      "expected": "Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/2",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<html> <noscript> <link> <math></noscript><script><t>",
+      "expected": "Tag(html) Data( ) Tag(noscript) Data( ) Tag(link) Data( ) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/3",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript><noscript></noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Tag(noscript) EndTag(noscript) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/4",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript><head></head><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Tag(head) EndTag(head) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/5",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript></br><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) EndTag(br) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/6",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&#32;<math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data( ) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/7",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>x<noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(x) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/8",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&amp;<noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/9",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>& <noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(& ) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/10",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript><div><noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Tag(div) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/11",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "</head><noscript><math></noscript><script><t>",
+      "expected": "EndTag(head) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/12",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<body><noscript><math></noscript><script><t>",
+      "expected": "Tag(body) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/13",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "\u0000<noscript><svg></noscript><script><t>",
+      "expected": "Data(\u0000) Tag(noscript) Tag(svg) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/14",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>\u0000<noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(\u0000) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabled/15",
+      "decode": true,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><template><noscript><math></noscript></template><script><t>",
+      "expected": "Tag(head) Tag(template) Tag(noscript) Tag(math) EndTag(noscript) EndTag(template) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabledNoDecoding/0",
+      "decode": false,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&#32;<math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&#32;) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabledNoDecoding/1",
+      "decode": false,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&#32<math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&#32) Tag(math) EndTag(noscript) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabledNoDecoding/2",
+      "decode": false,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&amp;<noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&amp;) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabledNoDecoding/3",
+      "decode": false,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&<noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingDisabledNoDecoding/4",
+      "decode": false,
+      "scripting": false,
+      "depth": 4096,
+      "content": "<head><noscript>&bogus <noscript><math></noscript><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&bogus ) Tag(noscript) Tag(math) EndTag(noscript) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingEnabled/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<head><noscript><math></noscript></head><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(<math>) EndTag(noscript) EndTag(head) Tag(script) Data(<t>)",
+      "suffix": false
+    },
+    {
+      "name": "TestNoScriptInHeadScriptingEnabled/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<head><noscript>&#32;</noscript><math><script><t>",
+      "expected": "Tag(head) Tag(noscript) Data(&#32;) EndTag(noscript) Tag(math) Tag(script) Tag(t)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<frameset><noscript><frame>",
+      "expected": "Tag(frameset) Tag(noscript) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<frameset><style><frame></style>",
+      "expected": "Tag(frameset) Tag(style) Tag(frame) EndTag(style)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<frameset><plaintext><frame>",
+      "expected": "Tag(frameset) Tag(plaintext) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<frameset></frameset><textarea><frame>",
+      "expected": "Tag(frameset) EndTag(frameset) Tag(textarea) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<frameset><noframes><frame></noframes><frame>",
+      "expected": "Tag(frameset) Tag(noframes) Data(<frame>) EndTag(noframes) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/5",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<head><title>x</title></head><frameset><style><frame>",
+      "expected": "Tag(head) Tag(title) Data(x) EndTag(title) EndTag(head) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/6",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<div><title>x</title><frameset><noscript><frame>",
+      "expected": "Tag(div) Tag(title) Data(x) EndTag(title) Tag(frameset) Tag(noscript) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/7",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<input type=hidden><frameset><style><frame>",
+      "expected": "Tag(input type=\"hidden\") Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/8",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": " &#32;<frameset><style><frame>",
+      "expected": "Data(  ) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/9",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "\u0000<frameset><style><frame>",
+      "expected": "Data(\u0000) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/10",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[ ]]></svg><frameset><style><frame>",
+      "expected": "Tag(svg) Data( ) EndTag(svg) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/11",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><frameset><style><frame>",
+      "expected": "Tag(svg) Tag(foreignObject) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/12",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template></template><frameset><style><frame>",
+      "expected": "Tag(template) EndTag(template) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/13",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template><img></template><frameset><style><frame>",
+      "expected": "Tag(template) Tag(img) EndTag(template) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/14",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template></template><div></div><frameset><style><frame>",
+      "expected": "Tag(template) EndTag(template) Tag(div) EndTag(div) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/15",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template></template></body><frameset><style><frame>",
+      "expected": "Tag(template) EndTag(template) EndTag(body) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/16",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template></template>\u0000<frameset><style><frame>",
+      "expected": "Tag(template) EndTag(template) Data(\u0000) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/17",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "x<frameset><style><frame>",
+      "expected": "Data(x) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/18",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "&#65;<frameset><style><frame>",
+      "expected": "Data(A) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/19",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<body><frameset><style><frame>",
+      "expected": "Tag(body) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/20",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<img><frameset><style><frame>",
+      "expected": "Tag(img) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/21",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<input><frameset><style><frame>",
+      "expected": "Tag(input) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/22",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<input type=\"h\u0131dden\"><frameset><style><frame>",
+      "expected": "Tag(input type=\"h\u0131dden\") Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/23",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "</br><frameset><style><frame>",
+      "expected": "EndTag(br) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/24",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<div></div><template></template><frameset><style><frame>",
+      "expected": "Tag(div) EndTag(div) Tag(template) EndTag(template) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/25",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template></template>x<frameset><style><frame>",
+      "expected": "Tag(template) EndTag(template) Data(x) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/26",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template></template><body><frameset><style><frame>",
+      "expected": "Tag(template) EndTag(template) Tag(body) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/27",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template><frameset><style><frame>",
+      "expected": "Tag(template) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/28",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[x]]></svg><frameset><style><frame>",
+      "expected": "Tag(svg) Data(x) EndTag(svg) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFrameset/29",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><frameset><style><frame>",
+      "expected": "Tag(svg) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFramesetNoDecoding/0",
+      "decode": false,
+      "scripting": true,
+      "depth": 4096,
+      "content": "&#32;<frameset><style><frame>",
+      "expected": "Data(&#32;) Tag(frameset) Tag(style) Tag(frame)",
+      "suffix": false
+    },
+    {
+      "name": "TestFramesetNoDecoding/1",
+      "decode": false,
+      "scripting": true,
+      "depth": 4096,
+      "content": "&#65;<frameset><style><frame>",
+      "expected": "Data(&#65;) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestFramesetNoDecoding/2",
+      "decode": false,
+      "scripting": true,
+      "depth": 4096,
+      "content": "&<frameset><style><frame>",
+      "expected": "Data(&) Tag(frameset) Tag(style) Data(<frame>)",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<<img src=x>",
+      "expected": "Data(<) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<script>x</scrip</script><img src=x>",
+      "expected": "Tag(script) Data(x</scrip) EndTag(script) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<style>x</styl</style><img src=x>",
+      "expected": "Tag(style) Data(x</styl) EndTag(style) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<title>x</titl</title><img src=x>",
+      "expected": "Tag(title) Data(x</titl) EndTag(title) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<!DOC><img src=x>",
+      "expected": "Bogus(DOC) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/5",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<![CDAT><img src=x>",
+      "expected": "Bogus([CDAT) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/6",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<script><!--<script</script><img src=x>",
+      "expected": "Tag(script) Data(<!--<script) EndTag(script) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/7",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<script><!--</a <script></script><!--</script><img src=x>",
+      "expected": "Tag(script) Data(<!--</a <script></script><!--) EndTag(script) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/8",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<script><!--<script></a></script></script><img src=x>",
+      "expected": "Tag(script) Data(<!--<script></a></script>) EndTag(script) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/9",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<script><!--<script>-</script>--></script><img src=x>",
+      "expected": "Tag(script) Data(<!--<script>-</script>-->) EndTag(script) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/10",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<img/onerror=x src=y>",
+      "expected": "Tag(img onerror=\"x\" src=\"y\")",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/11",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<a href=/x>y</a>",
+      "expected": "Tag(a href=\"/x\") Data(y) EndTag(a)",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/12",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<a b/>",
+      "expected": "Tag(a b/)",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/13",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<a b/=c>",
+      "expected": "Tag(a b =c)",
+      "suffix": false
+    },
+    {
+      "name": "TestReconsume/14",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<<<<",
+      "expected": "Data(<<<<)",
+      "suffix": false
+    },
+    {
+      "name": "TestForeignContentStyle/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg/><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg></svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/5",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><g/><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/6",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><svg></svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/7",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/8",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject></foreignObject><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/9",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><desc><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/10",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><title><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/11",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><mi><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/12",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><mtext><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/13",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><mi></mi><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/14",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><mi><mglyph><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/15",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><annotation-xml><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/16",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><annotation-xml encoding=\"text/html\"><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/17",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><annotation-xml encoding=\"APPLICATION/XHTML+XML\"><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/18",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><annotation-xml><svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/19",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/20",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><svg><foreignObject><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/21",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><p><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/22",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><g><g><div><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/23",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg></p><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/24",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg></br><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/25",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><font><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/26",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><font color=red><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/27",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg></g><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/28",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<div><svg></div><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/29",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<foo><svg></foo><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/30",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<foo><div><svg></foo><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/31",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><svg></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/32",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/33",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><svg></form></svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/34",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><svg></form><p><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/35",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><div><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/36",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><p><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/37",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><form><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/38",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<div><form></div><form><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/39",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<table><form><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/40",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<template><form><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/41",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<table><td><svg></table><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/42",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<table><td><svg></td><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/43",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<table><td><svg></tr><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/44",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<td><svg></td><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/45",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<table><tr><td><svg><td><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/46",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<ul><li><svg><li><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/47",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<ul><li><svg></li><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/48",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><div><svg></div><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/49",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><svg></foreignObject><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/50",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><svg></svg></foreignObject><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestForeignContentStyle/51",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><svg></svg></foreignObject></svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><div><svg></b><svg></div><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><div><section><svg></b><svg></section><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><div><math></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><div><svg><g></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><b><div><svg></b><svg></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/5",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><div><svg><foreignObject></b><svg><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/6",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><table><tr><td><svg></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/7",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><object><svg></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/8",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><template><svg></b><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/9",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><span><div></b></div><svg></span><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/10",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><i><div></b></div><svg></i><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/11",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><i><span><span><div></b></div><svg></i><style><!--</style><img>-->",
+      "expected": "Tag(style) Data(<!--) EndTag(style) Tag(img) Data(-->)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/12",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><i><span><span><span><div></b></div><svg></i><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/13",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<b><form><div><svg></b><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/14",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><b><div><svg></b><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestAdoptionAgencyStackUpdates/15",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<form><template><b><form><div><svg></b></template><svg></form><style><!--</style><img>-->",
+      "expected": "Tag(style) Comment(</style><img>)",
+      "suffix": true
+    },
+    {
+      "name": "TestCDataSectionContext/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<![CDATA[ x ><img>]]>",
+      "expected": "Bogus([CDATA[ x ) Tag(img) Data(]]>)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[ x ><img>]]>",
+      "expected": "Tag(svg) Data( x ><img>)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<math><![CDATA[ x ><img>]]>",
+      "expected": "Tag(math) Data( x ><img>)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><foreignObject><![CDATA[ x ><img>]]>",
+      "expected": "Tag(svg) Tag(foreignObject) Data( x ><img>)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg></svg><![CDATA[ x ><img>]]>",
+      "expected": "Tag(svg) EndTag(svg) Bogus([CDATA[ x ) Tag(img) Data(]]>)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/5",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[]]><img>",
+      "expected": "Tag(svg) Tag(img)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/6",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[]]>x<![CDATA[]]]>y",
+      "expected": "Tag(svg) Data(x]y)",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/7",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[]]]]>",
+      "expected": "Tag(svg) Data(]])",
+      "suffix": false
+    },
+    {
+      "name": "TestCDataSectionContext/8",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<svg><![CDATA[]]",
+      "expected": "Tag(svg) Data(]])",
+      "suffix": false
+    },
+    {
+      "name": "TestMixedCaseAppropriateEndTag/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<STYLE>a</style>b",
+      "expected": "Tag(STYLE) Data(a) EndTag(style) Data(b)",
+      "suffix": false
+    },
+    {
+      "name": "TestMixedCaseAppropriateEndTag/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<style>a</STYLE>b",
+      "expected": "Tag(style) Data(a) EndTag(STYLE) Data(b)",
+      "suffix": false
+    },
+    {
+      "name": "TestMixedCaseAppropriateEndTag/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<TiTlE>a</tItLe>b",
+      "expected": "Tag(TiTlE) Data(a) EndTag(tItLe) Data(b)",
+      "suffix": false
+    },
+    {
+      "name": "TestMixedCaseAppropriateEndTag/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<XMP>a</Xmp >b",
+      "expected": "Tag(XMP) Data(a) EndTag(Xmp) Data(b)",
+      "suffix": false
+    },
+    {
+      "name": "TestMixedCaseAppropriateEndTag/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 4096,
+      "content": "<TextArea>a</TEXTAREA/>b",
+      "expected": "Tag(TextArea) Data(a) EndTag(TEXTAREA/) Data(b)",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/0",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<div><span><b><i><img src=x>&amp;",
+      "expected": "Tag(div) Tag(span) Tag(b) Tag(i) Data(<img src=x>&amp;)",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/1",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<div><span><b></b><i><img src=x>",
+      "expected": "Tag(div) Tag(span) Tag(b) EndTag(b) Tag(i) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/2",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<div><div><div><div><div><span><b><img src=x>",
+      "expected": "Tag(div) Tag(div) Tag(div) Tag(div) Tag(div) Tag(span) Tag(b) Tag(img src=\"x\")",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/3",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<div><span><svg><style><img src=x></style>",
+      "expected": "Tag(div) Tag(span) Tag(svg) Tag(style) Data(<img src=x></style>)",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/4",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<div><svg><g><foreignObject><style><img src=x></style>",
+      "expected": "Tag(div) Tag(svg) Tag(g) Tag(foreignObject) Data(<style><img src=x></style>)",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/5",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<div><span><b><svg><![CDATA[<img src=x>]]>",
+      "expected": "Tag(div) Tag(span) Tag(b) Tag(svg) Data(<![CDATA[<img src=x>]]>)",
+      "suffix": false
+    },
+    {
+      "name": "TestMaxElementDepthExceeded/6",
+      "decode": true,
+      "scripting": true,
+      "depth": 3,
+      "content": "<table><tr><td><img src=x>",
+      "expected": "Tag(table) Tag(tr) Tag(td) Data(<img src=x>)",
+      "suffix": false
+    }
+  ]
+}

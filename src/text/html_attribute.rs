@@ -1,9 +1,9 @@
 // Adapted from MimeKit's Text/HtmlAttribute.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{error::Error, fmt};
+use std::{borrow::Cow, error::Error, fmt};
 
-use super::{HtmlAttributeId, html_utils::is_valid_attribute_name};
+use super::{HtmlAttributeId, html_string::HtmlString, html_utils::is_valid_attribute_name};
 
 /// An error constructing a checked [`HtmlAttribute`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,12 +46,36 @@ impl Error for HtmlAttributeError {}
 /// ```
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct HtmlAttribute {
-    name: String,
-    value: Option<String>,
+    name: Cow<'static, str>,
+    value: Option<HtmlString>,
     id: HtmlAttributeId,
 }
 
 impl HtmlAttribute {
+    // Tokenization preserves malformed names for consumers to inspect. Keep
+    // this separate from the checked public constructors.
+    pub(super) fn from_tokenizer(name: &mut String, value: Option<String>) -> Self {
+        let (id, name) = HtmlAttributeId::take_name(name);
+        Self {
+            id,
+            name,
+            value: value.map(Into::into),
+        }
+    }
+
+    pub(super) fn set_tokenizer_value(&mut self, value: &mut String) {
+        self.value = Some(HtmlString::take(value));
+    }
+
+    pub(super) fn from_tokenizer_str(name: &str, value: Option<&str>) -> Self {
+        let (id, canonical) = HtmlAttributeId::canonical_name(name);
+        Self {
+            id,
+            name: canonical.map_or_else(|| Cow::Owned(name.into()), Cow::Borrowed),
+            value: value.map(Into::into),
+        }
+    }
+
     /// Creates an attribute, preserving the supplied name and unescaped value.
     ///
     /// # Errors
@@ -67,8 +91,8 @@ impl HtmlAttribute {
             // Immutable names let us resolve the identifier once instead of
             // maintaining MimeKit's lazy, sentinel-based identifier cache.
             id: HtmlAttributeId::from_name(&name),
-            name,
-            value,
+            name: name.into(),
+            value: value.map(Into::into),
         })
     }
 
@@ -83,8 +107,8 @@ impl HtmlAttribute {
             return Err(HtmlAttributeError::UnknownId);
         }
         Ok(Self {
-            name: id.as_str().to_owned(),
-            value,
+            name: Cow::Borrowed(id.as_str()),
+            value: value.map(Into::into),
             id,
         })
     }

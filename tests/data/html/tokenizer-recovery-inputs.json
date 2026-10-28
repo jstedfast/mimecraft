@@ -1,0 +1,637 @@
+{
+  "source": "MimeKit UnitTests/Text/HtmlTokenizerTests.cs",
+  "inputs": [
+    {
+      "name": "TestDataCharacterReferencesNotDecoded",
+      "content": "<b>check &CounterClockwiseContourIntegral; is not decoded</b>"
+    },
+    {
+      "name": "TestRcDataCharacterReferencesNotDecoded",
+      "content": "<title>check &CounterClockwiseContourIntegral; is not decoded</title>"
+    },
+    {
+      "name": "TestNumericCharacterReferences",
+      "content": "&#65&#x42;&#x110000;&#0;&#xD800;&#x80;&#0000000000000000000000000000000000000067;&#99999999999999999999;&#;&#x;"
+    },
+    {
+      "name": "TestNamedCharacterReferencesInAttributeValues",
+      "content": "<a href=\"?a=1&not=2&noti;&notin;&not;&not!\">&noti;&notin</a>"
+    },
+    {
+      "name": "TestTruncatedNamedCharacterReference",
+      "content": "&notin"
+    },
+    {
+      "name": "TestBogusCommentNul",
+      "content": "</\u0000>"
+    },
+    {
+      "name": "TestScriptDataEscapedDashDashNul",
+      "content": "<script><!--a--\u0000--></script>"
+    },
+    {
+      "name": "TestTruncatedDocType",
+      "content": "<!DOCTYPE"
+    },
+    {
+      "name": "TestTruncatedDocTypeSpace",
+      "content": "<!DOCTYPE "
+    },
+    {
+      "name": "TestDocTypeNoName",
+      "content": "<!DOCTYPE  >"
+    },
+    {
+      "name": "TestTruncatedDocTypeName",
+      "content": "<!DOCTYPE HTML"
+    },
+    {
+      "name": "TestDocTypeWithName",
+      "content": "<!DOCTYPE HTML>"
+    },
+    {
+      "name": "TestTruncatedAfterDocTypeName",
+      "content": "<!DOCTYPE HTML "
+    },
+    {
+      "name": "TestDocTypeNameParseError",
+      "content": "<!DOCTYPE HTML\u0000>"
+    },
+    {
+      "name": "TestDocTypeNameSpace",
+      "content": "<!DOCTYPE HTML >"
+    },
+    {
+      "name": "TestDocTypeNameSpaceBogus",
+      "content": "<!DOCTYPE HTML BOGUS>"
+    },
+    {
+      "name": "TestAfterDocTypeNameShortBogusKeyword",
+      "content": "<!DOCTYPE HTML BOG><div class=x></DIV></p>"
+    },
+    {
+      "name": "TestAfterDocTypeNameBogusDocType",
+      "content": "<!DOCTYPE HTML PUBLISH>"
+    },
+    {
+      "name": "TestBogusDocTypeAfterName",
+      "content": "<!DOCTYPE HTML BOGUS >"
+    },
+    {
+      "name": "TestDocTypeNamePublicX",
+      "content": "<!DOCTYPE HTML PUBLICX>"
+    },
+    {
+      "name": "TestDocTypePublicIdentifierQuotedParseError",
+      "content": "<!DOCTYPE HTML PUBLIC \"public-identifier\u0000\">"
+    },
+    {
+      "name": "TestDocTypeSystemIdentifierQuotedParseError",
+      "content": "<!DOCTYPE HTML SYSTEM \"system-identifier\u0000\">"
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterPublicKeyword",
+      "content": "<!DOCTYPE HTML PuBlIc"
+    },
+    {
+      "name": "TestTruncatedDocTypeBeforePublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc "
+    },
+    {
+      "name": "TestIncompleteDocTypeBeforePublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc  >"
+    },
+    {
+      "name": "TestInvalidDocTypeBeforePublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc  value>"
+    },
+    {
+      "name": "TestIncompleteDocTypePublicIdentifierQuoted",
+      "content": "<!DOCTYPE HTML PuBlIc \"value>"
+    },
+    {
+      "name": "TestTruncatedDocTypePublicIdentifierQuoted",
+      "content": "<!DOCTYPE HTML PuBlIc \"value"
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterPublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\""
+    },
+    {
+      "name": "TestDocTypePublicWithoutSpace",
+      "content": "<!DOCTYPE HTML PuBlIc\"value\">"
+    },
+    {
+      "name": "TestDocTypeQuoteAfterPublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"\">"
+    },
+    {
+      "name": "TestDocTypeCharAfterPublicIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"x>"
+    },
+    {
+      "name": "TestTruncatedDocTypeBetweenPublicAndSystemIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\" "
+    },
+    {
+      "name": "TestInvalidDocTypeBetweenPublicAndSystemIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"  x>"
+    },
+    {
+      "name": "TestDocTypeBetweenPublicAndSystemIdentifier",
+      "content": "<!DOCTYPE HTML PuBlIc \"value\"  >"
+    },
+    {
+      "name": "TestDocTypeNamePublicClose",
+      "content": "<!DOCTYPE HTML PuBlIc>"
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterSystemKeyword",
+      "content": "<!DOCTYPE HTML SySTeM"
+    },
+    {
+      "name": "TestDocTypeSystemWithoutSpace",
+      "content": "<!DOCTYPE HTML SySTeM\"value\">"
+    },
+    {
+      "name": "TestTruncatedDocTypeBeforeSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM "
+    },
+    {
+      "name": "TestDocTypeBeforeSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM  >"
+    },
+    {
+      "name": "TestDocTypeBeforeSystemIdentifierX",
+      "content": "<!DOCTYPE HTML SySTeM  x>"
+    },
+    {
+      "name": "TestTruncatedDocTypeSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value"
+    },
+    {
+      "name": "TestDocTypeQuoteAfterSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value\"\">"
+    },
+    {
+      "name": "TestDocTypeCharAfterSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value\"x>"
+    },
+    {
+      "name": "TestTruncatedDocTypeAfterSystemIdentifier",
+      "content": "<!DOCTYPE HTML SySTeM \"value\" "
+    },
+    {
+      "name": "TestTruncatedBogusDocType",
+      "content": "<!DOCTYPE HTML SySTeM \"value\" x"
+    },
+    {
+      "name": "TestDocTypeNameSystemX",
+      "content": "<!DOCTYPE HTML SYSTEMX>"
+    },
+    {
+      "name": "TestDocTypeNameSystem",
+      "content": "<!DOCTYPE HTML SYSTEM>"
+    },
+    {
+      "name": "TestTruncatedDocTypeToken",
+      "content": "<!DOC"
+    },
+    {
+      "name": "TestNotQuiteDocTypeBogusComment",
+      "content": "<!DOCS>"
+    },
+    {
+      "name": "TestTruncatedNotQuiteDocTypeBogusComment",
+      "content": "<!DOCS"
+    },
+    {
+      "name": "TestNotQuiteCDATABogusComment",
+      "content": "<![CDAT[>"
+    },
+    {
+      "name": "TestTruncatedNotQuiteCDATABogusComment",
+      "content": "<![CDAT["
+    },
+    {
+      "name": "TestTruncatedCDATA",
+      "content": "<![CDATA"
+    },
+    {
+      "name": "TestTruncatedCDATASection",
+      "content": "<svg><![CDATA[this is some cdata]]"
+    },
+    {
+      "name": "TestTruncatedComment",
+      "content": "<!--comment"
+    },
+    {
+      "name": "TestTruncatedCommentEndDash",
+      "content": "<!--comment-"
+    },
+    {
+      "name": "TestEmptyComment0",
+      "content": "<!-->"
+    },
+    {
+      "name": "TestEmptyComment1",
+      "content": "<!--->"
+    },
+    {
+      "name": "TestEmptyComment2",
+      "content": "<!---->"
+    },
+    {
+      "name": "TestTruncatedEmptyComment0",
+      "content": "<!--"
+    },
+    {
+      "name": "TestTruncatedEmptyComment1",
+      "content": "<!---"
+    },
+    {
+      "name": "TestTruncatedEmptyComment2",
+      "content": "<!----"
+    },
+    {
+      "name": "TestDashComment",
+      "content": "<!---comment-->"
+    },
+    {
+      "name": "TestDashDashComment",
+      "content": "<!----comment-->"
+    },
+    {
+      "name": "TestCommentDash",
+      "content": "<!--comment--->"
+    },
+    {
+      "name": "TestCommentDashDash",
+      "content": "<!--comment---->"
+    },
+    {
+      "name": "TestCommentDashComment",
+      "content": "<!--comment-comment-->"
+    },
+    {
+      "name": "TestCommentDashDashComment",
+      "content": "<!--comment--comment-->"
+    },
+    {
+      "name": "TestCommentEndBang",
+      "content": "<!--comment--!>"
+    },
+    {
+      "name": "TestTruncatedCommentEndBang",
+      "content": "<!--comment--!"
+    },
+    {
+      "name": "TestCommentDashDashBang",
+      "content": "<!--comment--!-->"
+    },
+    {
+      "name": "TestCommentDashDashBangComment",
+      "content": "<!--comment--!comment-->"
+    },
+    {
+      "name": "TestTruncatedCharacterReferenceStart",
+      "content": "&"
+    },
+    {
+      "name": "TestTruncatedCharacterReference",
+      "content": "&am"
+    },
+    {
+      "name": "TestTruncatedTagOpen",
+      "content": "<"
+    },
+    {
+      "name": "TestTagOpenDigit",
+      "content": "<5>"
+    },
+    {
+      "name": "TestTruncatedTagName",
+      "content": "<nam"
+    },
+    {
+      "name": "TestTruncatedBeforeAttributeName",
+      "content": "<name "
+    },
+    {
+      "name": "TestTruncatedAttributeName",
+      "content": "<name attr"
+    },
+    {
+      "name": "TestTruncatedAfterAttributeName",
+      "content": "<name attr  "
+    },
+    {
+      "name": "TestTruncatedSelfClosingTag1",
+      "content": "<name/"
+    },
+    {
+      "name": "TestTruncatedSelfClosingTag2",
+      "content": "<name /"
+    },
+    {
+      "name": "TestTruncatedSelfClosingTagWithAttributeName1",
+      "content": "<name attr/"
+    },
+    {
+      "name": "TestTruncatedSelfClosingTagWithAttributeName2",
+      "content": "<name attr /"
+    },
+    {
+      "name": "TestTruncatedBeforeAttributeValue1",
+      "content": "<name attr ="
+    },
+    {
+      "name": "TestTruncatedBeforeAttributeValue2",
+      "content": "<name attr = "
+    },
+    {
+      "name": "TestTruncatedAttributeValueQuoted",
+      "content": "<name attr=\"value"
+    },
+    {
+      "name": "TestTruncatedAttributeValueQuotedWithAbortedCharacterReference",
+      "content": "<name attr=\"one & two"
+    },
+    {
+      "name": "TestTruncatedAttributeValueSingleQuoted",
+      "content": "<name attr='value"
+    },
+    {
+      "name": "TestTruncatedAttributeValueSingleQuotedWithAbortedCharacterReference",
+      "content": "<name attr='one & two"
+    },
+    {
+      "name": "TestTruncatedAttributeValueUnquoted",
+      "content": "<name attr=value"
+    },
+    {
+      "name": "TestTruncatedCharacterReferenceInAttributeValue1",
+      "content": "<name attr=&"
+    },
+    {
+      "name": "TestTruncatedCharacterReferenceInAttributeValue2",
+      "content": "<name attr=&am"
+    },
+    {
+      "name": "TestUnquotedAmpersandAttributeValue",
+      "content": "<name attr=&>"
+    },
+    {
+      "name": "TestTruncatedAfterAttributeValueQuoted",
+      "content": "<name attr=\"value\""
+    },
+    {
+      "name": "TestAttrbuteNameAfterAttributeValueQuoted",
+      "content": "<name attr1=\"value\"attr2=value>"
+    },
+    {
+      "name": "TestTruncatedSelfClosingTagAfterAttributeValueQuoted",
+      "content": "<name attr=\"value\"/"
+    },
+    {
+      "name": "TestTruncatedSelfClosingTagBeforeAttributeValue",
+      "content": "<name attr=  /"
+    },
+    {
+      "name": "TestSelfClosingTagBeforeAttributeValue",
+      "content": "<name attr=  />"
+    },
+    {
+      "name": "TestMultipleAttributes",
+      "content": "<name attr1=\"value\"  attr2 =  value  attr3  />"
+    },
+    {
+      "name": "TestTruncatedAfterAttributeValueUnquoted",
+      "content": "<name attr=value  "
+    },
+    {
+      "name": "TestTruncatedEndTagOpen",
+      "content": "</"
+    },
+    {
+      "name": "TestTruncatedRawText",
+      "content": "<style>a"
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagOpen",
+      "content": "<style></"
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagOpenNonAsciiLetter",
+      "content": "<style></ "
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagName",
+      "content": "<style></s"
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagNameNotActiveTagSpace",
+      "content": "<style></bold "
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagNameNotActiveTagSolidus",
+      "content": "<style></bold/"
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagNameNotActiveTagGreaterThan",
+      "content": "<style></bold>"
+    },
+    {
+      "name": "TestTruncatedRawTextEndTagNameNotActiveTagNonAsciiLetter",
+      "content": "<style></bold-"
+    },
+    {
+      "name": "TestTruncatedRcData",
+      "content": "<title>a"
+    },
+    {
+      "name": "TestTruncatedRcDataEndTagOpen",
+      "content": "<title></"
+    },
+    {
+      "name": "TestTruncatedRcDataEndTagName",
+      "content": "<title></t"
+    },
+    {
+      "name": "TestTruncatedScriptData",
+      "content": "<script>a"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedDash",
+      "content": "<script><!-- -"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedDashDash",
+      "content": "<script><!--"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedEndTagOpen",
+      "content": "<script><!---</"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedEndTagName",
+      "content": "<script><!---</s"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedEndTagNameActiveTagSpace",
+      "content": "<script><!-- -</script "
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedEndTagNameNotActiveTagSpace",
+      "content": "<script><!-- -</style "
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedEndTagNameNotActiveTagSolidus",
+      "content": "<script><!-- -</style/"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscaped",
+      "content": "<script><!--- "
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapeStart",
+      "content": "<script><!---<s"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapeStartNotActiveTagSpace",
+      "content": "<script><!---<style "
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapeStartNotActiveTagNonAsciiLetter",
+      "content": "<script><!---<style-"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscaped",
+      "content": "<script><!---<script>"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapedDash",
+      "content": "<script><!---<script>-"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapedDashDefault",
+      "content": "<script><!---<script>-a"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapedDashDash",
+      "content": "<script><!---<script>--"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapedDashDashDash",
+      "content": "<script><!---<script>---"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapedDashDashGreaterThan",
+      "content": "<script><!---<script>-->"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapedDashDashLetter",
+      "content": "<script><!---<script>--a"
+    },
+    {
+      "name": "TestTruncatedScriptDataEndTagOpen",
+      "content": "<script></"
+    },
+    {
+      "name": "TestTruncatedScriptDataEndTagName",
+      "content": "<script></s"
+    },
+    {
+      "name": "TestTruncatedScriptDataEndTagNameNotActiveTagSpace",
+      "content": "<script></style "
+    },
+    {
+      "name": "TestTruncatedScriptDataEndTagNameNotActiveTagSolidus",
+      "content": "<script></style/"
+    },
+    {
+      "name": "TestTruncatedScriptDataEndTagNameNotActiveTagGreaterThan",
+      "content": "<script></style>"
+    },
+    {
+      "name": "TestTruncatedScriptDataEndTagNameNotActiveTagNonAsciiLetter",
+      "content": "<script></style-"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapeStartNonDash",
+      "content": "<script><!a"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapeStartDashNonDash",
+      "content": "<script><!-a"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedDashLessThan",
+      "content": "<script><!-- -<"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedDashDefault",
+      "content": "<script><!-- -a"
+    },
+    {
+      "name": "TestTruncatedScriptDataEscapedEndTagOpenNonAsciiLetter",
+      "content": "<script><!-- </ "
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapeEndNotActiveTag",
+      "content": "<script><!--<--<script>double escaped!-</style>"
+    },
+    {
+      "name": "TestTruncatedScriptDataDoubleEscapeEndNonAsciiLetter",
+      "content": "<script><!--<--<script>double escaped!-</style-"
+    },
+    {
+      "name": "TestBeforeAttributeNameParseError",
+      "content": "<img \"image.png\">"
+    },
+    {
+      "name": "TestAfterAttributeNameGreaterThan",
+      "content": "<img src >"
+    },
+    {
+      "name": "TestAfterAttributeNameParseError",
+      "content": "<img src \">"
+    },
+    {
+      "name": "TestBeforeAttributeValueParseError",
+      "content": "<img src= =>"
+    },
+    {
+      "name": "TestBeforeAttributeValueGreaterThan",
+      "content": "<img src= >"
+    },
+    {
+      "name": "TestAttributeValueUnquotedParseError",
+      "content": "<img src=ab=c>"
+    },
+    {
+      "name": "TestIncompleteEndTag",
+      "content": "</>"
+    },
+    {
+      "name": "TestIncompleteEndTagBetweenText",
+      "content": "a</>b"
+    },
+    {
+      "name": "TestInvalidSelfClosingStartTag",
+      "content": "<name/ attr=value>"
+    },
+    {
+      "name": "TestNoScript",
+      "content": "<noscript>"
+    },
+    {
+      "name": "TestNoScriptScriptingEnabled",
+      "content": "<noscript><b>bold</b></noscript>"
+    },
+    {
+      "name": "TestNoScriptScriptingDisabled",
+      "content": "<noscript><b>bold</b></noscript>"
+    }
+  ]
+}
