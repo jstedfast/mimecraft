@@ -60,11 +60,7 @@ impl PlainTextPreviewer {
     pub fn with_maximum_preview_length(
         maximum_preview_length: usize,
     ) -> Result<Self, InvalidPreviewLength> {
-        if !(1..=1024).contains(&maximum_preview_length) {
-            return Err(InvalidPreviewLength {
-                requested: maximum_preview_length,
-            });
-        }
+        validate_preview_length(maximum_preview_length)?;
         Ok(Self {
             maximum_preview_length,
         })
@@ -83,17 +79,8 @@ impl PlainTextPreviewer {
     /// arbitrarily long whitespace runs may need to be scanned.
     pub fn preview(&self, text: &str) -> String {
         let mut preview = Preview::new(self.maximum_preview_length.min(text.len()));
-        let mut remaining = text.chars();
-
-        // Count complete Unicode scalars instead of UTF-16 code units so
-        // truncation cannot leave half a surrogate pair or UTF-8 character.
-        while preview.length < self.maximum_preview_length {
-            let Some(character) = remaining.next() else {
-                break;
-            };
-            preview.push(character);
-        }
-        preview.finish(!remaining.as_str().is_empty())
+        let truncated = preview.append(text, self.maximum_preview_length);
+        preview.finish(truncated)
     }
 
     /// Generates a preview from the current position of a buffered UTF-8 reader.
@@ -144,14 +131,14 @@ impl PlainTextPreviewer {
     }
 }
 
-struct Preview {
+pub(super) struct Preview {
     text: String,
     length: usize,
     whitespace: bool,
 }
 
 impl Preview {
-    fn new(capacity: usize) -> Self {
+    pub(super) fn new(capacity: usize) -> Self {
         Self {
             text: String::with_capacity(capacity),
             length: 0,
@@ -173,7 +160,20 @@ impl Preview {
         }
     }
 
-    fn finish(mut self, truncated: bool) -> String {
+    pub(super) fn append(&mut self, text: &str, maximum: usize) -> bool {
+        // Count complete Unicode scalars instead of UTF-16 code units so
+        // truncation cannot leave half a surrogate pair or UTF-8 character.
+        let mut remaining = text.chars();
+        while self.length < maximum {
+            let Some(character) = remaining.next() else {
+                break;
+            };
+            self.push(character);
+        }
+        !remaining.as_str().is_empty()
+    }
+
+    pub(super) fn finish(mut self, truncated: bool) -> String {
         // Match the string overload's ordering: trim first, then replace the
         // last retained character, even when only whitespace remains unread.
         if self.whitespace && !self.text.is_empty() {
@@ -249,3 +249,10 @@ impl fmt::Display for InvalidPreviewLength {
 }
 
 impl Error for InvalidPreviewLength {}
+
+pub(super) fn validate_preview_length(maximum: usize) -> Result<(), InvalidPreviewLength> {
+    if !(1..=1024).contains(&maximum) {
+        return Err(InvalidPreviewLength { requested: maximum });
+    }
+    Ok(())
+}

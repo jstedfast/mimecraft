@@ -101,6 +101,8 @@ MimeKit. The crate is not configured for publication.
   space stuffing, UTF-8-safe wrapping, and explicit CRLF/LF output.
 - Plain-text previews with Unicode whitespace normalization, checked length
   limits, and character-safe ellipsis truncation.
+- HTML body previews with image alternative text, list numbering, scalar-safe
+  truncation, and constant-time open-element tracking.
 - HTML character-data and quoted attribute encoding with decimal Unicode
   references and MimeKit-compatible control-character handling.
 - Enriched-text HTML rendering with character styles, paragraph formatting,
@@ -3449,7 +3451,7 @@ eight-pass outer limit, and retained inner-node boundaries.
 there is no DOM reparenting, active-formatting reconstruction, foster
 parenting, or complete select/template insertion-mode implementation.
 HTML character scanning now uses this controller as described below.
-HTML rewriting/filtering and callbacks, HTML previews, and the
+HTML rewriting/filtering, callbacks, and the
 remaining streaming text adapters are still deferred.
 
 ### Sans-I/O HTML tokenization
@@ -3527,7 +3529,7 @@ exercise the optimized paths, including per-token scalar positions.
 
 This remains a tokenizer, not a sanitizer or full DOM parser. HTML compliance
 logging, charset/BOM adapters, token-reuse optimizations,
-HTML rewriting/filtering, HTML previews, and async adapters remain deferred.
+HTML rewriting/filtering and async adapters remain deferred.
 
 ### Converting HTML to plain text
 
@@ -3583,6 +3585,57 @@ markup inputs against MimeKit with whole-string and one-byte reader input.
 No charset/BOM sniffing, CSS evaluation, resource fetching, DOM construction,
 HTML sanitization, MIME-body replacement or async adapter is provided.
 Escape the result before embedding it in HTML.
+
+### HTML body previews
+
+`text::HtmlTextPreviewer` ports MimeKit's HTML preview heuristics through the
+existing sans-I/O tokenizer. `preview(&str)` returns a string;
+`preview_reader(&mut reader)` accepts a strict UTF-8 `BufRead`. The default
+maximum length is 230; `with_maximum_preview_length` accepts 1 through 1024
+Unicode scalars, matching `PlainTextPreviewer` rather than counting UTF-16
+code units. Both previewers share whitespace normalization and ellipsis logic.
+
+An explicit non-self-closing `body` tag is required; ordinary HTML fragments
+produce no preview. Paragraphs and breaks introduce spaces, image alternative
+text is included, and ordered list items are numbered starting at one.
+List start/value attributes, CSS, and hidden attributes are not interpreted.
+Suppression depends on the innermost open element rather than inherited
+visibility: list/table containers suppress data while their items/cells allow
+it. Script tokens, comments and CDATA are omitted. Scripting remains enabled;
+EOF-truncated tags are discarded. These are upstream preview heuristics, not
+the richer formatting or visibility rules of `HtmlToText`.
+
+Whitespace, including U+200B through U+200D, collapses to ASCII spaces.
+Only additional eligible text establishes truncation; reaching the limit at
+the end of a token does not itself append an ellipsis. Trailing space is trimmed
+before the last retained scalar is replaced. Prefix spacing and image/list text
+participate in that decision. Supplementary characters remain intact; grapheme
+clusters can split. A doubly-linked slot arena and per-tag identifier chains
+preserve constant-time middle removal and list lookup, reusing removed slots
+instead of retaining every historical element.
+
+The reader may consume ahead in chunks of up to 4096 bytes; queued tokenizer
+input is discarded on return, so unlike the plain previewer's reader it does
+not preserve the exact unused suffix. I/O and strict UTF-8 errors propagate
+without partial output; interruptions retry. Completing a token can encounter
+invalid UTF-8 beyond the desired preview text. Only preview output is bounded:
+individual tokens and independent preview contexts can grow with the input,
+and suppressed or body-less input can require scanning the whole source.
+The tokenizer's default structural depth limit remains unchanged.
+
+All applicable upstream preview cases are ported, including the three original
+HTML fixtures with first-16-KiB replacement decoding, seven nested/misnested
+cases, and three 100,000-element complexity regressions. Additional coverage
+includes Unicode, token-boundary truncation, duplicate image attributes, strict
+UTF-8, tiny readers, interruptions, read-ahead, context-slot reuse and errors.
+Applicable inline comments explaining constant-time tracking are retained.
+A development comparison also matched 4096 generated mixed/malformed inputs
+against MimeKit with whole-string and one-byte reader input.
+There is no corresponding upstream preview benchmark to port.
+
+Charset/BOM detection, charset-selecting stream overloads, automatic MIME-body
+selection/preview generation, and async adapters remain deferred. The output
+is plain text, not sanitized HTML; escape it before embedding it in HTML.
 
 ### HTML character-reference decoding
 
@@ -7964,6 +8017,10 @@ the default and checked length range in `Text/TextPreviewer.cs`, and
 trim-before-ellipsis ordering are retained; Unicode scalar counts replace
 UTF-16 code-unit counts. Stream overloads, automatic body previews, and
 charset-recovery behavior are not ported.
+HTML previews adapt `Text/HtmlTextPreviewer.cs` and
+`UnitTests/Text/HtmlTextPreviewerTests.cs`, including their document fixtures
+and constant-time open-element regression workloads. The reader contract is
+strict UTF-8 with tokenizer read-ahead; length limits count Unicode scalars.
 HTML encoding adapts `Text/HtmlUtils.cs` and
 `UnitTests/Text/HtmlUtilsTests.cs`, preserving the unchanged-prefix fast path,
 quote-specific escaping, control handling, and decimal-reference boundaries.

@@ -32,6 +32,8 @@
 //! Decoded RTF hyperlink-field instructions can be parsed without allocating.
 //! HTML-to-text conversion preserves structural formatting with bounded UTF-8
 //! input/output, optional link and image text, and a synchronous writer adapter.
+//! HTML body previews add MimeKit's whitespace, image and list heuristics with
+//! scalar-safe truncation and constant-time open-element tracking.
 //! HTML filtering, async reader adapters, and other streaming-output converters
 //! are deferred.
 
@@ -48,6 +50,7 @@ mod html_namespace;
 mod html_open_element_stack;
 mod html_string;
 mod html_tag_context;
+mod html_text_previewer;
 mod html_to_text;
 mod html_token;
 mod html_tokenizer;
@@ -87,6 +90,7 @@ pub use html_entity_decoder::{
 pub use html_ids::{HtmlAttributeId, HtmlTagId};
 pub use html_namespace::HtmlNamespace;
 pub use html_tag_context::HtmlTagContext;
+pub use html_text_previewer::HtmlTextPreviewer;
 pub use html_to_text::{HtmlToText, HtmlToTextError};
 pub use html_token::{
     HtmlCommentToken, HtmlDataToken, HtmlDocTypeError, HtmlDocTypeToken, HtmlTagToken, HtmlToken,
