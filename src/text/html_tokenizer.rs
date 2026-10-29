@@ -336,6 +336,14 @@ impl HtmlTokenizer {
         self.tree.set_track_closed_elements(enabled);
     }
 
+    /// Clears collected implicit closures without changing structural state.
+    ///
+    /// Consumers should clear these after processing a token: character data
+    /// can append closures, while tags start a new collection.
+    pub fn clear_closed_elements(&mut self) {
+        self.tree.clear_closed_elements();
+    }
+
     /// Returns the declared html namespace, not the current foreign namespace.
     pub fn html_namespace(&self) -> HtmlNamespace {
         self.tree.html_namespace()

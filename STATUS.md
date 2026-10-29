@@ -108,6 +108,9 @@ MimeKit. The crate is not configured for publication.
 - HTML character-reference decoding with the complete named-entity table,
   longest-name matching, numeric-reference recovery, attribute-context rules,
   a bounded incremental decoder, and opt-in, per-violation-capped diagnostics.
+- HTML-to-text conversion with paragraphs, headings, lists, quotations,
+  preformatted text, optional link/image text, bounded UTF-8 input/output,
+  and synchronous reader/writer adapters.
 - Streaming byte-oriented RTF tokenization with bounded owned tokens,
   case-sensitive keyword classifications, binary-payload skipping, source
   positions, optionally capped lexical recovery callbacks, and a borrowed parser
@@ -3201,7 +3204,8 @@ Existing references are escaped again, not parsed: `"&amp;"` becomes
 attribute names, escape JavaScript/CSS, add document markup, or perform
 stream I/O. Encoding an event handler or URL attribute does not make its
 meaning safe. `text::HtmlWriter` provides separate in-memory markup construction;
-HTML-input converters remain deferred.
+HTML rewriting/filtering remains deferred; `text::HtmlToText` handles plain-text
+rendering of HTML input.
 
 ### Writing HTML in memory
 
@@ -3378,8 +3382,8 @@ affect output.
 **Tokens are representations, not sanitizers.** Raw names, comments, script
 contents, CDATA, and already-encoded data must be trusted. The tokenizer described
 below also preserves malformed attribute names without weakening public checked
-constructors. Reusable token objects, token-filtering callbacks, and HTML-input
-converters remain deferred.
+constructors. Reusable token objects, token-filtering callbacks, and HTML
+rewriting remain deferred.
 
 ### HTML structural token state
 
@@ -3445,7 +3449,7 @@ eight-pass outer limit, and retained inner-node boundaries.
 there is no DOM reparenting, active-formatting reconstruction, foster
 parenting, or complete select/template insertion-mode implementation.
 HTML character scanning now uses this controller as described below.
-HTML-to-text, HTML rewriting/filtering and callbacks, HTML previews, and the
+HTML rewriting/filtering and callbacks, HTML previews, and the
 remaining streaming text adapters are still deferred.
 
 ### Sans-I/O HTML tokenization
@@ -3522,8 +3526,63 @@ ring-buffer scalar splits, and deferred/sticky UTF-8 errors additionally
 exercise the optimized paths, including per-token scalar positions.
 
 This remains a tokenizer, not a sanitizer or full DOM parser. HTML compliance
-logging, charset/BOM adapters, token-reuse optimizations, HTML-to-text,
+logging, charset/BOM adapters, token-reuse optimizations,
 HTML rewriting/filtering, HTML previews, and async adapters remain deferred.
+
+### Converting HTML to plain text
+
+`text::HtmlToText` ports MimeKit's HTML-to-text converter. `convert(&str)`
+returns owned plain text, `convert_reader` accepts a strict UTF-8 `BufRead`,
+and `convert_to` writes UTF-8 incrementally to a `Write`. All calls use fresh
+conversion state and the existing sans-I/O tokenizer; no new I/O enters the
+scanner. Generated line endings default to CRLF on every platform, with
+explicit LF selection through `with_new_line_format`.
+
+Paragraphs, headings, lists (including signed start/value numbers), quotations,
+definition lists, preformatted text, explicit breaks, and flattened tables
+follow upstream formatting. Structural trailing spacing is omitted, but
+explicit breaks and preformatted whitespace remain. Link destinations are
+appended unless they match the rendered link text; empty links emit their URL.
+Image alternative text is included by default. Both behaviors are configurable.
+Output is plain text, not Markdown, and is not word-wrapped.
+
+Scripts, styles, titles, templates, frames and hidden content are suppressed.
+Noscript fallback is included because scripting is disabled. The tokenizer's
+implicit closures and ignored/merged tag dispositions inform conversion.
+Indexed name chains avoid repeated depth scans for unmatched end tags;
+visibility snapshots include inherited suppression. Repeated open elements
+count separately against the converter's depth budget, unlike folded
+tokenizer stack entries. Applicable upstream inline rationale is retained.
+`HtmlTokenizer::clear_closed_elements` lets consumers acknowledge collected
+closures without changing the structural controller.
+
+Positive input, output and depth limits default to 16 MiB, 64 MiB and 4096.
+Input counts all original UTF-8 bytes, including suppressed and unfinished
+tokens; output counts generated UTF-8 bytes, including indentation, URLs and
+line endings. These are byte limits rather than MimeKit's UTF-16 counts.
+Literal headers and footers are outside both length budgets and receive no
+automatic separators. Input is bounded before tokenizer buffering, and output
+is checked before each write.
+
+Limit failures carry `HtmlToTextError` inside an `io::Error` of kind
+`InvalidData`; malformed UTF-8 instead retains `HtmlTokenizerError`. I/O errors
+propagate, and interrupted operations retry. String conversion discards partial
+output on failure; writer conversion can leave partial output, does not flush,
+and only appends the footer after success. Borrowed sources/destinations remain
+usable, but a failed conversion cannot resume and its source may have read ahead.
+
+All 71 upstream formatting cases and applicable options, reuse, depth/length,
+long-token, sequential-element and I/O tests are ported. Reader coverage includes
+one-byte UTF-8 chunks. Additional tests cover Unicode URL matching, duplicate
+attributes, list-number boundaries, exact byte limits, hidden invalid UTF-8,
+interrupted/short I/O and both newline formats. Full-document output length and
+fingerprints for both HTML benchmark fixtures were generated with MimeKit.
+An additional development comparison matched 4096 generated mixed/malformed
+markup inputs against MimeKit with whole-string and one-byte reader input.
+
+No charset/BOM sniffing, CSS evaluation, resource fetching, DOM construction,
+HTML sanitization, MIME-body replacement or async adapter is provided.
+Escape the result before embedding it in HTML.
 
 ### HTML character-reference decoding
 
@@ -4224,8 +4283,8 @@ quote counter and unchanged output.
 
 Wrappers, text/HTML decorations, and callback-written markup bypass callbacks.
 Custom markup is trusted, not parsed, stack-tracked, or sanitized.
-Conversion does not change MIME parts or decode charsets. HTML-input conversion
-and streaming adapters remain deferred.
+Conversion does not change MIME parts or decode charsets. HTML rewriting and
+streaming adapters for these HTML-output converters remain deferred.
 
 ### Converting flowed text to HTML
 
@@ -8533,14 +8592,24 @@ decodes 32 malformed bytes in `test.html` as replacement characters, while
 the Korean page has a UTF-8 BOM. Neither line endings nor original fixture
 bytes are normalized.
 
-Each HTML operation creates a fresh `HtmlTokenizerReader` over the decoded
+The tokenizer operation creates a fresh `HtmlTokenizerReader` over the decoded
 string and counts and drops all owned tokens. Scanner/source setup, token
 allocation, and destruction are included; fixture loading/decoding is not.
 Canonical counts (7,972 and 1,911 tokens), complete byte consumption, and EOF
 are checked outside measurement. The standalone harness reports median
 decoded-UTF-8 MiB/s and documents/s over five warmed-up samples, matching the
-existing timing harness. The three `HtmlToHtml` conversion/string/callback
-benchmarks are explicitly deferred until that converter is ported.
+existing timing harness.
+
+Both HTML harnesses also provide `HtmlToText_ConvertToString` and
+`HtmlToText_ConvertToTextWriter`. There is no upstream HTML-to-text benchmark
+yet: these mirror the upstream HTML-to-HTML converter workload shapes using
+the same preloaded documents. Each iteration constructs a fresh converter;
+the string result is dropped and the writer uses a null sink. Conversion and
+allocation/destruction are timed, but input loading/decoding and output
+fingerprint/adapter-agreement checks are outside measurement. Expected CRLF
+output is checked against MimeKit-generated byte counts and FNV-1a fingerprints.
+The three `HtmlToHtml` conversion/string/callback benchmarks remain deferred
+until that converter is ported.
 
 #### Optional metabench targets
 

@@ -63,6 +63,28 @@ fn bad_utf8_prefixes_fail_before_eof() {
 }
 
 #[test]
+fn implicit_closures_can_be_acknowledged_without_changing_structure() {
+    let mut reader = HtmlTokenizerReader::from_text("<svg><g><div>two</div>three");
+    reader.tokenizer_mut().set_track_closed_elements(true);
+    let mut closures = Vec::new();
+    while reader.read_next_token().unwrap().is_some() {
+        let tokenizer = reader.tokenizer_mut();
+        closures.extend_from_slice(tokenizer.tree_construction().closed_elements());
+        let position = tokenizer.position();
+        let tag = tokenizer.tree_construction().last_tag();
+        tokenizer.clear_closed_elements();
+        assert!(tokenizer.tree_construction().closed_elements().is_empty());
+        assert!(tokenizer.tree_construction().tracks_closed_elements());
+        assert_eq!(tokenizer.tree_construction().last_tag(), tag);
+        assert_eq!(tokenizer.position(), position);
+    }
+    assert_eq!(
+        closures.iter().map(|closed| closed.name.as_str()).collect::<Vec<_>>(),
+        ["g", "svg"],
+    );
+}
+
+#[test]
 fn reader_interrupted_and_into_parts_resume() {
     struct InterruptOnce<'a> {
         bytes: &'a [u8],
