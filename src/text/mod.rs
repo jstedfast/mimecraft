@@ -36,6 +36,8 @@
 //! scalar-safe truncation and constant-time open-element tracking.
 //! HTML-to-HTML rewriting exposes original tags to callbacks and supports
 //! fragments, comment filtering, and renderer-aware noscript handling.
+//! A separate MIME-part previewer adds bounded transfer decoding, charset
+//! recovery, and automatic plain/HTML preview dispatch.
 //! Async reader adapters and other streaming-output converters are deferred.
 
 mod enriched_to_html;
@@ -71,6 +73,7 @@ mod rtf_to_text;
 mod rtf_tokenizer;
 mod rtf_validator;
 mod text_html_callbacks;
+mod text_previewer;
 mod text_to_flowed;
 mod text_to_html;
 mod text_to_text;
@@ -121,6 +124,7 @@ pub use rtf_tokenizer::{
     RtfTokenKind, RtfTokenizer, RtfTokenizerOptions,
 };
 pub use rtf_validator::{RtfIssue, RtfValidationOptions, RtfValidator, RtfViolation};
+pub use text_previewer::TextPreviewer;
 pub use text_to_flowed::TextToFlowed;
 pub use text_to_html::TextToHtml;
 pub use text_to_text::TextToText;

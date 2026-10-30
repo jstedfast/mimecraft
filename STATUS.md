@@ -103,6 +103,8 @@ MimeKit. The crate is not configured for publication.
   limits, and character-safe ellipsis truncation.
 - HTML body previews with image alternative text, list numbering, scalar-safe
   truncation, and constant-time open-element tracking.
+- MIME-part previews capped at 16 KiB of transfer-decoded input, with
+  charset/BOM recovery and automatic plain/HTML preview dispatch.
 - HTML-to-HTML rewriting with original-tag callbacks, fragment/comment
   filtering, noscript modes, implicit foreign closures, and UTF-8 I/O.
 - HTML character-data and quoted attribute encoding with decimal Unicode
@@ -1370,7 +1372,9 @@ remain untouched. In particular, the requested transfer encoding is preserved.
 The new body stores unencoded bytes at position zero with no newline hint.
 Failure leaves all old bytes, headers, and source position unchanged.
 
-Automatic charset detection/recovery and text-format conversion remain deferred.
+Whole-text automatic charset detection/recovery and text-format conversion
+remain deferred. The separate `text::TextPreviewer` type provides bounded,
+best-effort previews as described below.
 
 ### Multipart ownership and MIME trees
 
@@ -3170,8 +3174,64 @@ after previewing to retain any underlying read-ahead. No seeking, draining, or
 closing occurs. Invalid or incomplete UTF-8 in the scanned prefix returns
 `InvalidData`; unread suffixes are not validated. I/O failures, including
 lookahead failures, propagate without a partial preview; interruptions retry.
-Charset/BOM detection, charset-selecting overloads, and automatic TextPart
-preview generation remain deferred.
+The standalone previewer does not detect charsets/BOMs or provide
+charset-selecting overloads. `text::TextPreviewer` supplies MIME-aware
+decoding and preview dispatch.
+
+### MIME-part previews
+
+`text::TextPreviewer` ports `TextPreviewer.GetPreviewText(TextPart)` as a
+separate reusable type, not a method on `TextPart`. Its `preview(&mut body)`
+method reads at most the first 16 KiB of transfer-decoded content, then selects
+`HtmlTextPreviewer` for
+`text/html` and `PlainTextPreviewer` for every other text subtype.
+The default limit is 230 scalars; `with_maximum_preview_length` accepts 1 through
+1024, consistently with the individual previewers. HTML still requires an
+explicit body element; plain/flowed/enriched/RTF inputs are not converted
+between formats.
+Message-body selection is separate.
+
+The stored content encoding determines transfer decoding, independently of
+the Content-Transfer-Encoding header. A supported declared charset is honored
+with replacement decoding. With a missing/unsupported charset, UTF-16LE/BE or
+UTF-8 BOMs select the encoding; otherwise strict UTF-8 is attempted.
+Invalid UTF-8 encountered while previewing retries the original prefix as
+Latin-1. UTF-16 selected by a BOM uses replacement, matching the source.
+Only a matching initial preamble is removed: a conflicting BOM does not override
+a supported declaration, and Latin-1 replay includes the original BOM bytes.
+No HTML meta-charset sniffing or UTF-32 detection is added.
+
+The existing Rust charset mappings and uniform U+FFFD replacement apply,
+rather than .NET's charset-dependent replacement defaults. Plain previews retain
+the library's shared string/reader normalization and scalar-safe truncation.
+Undeclared UTF-8 validation follows the existing preview readers rather than
+.NET's character-buffer read-ahead; an unneeded invalid suffix may never be
+examined, but completing an HTML token can still encounter it.
+A 16-KiB cutoff splitting a character uses the same replacement/fallback
+rules as malformed input. The prefix cap does not itself append an ellipsis.
+
+Metadata is checked before I/O, and invalid/missing/non-text Content-Type
+still returns `TextPartError`. Input is reopened from the beginning with fresh
+transfer-decoder state on each call. The complete bounded prefix is collected
+before previewing, so early text truncation cannot hide a source read error.
+Short reads and interrupted reads are handled; seek/read failures propagate
+without partial output. No final rewind or close occurs. Encoded source
+read-ahead can exceed the decoded byte limit, and encoded whitespace or other
+filter-discarded input is not subject to that limit.
+Headers, body bytes, and parsed framing are unchanged.
+
+This best-effort API does not change `text()` or `text_with_charset()`:
+whole-text access remains strict. Preview output is plain text and needs
+escaping before HTML embedding. Charset-selecting standalone preview readers
+and automatic message-body preview selection remain deferred.
+
+All applicable `TextPreviewerTests.cs` cases are ported: four original document
+fixtures and the three unknown-charset recovery cases. The new plain-text
+Planet Fitness fixture is copied byte-for-byte; the HTML fixtures are reused.
+Additional cases cover BOM precedence/replay, supported legacy charsets,
+Unicode limits, encoded-versus-decoded cutoffs, split characters, all transfer
+decoders, errors, reuse, and preservation of parsed framing and strict getters.
+Upstream contains no text-preview benchmarks to port.
 
 ### HTML text and attribute encoding
 
@@ -3712,9 +3772,10 @@ A development comparison also matched 4096 generated mixed/malformed inputs
 against MimeKit with whole-string and one-byte reader input.
 There is no corresponding upstream preview benchmark to port.
 
-Charset/BOM detection, charset-selecting stream overloads, automatic MIME-body
-selection/preview generation, and async adapters remain deferred. The output
-is plain text, not sanitized HTML; escape it before embedding it in HTML.
+The standalone HTML previewer has no charset/BOM detection or charset-selecting
+stream overloads; `text::TextPreviewer` adds MIME-part decoding and dispatch.
+Automatic message-body selection for previews and async adapters remain deferred.
+The output is plain text, not sanitized HTML; escape it before HTML embedding.
 
 ### HTML character-reference decoding
 
@@ -7935,7 +7996,8 @@ inheritance, while in-memory-only setters respect Rust source types. Existing
 strict charset conversion and checked header formatting make failed edits
 atomic. Unsupported labels and malformed bytes remain errors, and newlines/BOMs
 are preserved rather than applying MimeKit's detection, fallback, or newline
-normalization. Automatic detection and text-format conversion are not ported.
+normalization. Whole-text automatic detection and text-format conversion are
+not ported; the separate MIME-part preview API has explicit recovery rules.
 Format-based construction maps the supported `TextFormat` variants to the
 source's text subtypes and flowed parameter. Classification and predicates
 reuse body-selection matching, retaining the unknown-text Plain fallback while
@@ -8094,8 +8156,12 @@ Plain-text previews adapt the string overload in `Text/PlainTextPreviewer.cs`,
 the default and checked length range in `Text/TextPreviewer.cs`, and
 `UnitTests/Text/PlainTextPreviewerTests.cs`. Whitespace classification and the
 trim-before-ellipsis ordering are retained; Unicode scalar counts replace
-UTF-16 code-unit counts. Stream overloads, automatic body previews, and
-charset-recovery behavior are not ported.
+UTF-16 code-unit counts. Strict UTF-8 reader overloads share these normalization
+rules. `text::TextPreviewer` additionally adapts the MIME-part overload in
+`Text/TextPreviewer.cs`, BOM selection from `Utils/CharsetUtils.cs`, and all
+applicable `UnitTests/Text/TextPreviewerTests.cs` cases. It preserves the
+16-KiB transfer-decoded cap and charset fallback, with explicit differences
+for replacement policy and preview-reader lookahead.
 HTML previews adapt `Text/HtmlTextPreviewer.cs` and
 `UnitTests/Text/HtmlTextPreviewerTests.cs`, including their document fixtures
 and constant-time open-element regression workloads. The reader contract is

@@ -29,6 +29,8 @@ use crate::{
 /// Latin-1 fallback, replacement, newline normalization, or text-format
 /// conversion. Explicit BOMs are preserved as characters. Whole-text reads
 /// materialize the transfer-decoded bytes and resulting string in memory.
+/// [`crate::text::TextPreviewer`] separately provides bounded, best-effort previews
+/// with charset recovery; it does not change the strict text getters.
 ///
 /// ```
 /// use mimecraft::{ContentEncoding, TextPart};
@@ -363,7 +365,7 @@ impl<R: Read + Seek> TextPart<R> {
         decode_text(&mut self.part, charset)
     }
 
-    fn checked_content_type(&self) -> Result<ContentType, TextPartError> {
+    pub(crate) fn checked_content_type(&self) -> Result<ContentType, TextPartError> {
         let content_type = self
             .part
             .content_type()
