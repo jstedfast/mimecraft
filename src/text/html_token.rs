@@ -275,6 +275,17 @@ pub struct HtmlTagToken {
 }
 
 impl HtmlTagToken {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        std::borrow::Cow<'static, str>,
+        HtmlAttributeCollection,
+        bool,
+        bool,
+    ) {
+        (self.name, self.attributes, self.empty, self.end)
+    }
+
     pub(super) fn from_tokenizer(
         name: &mut String,
         attributes: Vec<super::HtmlAttribute>,

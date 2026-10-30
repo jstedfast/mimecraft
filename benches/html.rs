@@ -41,14 +41,15 @@ fn main() {
     println!("MimeKit HTML workloads; fixtures loaded and decoded outside timing.");
     println!("Fresh synchronous tokenizer; owned tokens are counted and dropped, not retained.");
     println!(
-        "HTML-to-text uses fresh converters; string output is dropped, writer output is discarded."
+        "Conversions use fresh converters; string output is dropped, writer output is discarded."
     );
-    println!("Throughput counts decoded UTF-8 input bytes; HtmlToHtml workloads are deferred.");
+    println!("Throughput counts decoded UTF-8 input bytes, not generated output.");
     let cases = workloads::CASES.map(|name| (name, workloads::workload(name)));
     for (name, case) in cases {
         // Check token count, complete consumption, EOF and converter agreement outside timing.
         case.check(workloads::read_all_tokens(&case));
         case.check_conversion();
+        case.check_rewriting();
         measure("HtmlTokenizer_ReadAllTokens", name, &case, || {
             workloads::read_all_tokens(&case)
         });
@@ -57,6 +58,15 @@ fn main() {
         });
         measure("HtmlToText_ConvertToTextWriter", name, &case, || {
             workloads::convert_to_writer(&case)
+        });
+        measure("HtmlToHtml_ConvertToString", name, &case, || {
+            workloads::rewrite_to_string(&case)
+        });
+        measure("HtmlToHtml_ConvertToTextWriter", name, &case, || {
+            workloads::rewrite_to_writer(&case)
+        });
+        measure("HtmlToHtml_ConvertWithCallback", name, &case, || {
+            workloads::rewrite_with_callback(&case)
         });
     }
 }

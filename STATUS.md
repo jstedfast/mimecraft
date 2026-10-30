@@ -103,6 +103,8 @@ MimeKit. The crate is not configured for publication.
   limits, and character-safe ellipsis truncation.
 - HTML body previews with image alternative text, list numbering, scalar-safe
   truncation, and constant-time open-element tracking.
+- HTML-to-HTML rewriting with original-tag callbacks, fragment/comment
+  filtering, noscript modes, implicit foreign closures, and UTF-8 I/O.
 - HTML character-data and quoted attribute encoding with decimal Unicode
   references and MimeKit-compatible control-character handling.
 - Enriched-text HTML rendering with character styles, paragraph formatting,
@@ -3206,8 +3208,8 @@ Existing references are escaped again, not parsed: `"&amp;"` becomes
 attribute names, escape JavaScript/CSS, add document markup, or perform
 stream I/O. Encoding an event handler or URL attribute does not make its
 meaning safe. `text::HtmlWriter` provides separate in-memory markup construction;
-HTML rewriting/filtering remains deferred; `text::HtmlToText` handles plain-text
-rendering of HTML input.
+`text::HtmlToHtml` handles HTML rewriting with callbacks, and `text::HtmlToText`
+handles plain-text rendering of HTML input.
 
 ### Writing HTML in memory
 
@@ -3256,14 +3258,18 @@ perform JavaScript/CSS escaping, automatic linking, or whitespace normalization.
 Even empty text or markup completes the pending tag.
 
 String-based operations use `&str` slices instead of buffer/index/count overloads.
-`write_html_attribute` also accepts checked `HtmlAttribute` objects, preserving
-valueless versus empty values. Identifier enums expose canonical names through
+`write_html_attribute` accepts `HtmlAttribute` objects, preserving valueless
+versus empty values and malformed names retained by the tokenizer. If a name
+begins with `=`, a preceding valueless attribute receives an explicit empty
+value so it cannot absorb that name as its value. Name-based public operations
+retain their existing validation. Identifier enums expose canonical names through
 `as_str()` for the existing string-based tag and attribute operations.
 `write_token` flushes any pending syntax and writes a complete `HtmlToken`,
 returning to `Content` state even for a tag token or empty data. It respects
 the token's encoding mode and does not validate raw token names or contents.
-HTML tokenization, charset conversion, stream output, and callbacks remain
-deferred.
+The standalone writer remains in-memory. `HtmlToHtml` uses it as a staging
+buffer for its UTF-8 writer adapter, retaining pending tag/attribute state
+across buffer drains. Charset conversion is not provided.
 
 ### HTML identifiers and attributes
 
@@ -3451,7 +3457,7 @@ eight-pass outer limit, and retained inner-node boundaries.
 there is no DOM reparenting, active-formatting reconstruction, foster
 parenting, or complete select/template insertion-mode implementation.
 HTML character scanning now uses this controller as described below.
-HTML rewriting/filtering, callbacks, and the
+HTML rewriting and callbacks use this state through `HtmlToHtml`; the
 remaining streaming text adapters are still deferred.
 
 ### Sans-I/O HTML tokenization
@@ -3529,7 +3535,80 @@ exercise the optimized paths, including per-token scalar positions.
 
 This remains a tokenizer, not a sanitizer or full DOM parser. HTML compliance
 logging, charset/BOM adapters, token-reuse optimizations,
-HTML rewriting/filtering and async adapters remain deferred.
+and async adapters remain deferred.
+
+### Rewriting HTML
+
+`text::HtmlToHtml` ports MimeKit's HTML-to-HTML conversion using the existing
+sans-I/O tokenizer. `convert(&str)` and `convert_reader` return an owned string;
+`convert_to` writes UTF-8 incrementally. Each has a corresponding
+`*_with_tag_callback` method accepting the shared `HtmlTagContext` and
+`HtmlWriter`. Each conversion starts fresh tokenizer and callback-context state.
+
+The default preserves comments and document wrappers, preserves references in
+text, re-encodes attribute values, emits recognized void tags with `/>`, and
+discards EOF-truncated tags. It does not construct a DOM or synthesize missing
+end tags at EOF. `filter_comments` drops comments; `output_html_fragment`
+omits doctype/html/body wrappers and head content without invoking callbacks.
+Head suppression ends when the input implicitly starts body content, including
+non-whitespace text and foreign elements, rather than waiting only for `</head>`.
+
+`HtmlNoScriptHandling::Unwrap` is the default: fallback is parsed as markup and
+the noscript wrappers are omitted, so it remains markup regardless of the
+renderer's scripting setting. `ScriptingEnabled` retains wrappers and raw
+fallback text; `ScriptingDisabled` retains wrappers and parses fallback markup.
+Those retained-wrapper modes must match the renderer. Otherwise markup can
+bypass callbacks when raw text becomes markup or hidden noscript ends change
+the renderer's parsing context. **This converter is not an HTML sanitizer.**
+It does not validate CSS, URL schemes, event handlers or callback-written HTML.
+
+Callbacks own tag writing; `write_tag` preserves original spelling and source
+attributes, while writing nothing omits a tag. `delete_tag` is bookkeeping,
+not retroactive removal. `delete_end_tag` omits automatic end output.
+For this converter, an explicitly requested end callback takes precedence over
+end deletion, unlike generated plain/flowed/RTF tags. End callbacks receive
+the end token's attributes with copied start flags, not the start attributes.
+Unmatched ends can also reach the callback. Suppression hides inner content
+and descendant callbacks without silently ending at a scope-ignored end tag.
+
+ASCII-folded name chains and a suppression count avoid per-token depth scans.
+Only flag snapshots are retained for open tags, not their attributes. Out-of-order
+ends remove only the innermost matching context. Implicit foreign closures emit
+explicit ends through the outermost foreign element, including intervening HTML
+elements, so removing a breakout tag does not leave output in foreign content.
+Frameset-ignored tags and ineffective frameset starts are omitted to avoid
+changing interpretation when surrounding document structure is removed.
+Applicable upstream inline comments explaining these rules are preserved.
+
+The positive tokenizer depth limit defaults to 4096 distinct entries; identical
+runs share entries. The overflowing start tag is the last callback-visible tag;
+remaining input is encoded literal text. This is not a total-memory limit:
+tokens, callback-context counts and output size can grow with input.
+The callback's writer is a periodically drained staging buffer, not the entire
+document; pending tags/attributes survive drains. It may temporarily hold a
+large token or arbitrary callback output.
+
+Readers require strict UTF-8 without charset/BOM sniffing or newline changes.
+I/O and UTF-8 errors propagate; interruptions retry. Writer failures can leave
+partial output, read-ahead input cannot be recovered, and failed conversions
+cannot resume. Destinations are not flushed or closed. A footer is written only
+after successful body conversion. Optional headers/footers bypass callbacks;
+HTML decorations are copied, and text decorations use `TextToHtml` fragment
+encoding, links and line breaks.
+
+All 110 upstream parameterized rewriting cases and applicable standalone tests
+are ported, including original Xamarin input/expected fixtures, the Word HTML
+suppression input, and 100,000-element complexity/depth regressions. Additional
+coverage includes Unicode, short/erroring I/O, callback flag precedence, original
+end attributes, pending-attribute buffer drains and converter reuse.
+Four full-document output fingerprints match MimeKit's normal/filtered benchmark
+results. A development comparison also matched 4096 mixed/malformed inputs
+across fragment/comment settings, all noscript modes, depth limits and callbacks,
+with both one-byte and normal reader chunks.
+
+Tokenizer compliance logging/options, charset-selecting stream overloads,
+automatic encapsulated-RTF-HTML routing and async adapters remain deferred.
+Existing RTF rendering and raw extraction keep their documented behavior.
 
 ### Converting HTML to plain text
 
@@ -4336,8 +4415,8 @@ quote counter and unchanged output.
 
 Wrappers, text/HTML decorations, and callback-written markup bypass callbacks.
 Custom markup is trusted, not parsed, stack-tracked, or sanitized.
-Conversion does not change MIME parts or decode charsets. HTML rewriting and
-streaming adapters for these HTML-output converters remain deferred.
+Conversion does not change MIME parts or decode charsets. `HtmlToHtml` handles
+HTML rewriting; streaming adapters for plain/flowed HTML output remain deferred.
 
 ### Converting flowed text to HTML
 
@@ -8033,9 +8112,13 @@ The in-memory `HtmlWriter` adapts `Text/HtmlWriter.cs`,
 `Text/HtmlWriterState.cs`, and `UnitTests/Text/HtmlWriterTests.cs`.
 Checked operations and an owned string replace exceptions and external writer
 lifetime management; `finish()` consumes the writer after flushing a pending
-start tag. Applicable inline comments are retained. Tokenizer-supplied unchecked
-attribute names are not exposed: public names reject a leading `=`, rather than
-needing the token serializer's previous-valueless-attribute workaround.
+start tag. Applicable inline comments are retained. Name-based operations reject
+unchecked names; attribute-object writes preserve tokenizer-originated names
+using the source's previous-valueless-attribute workaround for leading `=`.
+`HtmlToHtml` adapts `Text/HtmlToHtml.cs`, `HtmlNoScriptHandling.cs` and
+`HtmlTagContextStack.cs`, with the shared context extended to retain source names
+and end attributes. Indexed per-name flag vectors replace linked context objects;
+the writer drains UTF-8 buffers without resetting pending tag state.
 HTML identifiers and attributes adapt `Text/HtmlTagId.cs`,
 `Text/HtmlAttributeId.cs`, `Text/HtmlAttribute.cs`, and
 `Text/HtmlAttributeCollection.cs`, with regression coverage from their
@@ -8665,8 +8748,14 @@ the string result is dropped and the writer uses a null sink. Conversion and
 allocation/destruction are timed, but input loading/decoding and output
 fingerprint/adapter-agreement checks are outside measurement. Expected CRLF
 output is checked against MimeKit-generated byte counts and FNV-1a fingerprints.
-The three `HtmlToHtml` conversion/string/callback benchmarks remain deferred
-until that converter is ported.
+Both harnesses also port all three upstream `HtmlToHtml` workloads:
+`HtmlToHtml_ConvertToString`, `HtmlToHtml_ConvertToTextWriter`, and
+`HtmlToHtml_ConvertWithCallback`. Each uses a fresh converter over predecoded
+input. The callback case filters comments and suppresses script/style content
+and end tags, exactly as upstream; it is not a complete sanitizer.
+String allocation/destruction and conversion are timed; writer variants discard
+output. Default/filtered output lengths and FNV-1a fingerprints generated with
+MimeKit are checked outside timing, along with string/writer agreement.
 
 #### Optional metabench targets
 
@@ -8676,7 +8765,7 @@ and `html_metabench`
 targets are enabled by `--features bench-metabench`; their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 21 Base64, 27 MIME, and two HTML cases.
+`benches/support`, covering all 21 Base64, 27 MIME, and twelve HTML cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

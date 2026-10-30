@@ -3,7 +3,9 @@
 
 use std::{fs, hint::black_box, path::Path};
 
-use mimecraft::text::{HtmlToText, HtmlTokenizerReader};
+use mimecraft::text::{
+    HtmlTagContext, HtmlTagId, HtmlToHtml, HtmlToText, HtmlTokenizerReader, HtmlWriter,
+};
 
 pub const CASES: [&str; 2] = ["test_html", "Gimhae_Kim_clan_utf_8_html"];
 
@@ -12,6 +14,8 @@ pub struct Workload {
     tokens: usize,
     text_bytes: usize,
     text_hash: u64,
+    html_output: (usize, u64),
+    filtered_output: (usize, u64),
 }
 
 impl Workload {
@@ -33,6 +37,31 @@ impl Workload {
             .unwrap();
         assert_eq!(output, expected.as_bytes());
     }
+
+    pub fn check_rewriting(&self) {
+        let expected = rewrite_to_string(self);
+        assert_eq!(fingerprint(expected.as_bytes()), self.html_output);
+        let mut output = Vec::new();
+        HtmlToHtml::new()
+            .convert_to(self.html.as_bytes(), &mut output)
+            .unwrap();
+        assert_eq!(output, expected.as_bytes());
+        output.clear();
+        HtmlToHtml {
+            filter_comments: true,
+            ..HtmlToHtml::new()
+        }
+        .convert_to_with_tag_callback(self.html.as_bytes(), &mut output, filter_tag)
+        .unwrap();
+        assert_eq!(fingerprint(&output), self.filtered_output);
+    }
+}
+
+fn fingerprint(bytes: &[u8]) -> (usize, u64) {
+    let hash = bytes.iter().fold(0xcbf29ce484222325u64, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    (bytes.len(), hash)
 }
 
 pub fn workload(name: &str) -> Workload {
@@ -65,11 +94,19 @@ pub fn workload(name: &str) -> Workload {
     let data = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&data);
     let html = String::from_utf8_lossy(data).into_owned();
     assert_eq!(html.len(), bytes, "decoded fixture changed: {file_name}");
+    // MimeKit HtmlToHtml fingerprints for default and benchmark-filtered output.
+    let (html_output, filtered_output) = match name {
+        "test_html" => ((133097, 0xcefddf277019a6ea), (118699, 0xcfd9c19c66c0fcff)),
+        "Gimhae_Kim_clan_utf_8_html" => ((59316, 0x8d9aedbe882a48f9), (47776, 0xf5006ea1e0857ebc)),
+        _ => unreachable!(),
+    };
     Workload {
         html,
         tokens,
         text_bytes,
         text_hash,
+        html_output,
+        filtered_output,
     }
 }
 
@@ -100,4 +137,36 @@ pub fn convert_to_writer(case: &Workload) {
     HtmlToText::new()
         .convert_to(black_box(case.html.as_bytes()), &mut std::io::sink())
         .unwrap();
+}
+
+pub fn rewrite_to_string(case: &Workload) -> String {
+    HtmlToHtml::new().convert(black_box(&case.html)).unwrap()
+}
+
+pub fn rewrite_to_writer(case: &Workload) {
+    HtmlToHtml::new()
+        .convert_to(black_box(case.html.as_bytes()), &mut std::io::sink())
+        .unwrap();
+}
+
+fn filter_tag(context: &mut HtmlTagContext, writer: &mut HtmlWriter) {
+    if matches!(context.tag_id(), HtmlTagId::Script | HtmlTagId::Style) {
+        context.suppress_inner_content = true;
+        context.delete_end_tag = true;
+    } else {
+        context.write_tag(writer, true).unwrap();
+    }
+}
+
+pub fn rewrite_with_callback(case: &Workload) {
+    HtmlToHtml {
+        filter_comments: true,
+        ..HtmlToHtml::new()
+    }
+    .convert_to_with_tag_callback(
+        black_box(case.html.as_bytes()),
+        &mut std::io::sink(),
+        filter_tag,
+    )
+    .unwrap();
 }

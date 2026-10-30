@@ -1,7 +1,11 @@
 // Adapted from MimeKit's Text/HtmlWriter.cs and Text/HtmlWriterState.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    io::{self, Write},
+};
 
 use super::{
     HtmlAttribute, HtmlAttributeQuote, HtmlToken,
@@ -72,7 +76,8 @@ impl Error for HtmlWriterError {}
 ///
 /// This in-memory API uses `&str` instead of C# buffer/index/count overloads.
 /// Known tag/attribute identifiers expose canonical names through `as_str()`;
-/// [`write_html_attribute`](Self::write_html_attribute) accepts checked attributes.
+/// [`write_html_attribute`](Self::write_html_attribute) also accepts attributes
+/// with malformed names preserved by the tokenizer.
 /// [`write_token`](Self::write_token) appends a complete token without name
 /// validation or changing its encoding mode. Charset conversion and stream
 /// output are not included.
@@ -182,10 +187,13 @@ impl HtmlWriter {
         self.write_attribute_value(value)
     }
 
-    /// Writes a checked attribute, preserving its name and optional value.
+    /// Writes an attribute, preserving its name and optional value.
     ///
     /// `None` leaves the attribute valueless; an empty value writes `=""`.
     /// Values are HTML-escaped, and duplicate names are not removed.
+    /// Unlike the name-based API, this also accepts malformed attribute names
+    /// preserved by the tokenizer. A leading `=` cannot become the preceding
+    /// valueless attribute's value: that attribute receives an explicit `=""`.
     ///
     /// # Errors
     ///
@@ -195,7 +203,7 @@ impl HtmlWriter {
         &mut self,
         attribute: &HtmlAttribute,
     ) -> Result<(), HtmlWriterError> {
-        self.write_attribute_name(attribute.name())?;
+        self.append_attribute_name(attribute.name())?;
         if let Some(value) = attribute.value() {
             self.write_attribute_value(value)?;
         }
@@ -216,11 +224,19 @@ impl HtmlWriter {
         if !is_valid_attribute_name(name) {
             return Err(HtmlWriterError::InvalidAttributeName);
         }
+        self.append_attribute_name(name)
+    }
+
+    fn append_attribute_name(&mut self, name: &str) -> Result<(), HtmlWriterError> {
         if self.state == HtmlWriterState::Content {
             return Err(HtmlWriterError::AttributeOutsideTag);
         }
-        // Unlike tokenizer-supplied attributes, these checked names cannot
-        // begin with '=' and get reparsed as the previous attribute's value.
+        // The tokenizer can produce names beginning with '=' (e.g.
+        // "<a href/=javascript:x>"). Give a preceding valueless attribute an
+        // explicit empty value so '=' cannot be reparsed as its value.
+        if self.state == HtmlWriterState::Attribute && name.starts_with('=') {
+            self.output.push_str("=\"\"");
+        }
         self.output.push(' ');
         self.output.push_str(name);
         self.state = HtmlWriterState::Attribute;
@@ -295,5 +311,13 @@ impl HtmlWriter {
     pub fn finish(mut self) -> String {
         self.flush();
         self.output
+    }
+
+    pub(super) fn drain_to<W: Write + ?Sized>(&mut self, writer: &mut W) -> io::Result<()> {
+        // Keep the pending tag/attribute state across output-buffer drains.
+        // A later callback may still supply attributes for that start tag.
+        writer.write_all(self.output.as_bytes())?;
+        self.output.clear();
+        Ok(())
     }
 }
