@@ -8,11 +8,12 @@ the goal, not a one-to-one translation of its C# API.
 For an introduction, dependencies, build instructions, and common usage examples,
 see the [README](README.md).
 
-This is an early, incomplete implementation, not yet a usable replacement for
+This implementation is under development and is not a complete replacement for
 MimeKit. The crate is not configured for publication.
 
 ## Contents
 
+- [Remaining work](#remaining-work)
 - [Current functionality](#current-functionality)
 - [MIME reader and parser](#mime-reader-and-parser)
 - [Message ownership and I/O](#message-ownership-and-io)
@@ -29,6 +30,37 @@ MimeKit. The crate is not configured for publication.
 - [Development](#development)
 - [Regenerating HTML entities](#regenerating-html-entities)
 - [Benchmarks](#benchmarks)
+
+## Remaining work
+
+The following is a summary of known gaps, not a requirement to reproduce every
+C# API. The detailed sections below distinguish missing behavior from intentional
+Rust API, ownership, error-handling, and charset differences.
+
+| Area | Remaining work and current boundary |
+|---|---|
+| TNEF | The reader and TNEF-to-MIME conversion are not ported. An initial implementation and representative fixture-based benchmarks are prerequisites for a reader sans-I/O refactor; there is no Rust TNEF baseline yet. |
+| Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
+| I/O adapters | Async drivers and async model/storage APIs are not ported. MIME and HTML tokenization already have sans-I/O engines with synchronous drivers; the RTF tokenizer still owns a `BufRead` source. |
+| Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
+| MIME compatibility | Encoded message-wrapper interpretation and multipart body/boundary collision scanning remain absent. Source-backed body storage, slice parsing, malformed-message recovery, and explicit transport preparation are implemented. |
+| Address/header conveniences | Address sorting, standalone malformed-address-list resynchronization, recipient deduplication/sender-inclusive collection, and hidden-header serialization filtering remain absent. Checked header authoring, folded address output, and message address-header recovery are implemented. |
+| Benchmarks | Address-validator benchmarks depend on the missing validator. Encoding-validator microbenchmarks remain unported; those validators are private to compliance reporting. Supported codec/filter, MIME, address/header, HTML, RTF, and message-preparation workloads are already covered. |
+
+The queued performance work is:
+
+1. Refactor the RTF tokenizer to sans-I/O and compare against the recorded
+   [RTF baseline](#rtf-benchmarks-and-pre-sans-io-baseline).
+2. Port the TNEF reader, add representative benchmark workloads, and record its
+   I/O-coupled baseline. The current upstream checkout has no TNEF benchmark class.
+3. Refactor that reader to sans-I/O only after its baseline is available.
+4. Investigate header-collection preallocation at reader/parser call sites.
+   This remains deferred; `HeaderList::with_capacity` and pre-sized indexing
+   when constructing a list from a vector already exist.
+
+Cryptography, including DKIM, ARC, and DMARC, is excluded from the current scope.
+`LegacyMimeParser` and its event-argument types will not be ported. These are
+scope decisions, not unfinished entries in the performance queue.
 
 ## Current functionality
 
@@ -81,6 +113,8 @@ MimeKit. The crate is not configured for publication.
   transfer-encoded payloads and UU wrappers, plus complete masked ordinary parts.
 - Specialized decoded-field masking of delivery-status and disposition-
   notification bodies, with configurable preservation and parse limits.
+- Complete MIME-tree and message anonymization with iterative traversal and
+  report-specific field masking, preserving source content and metadata.
 - Raw-byte masking output with newline conversion and optional termination
   for supplied preamble/epilogue regions.
 - Transfer-encoding analysis using MimeKit's heuristics and seven-bit, eight-bit,
@@ -109,6 +143,8 @@ MimeKit. The crate is not configured for publication.
   filtering, noscript modes, implicit foreign closures, and UTF-8 I/O.
 - HTML character-data and quoted attribute encoding with decimal Unicode
   references and MimeKit-compatible control-character handling.
+- Sans-I/O HTML tokenization with explicit input/EOF, owned tokens, resumable
+  lexical/structural state, and a synchronous strict-UTF-8 reader adapter.
 - Enriched-text HTML rendering with character styles, paragraph formatting,
   validated parameters, malformed-command recovery, and explicit resource limits.
 - HTML character-reference decoding with the complete named-entity table,
@@ -141,6 +177,8 @@ MimeKit. The crate is not configured for publication.
   and ordinary multipart ownership and serialization.
 - Related multipart containers with shared root-document lookup and atomic
   replacement of roots and their type/start parameters.
+- Common body assembly with plain/HTML alternatives, attachments, and linked
+  resources, plus attachment construction from bytes, readers, and files.
 - Nested MIME entity and multipart ownership models with checked boundary
   edits, raw preamble/epilogue storage, and iterative leaf traversal.
 - Synchronous MIME tree writing with iterative traversal, checked ancestor
@@ -152,6 +190,10 @@ MimeKit. The crate is not configured for publication.
 - Synchronous `MimeReader` events with borrowed content and original byte/line
   positions, bounded standalone header reading, and an owned `MimeParser`
   shared by the existing load APIs.
+- A public sans-I/O `MimeEventParser` shared with those synchronous APIs,
+  supporting entity, message, and mbox input with explicit EOF and diagnostics.
+- Source-backed encoded-body ranges and direct-slice parsing, alongside the
+  default copying loaders, with retained source ownership and independent cursors.
 - Message ownership, buffered loading, and synchronous writing, with separate
   message/body headers, optional bodies, and no generated metadata.
 - Headers-only message serialization, including root-body headers and the
@@ -1612,7 +1654,7 @@ seeking or source closing occurs. Limits and header offsets include the
 synthesized prefix. Invalid options and Content-Type formatting errors fail
 before reading the body.
 
-The loader uses `MimeParser` over `MimeReader`'s iterative event traversal and
+The default copying loader uses `MimeParser` over `MimeReader`'s iterative event traversal and
 incremental buffered reads. The parser retains the resulting headers,
 preambles, epilogues, and encoded leaf bodies; owned-tree loading is not
 constant-memory or persistent-source parsing. The reader streams ordinary
@@ -1662,7 +1704,12 @@ Header and nonbinary content newline conversion
 still applies, so load/write is not an unconditional lossless raw-wire API.
 Recognized transparent message wrappers become structured attached messages;
 encoded wrappers and other non-multipart types remain opaque leaves.
-Zero-copy source ranges and async loading remain deferred.
+For encoded bodies retained as source ranges rather than copied vectors,
+`load_with_storage` and `load_with_storage_and_options` accept seekable sources
+and return `MimeEntity<MimeContentStream<R>>`. Headers, framing, and tree
+structure are still retained in memory; this is not allocation-free parsing.
+The [reader/parser section](#mime-reader-and-parser) describes storage and
+slice APIs in detail. Async loading remains deferred.
 
 ### MIME reader and parser
 
@@ -2157,8 +2204,9 @@ positions and raw headers remain unchanged. Retrying restarts at the beginning.
 
 Writing generates no Date, Message-Id, From, Subject, or MIME-Version. This is not
 transport preparation: **Bcc and Resent-Bcc are written as supplied**.
-Other message-specific typed convenience setters, hidden-header filtering,
-and automatic transport preparation remain deferred.
+Typed subject, address, date, identifier, and priority accessors/setters are
+implemented in the sections below. Hidden-header filtering and automatic
+transport preparation remain deferred; explicit tree preparation is available.
 
 ### Explicit tree transport preparation
 
@@ -3077,7 +3125,10 @@ These convenience operations materialize decoded bytes, Unicode text, and
 any converted text in memory. They do not change raw headers or stored bytes.
 Read-only decoding also preserves parsed multipart delimiters and missing
 header/body separators; public mutable body-part access remains an editing API.
-Streaming text converters and automatic HTML/RTF conversion remain deferred.
+These MIME body accessors do not automatically render HTML/RTF or extract
+encapsulated HTML. Separate converters are available: `HtmlToText` and
+`HtmlToHtml` support synchronous reader/writer conversion, while the
+plain/flowed helpers and RTF converters still materialize their output strings.
 
 ### Copying and decorating plain text
 
@@ -3461,8 +3512,8 @@ create complete tags. Original names, attribute order, duplicates, and valueless
 versus empty values are preserved; values use double-quoted attribute encoding.
 Unlike the writer's name-based operations, token names are deliberately
 unvalidated, matching MimeKit's token constructors. Empty-element spelling is
-explicit rather than inferred from `id()`. Attributes still require checked
-construction; unchecked tokenizer attributes are not yet exposed.
+explicit rather than inferred from `id()`. Public attribute constructors remain
+checked; tokenizer-emitted attributes can preserve malformed names for inspection.
 
 `HtmlDocTypeToken` defaults to an unnamed `<!DOCTYPE>`. Its checked `set_name`,
 `set_public_identifier`, and `set_system_identifier` methods accept
@@ -3481,8 +3532,8 @@ affect output.
 **Tokens are representations, not sanitizers.** Raw names, comments, script
 contents, CDATA, and already-encoded data must be trusted. The tokenizer described
 below also preserves malformed attribute names without weakening public checked
-constructors. Reusable token objects, token-filtering callbacks, and HTML
-rewriting remain deferred.
+constructors. `HtmlToHtml` provides HTML rewriting and tag-filtering callbacks;
+reusable token objects remain deferred.
 
 ### HTML structural token state
 
@@ -3548,8 +3599,8 @@ eight-pass outer limit, and retained inner-node boundaries.
 there is no DOM reparenting, active-formatting reconstruction, foster
 parenting, or complete select/template insertion-mode implementation.
 HTML character scanning now uses this controller as described below.
-HTML rewriting and callbacks use this state through `HtmlToHtml`; the
-remaining streaming text adapters are still deferred.
+HTML rewriting and callbacks use this state through `HtmlToHtml`.
+`HtmlToHtml` and `HtmlToText` both provide synchronous reader/writer adapters.
 
 ### Sans-I/O HTML tokenization
 
@@ -3952,8 +4003,9 @@ which the whole-string APIs do but these accessors do not.
 
 These are reference-only diagnostics, not an HTML compliance framework:
 literal controls, tag structure, comment/script context, and URL safety are
-not checked. General HTML compliance logging, severity/category metadata, and
-HTML tokenization remain deferred.
+not checked. General HTML compliance logging and severity/category metadata
+remain deferred. HTML tokenization is implemented separately by `HtmlTokenizer`;
+it does not yet expose a general compliance-reporting API.
 
 ### Streaming RTF tokenization
 
@@ -3986,7 +4038,7 @@ match MimeKit's converter-focused table, not every control word in RTF.
 Underline styles, background-color spellings, and other rendering equivalents
 share IDs. `SkipDestination` classifies non-rendered destinations but does **not**
 make this tokenizer skip them. In particular, `object` is intentionally not a
-skipped destination, so a later interpreter can preserve its display fallback.
+skipped destination, so the RTF interpreter can preserve its display fallback.
 
 The scanner retains at most 32 letters per word and emits at most 4096 bytes
 per text token. Overlong names remain unknown. Only the first ten parameter
@@ -4000,8 +4052,8 @@ after the word's single delimiting space if present. No allocation is
 proportional to N, and braces, backslashes, and line feeds inside the payload
 are not interpreted as RTF syntax. Zero and negative lengths do not skip data.
 Source bytes, raw text, and hex escapes are not charset-decoded or assumed
-to be UTF-8; font code pages and Unicode fallback processing belong to a
-future interpreter.
+to be UTF-8; font code pages and Unicode fallback processing belong to the
+shared interpreter used by `RtfToText`, `RtfToHtml`, and `RtfHtmlExtractor`.
 
 Raw CR/LF are ignored, while escaped CR or LF becomes an LF control symbol.
 Only one delimiting space after a word or numeric parameter is consumed.
@@ -4015,7 +4067,7 @@ Each `RtfSourcePosition` stores a zero-based byte offset, one-based line and
 byte-column numbers, and enclosing group depth. Only LF advances the line.
 Both braces have the depth outside their group. Binary payloads count toward
 positions, including any LF they contain. Unmatched closing braces still
-produce tokens; structural validation belongs to an interpreter.
+produce tokens; `RtfValidator` and the converters perform structural validation.
 
 `read_token_with_issues` accepts a callback for `RtfLexicalIssue` values:
 `KeywordTooLong`, `InvalidParameter`, `InvalidHexEscape`, and `TruncatedStream`.
@@ -4078,6 +4130,8 @@ This is tokenization only: RTF headers, destination groups, code pages, fields,
 formatting, Unicode fallback bytes, and attachments are not interpreted.
 Use `RtfToText` or `RtfToHtml` below for rendering. Token serialization,
 comprehensive compliance reporting, and async I/O remain deferred.
+The tokenizer's sans-I/O refactor is queued after its now-recorded
+[benchmark baseline](#rtf-benchmarks-and-pre-sans-io-baseline).
 
 ### Validating RTF document structure
 
@@ -4307,7 +4361,9 @@ effects are not rolled back.
 This is **RTF rendering, not encapsulated-HTML extraction**: `\fromhtml` does not
 switch modes, `\htmltag` groups are skipped, and `\htmlrtf` content is rendered.
 Use `RtfHtmlExtractor` separately for raw, unfiltered encapsulated HTML.
-HTML tokenization/filtering and streaming-output conversion remain deferred.
+Its result can be passed explicitly to `HtmlToHtml` for tokenization/filtering.
+Automatic extraction/rewrite dispatch inside `RtfToHtml` and streaming-output
+RTF conversion remain deferred.
 This is not a sanitizer:
 HTML decorations and callback markup are trusted, and the hyperlink scheme
 allowlist does not validate addresses or make targets trustworthy.
@@ -5385,9 +5441,10 @@ Already-emitted records remain available, but the block must be abandoned:
 errors are latched until `reset`, not retryable. Reset retains the configured
 limit. Callers must separately limit total bytes and record counts.
 
-This is the raw header foundation, not yet complete header handling.
-Decoded display access is described below; general decoded-value editing and
-formatting and additional structured-field grammars remain unported.
+This scanner handles raw records, not field-specific value grammars.
+Decoded display access is described below. `Header::from_unstructured` and
+the typed address/content-header formatters create checked replacement records
+for `HeaderList`; raw values are not automatically decoded or reformatted.
 
 ### Standalone headers and decoded display values
 
@@ -6039,7 +6096,8 @@ backslashes encoded inside encoded words. Raw phrase tabs become spaces and
 raw CR/LF are removed. For bare addresses the first trailing comment supplies
 the name; comment tabs become spaces, but quotes, escapes, nested parentheses,
 and internal line breaks remain. Comments after angle-bracketed mailboxes do
-not supply a name. All decoded names are trimmed.
+not supply a name. Decoded names are trimmed only of ASCII space/tab/CR/LF;
+Unicode whitespace is preserved.
 
 `name_decoding` independently configures RFC 2047 boundary recognition and a
 preferred fallback charset. Charset recovery is exposed through
@@ -6053,8 +6111,9 @@ Names containing only ASCII without `=` bypass encoded-word decoding. Domain
 spelling is retained and IDNA conversion remains explicit through `address()`
 and `route()`. No DNS/SMTP validity or length checks are added by the mailbox
 parser. Decoded names can contain controls and line breaks, so these values
-are not sanitized header output. Sorting and folded mailbox/header
-serialization remain deferred; `Display` provides unencoded text for display only.
+are not sanitized header output. `Display` provides unencoded text for display
+only; use `AddressList::to_header` or `to_header_string` for checked, folded
+header output. Address sorting remains deferred.
 
 ### Groups and address lists
 
@@ -6099,14 +6158,16 @@ Strict mode requires commas between addresses; loose modes tolerate missing
 separators. Repeated/trailing commas after a valid address are accepted in all
 modes, but leading commas are not. Parsing is **fail-fast**: invalid members are
 never silently dropped or replaced with empty groups, and errors carry byte
-offsets in the complete input. MimeKit's internal malformed-header
-resynchronization is not implemented here.
+offsets in the complete input. Standalone parsing does not resynchronize after
+malformed members. Message address-header accessors separately provide
+MimeKit-style recovery with diagnostics.
 
 Empty or whitespace/comment-only input is an error, while `AddressList::new()`
 creates an empty collection. Lists expose ordinary edits through `as_mut_vec()`,
 vector conversions, collection, and owned/borrowed iteration. These models also
-support construction and editing as described below; authoring validation,
-sorting, and folded address-header serialization remain deferred.
+support construction and editing as described below. `AddressList`'s checked
+`to_header`/`to_header_string` methods validate and fold output, with explicit
+international options. Sorting remains deferred.
 
 ### Constructing and editing addresses
 
@@ -6146,8 +6207,9 @@ variant. Clones own independent names, routes, and members.
 Editing does not impose parsing limits or validate header output. In particular,
 `max_group_depth` is a parse-time limit only; callers must bound programmatically
 assembled trees themselves. Route edits can contain invalid domains, and names
-can retain internal controls or line breaks. These APIs do not yet serialize
-addresses into headers.
+can retain internal controls or line breaks. Use the separate checked
+`AddressList` header formatters for serialization; validation occurs when
+formatting rather than during ordinary model edits.
 
 ### Address equality and hashing
 
@@ -6533,7 +6595,8 @@ identifies the original stored index, including skipped blank entries, and
 distinguishes IDNA failures from malformed literals. Failure returns no partial
 output and never silently passes through Unicode. Raw display and tolerant
 parsing keep their previous behavior. `MailboxAddress` integrates route parsing,
-including within groups/lists; mailbox header formatting remains unported.
+including within groups/lists. ASCII address output uses validated IDNA routes;
+the complete address-header formatter also supports checked UTF-8 output.
 
 ### International domain names
 
@@ -6577,8 +6640,8 @@ check mailbox deliverability, or detect visually confusable Unicode names.
 ### Character sets
 
 `mimecraft::charsets` provides `Charset` and `decode_best`. This is the shared
-character-conversion layer used by encoded-word and parameter decoding and
-intended for future text-part support, not itself an RFC 2047 or RFC 2231 parser.
+character-conversion layer used by encoded-word and parameter decoding, text
+parts, previews, and converters, not itself an RFC 2047 or RFC 2231 parser.
 Convenience constants are limited to `Charset::ASCII`, `Charset::UTF8`, and
 `Charset::LATIN1`; other charsets, including UTF-16LE/BE, use `Charset::from_label()`.
 
@@ -8028,8 +8091,10 @@ empty-body newline handling are retained. Options and required metadata errors
 are explicit and UU filename controls are rejected. Authored records are
 terminated; parsed EOF records, separator absence, and no-content delimiter
 ownership are retained until edits require new framing. Signature verification
-and configurable message-level formatting are not implemented. Writing does not
-prepare implicitly. Explicit tree preparation adapts `Multipart.Prepare`,
+is outside scope. Message writing supports `MimePartWriteOptions` for newline
+handling, encoder width, and final-newline policy, but not a general
+`FormatOptions` equivalent for refolding raw headers or hiding selected fields.
+Writing does not prepare implicitly. Explicit tree preparation adapts `Multipart.Prepare`,
 `MessagePart.Prepare`, and `MimeMessage.Prepare` using a depth-proportional
 iterator stack instead of recursive calls. It retains pre-descent MIME-Version
 insertion and traversal-order partial changes on failure. Invalid versions
@@ -8110,8 +8175,9 @@ without copying payloads during header partitioning. Explicit constructors
 replace clock/random-ID defaults, and serialization does not insert
 MIME-Version or hide Bcc. Parsed stream byte offsets are retained during
 partitioning and used in the source's original-order merge,
-shared by ordinary and masked writers. Other typed conveniences, change
-events and automatic preparation are deferred.
+shared by ordinary and masked writers. Typed subject, address, date, identifier,
+and priority conveniences are implemented. Detached values and explicit setters
+replace change events; automatic transport preparation remains deferred.
 Message importance and priority adapt `MessageImportance.cs`,
 `MessagePriority.cs`, `XMessagePriority.cs`, the corresponding `MimeMessage.cs`
 properties, and `UnitTests/MimeMessageTests.cs`. `Utils/ParseUtils.cs` supplies
@@ -8352,8 +8418,8 @@ of `HtmlComplianceViolation`. `HtmlComplianceOptions` and
 semantics. `HtmlTokenizerComplianceTests` and `HtmlCappedComplianceLoggerTests`
 supply recovery, ordering, and reporting-limit cases. Explicit Rust results
 replace callbacks, and source locations use UTF-8 byte offsets rather than
-UTF-16 code units. General HTML compliance logging and tokenization remain
-deferred.
+UTF-16 code units. The HTML tokenizer is implemented, but general HTML
+compliance logging beyond these character-reference helpers remains deferred.
 Plain-text HTML rendering adapts `Text/TextToHtml.cs`, `Text/UrlScanner.cs`,
 the fixed patterns in `Text/TextConverter.cs`, and
 `Text/HeaderFooterFormat.cs`, with cases from `UnitTests/Text/TextToHtmlTests.cs`
@@ -8518,8 +8584,9 @@ to retain body read-ahead. Writing follows `HeaderList.WriteTo` and
 round-trip regression vectors. Existing newline filters and `FilteredWriter`
 handle conversion and short writes. The Rust collection does not own or emit
 the body separator; parser metadata and explicit caller writes replace that
-source behavior. Unstructured decoded-value authoring and async I/O remain
-unported.
+source behavior. Unstructured decoded-value authoring uses
+`Header::from_unstructured` and checked collection replacement. Async header
+I/O remains unported.
 Typed integration adapts `MimeMessage.AddAddresses`' raw-value parsing and
 `MimeEntity`'s content-header parsing, serialization, and replacement paths.
 Explicit parser results replace internal silent failures/defaults. Owned typed
@@ -8562,8 +8629,9 @@ with models and traversal adapted from `GroupAddress.cs` and
 `InternetAddressList.cs`. Vectors come from `UnitTests/GroupAddressTests.cs` and
 `InternetAddressListTests.cs`. Explicit stacks replace recursive parsing and
 traversal; the depth option is bounded to 255 rather than an unrestricted integer.
-Malformed members return errors instead of internal TryParse-style dropping or
-empty-group recovery. Malformed-header resynchronization remains deferred.
+Standalone parsing returns errors for malformed members instead of internal
+TryParse-style dropping or empty-group recovery. Message address-header accessors
+implement that recovery separately; standalone resynchronization remains deferred.
 Construction and editing adapt `MailboxAddress.cs`, `GroupAddress.cs`, and
 `InternetAddress.Name`, including ASCII space/tab/CR/LF name trimming. Typed addr-spec
 assignment replaces string reparsing; ordinary Rust mutable borrows replace
@@ -8690,7 +8758,9 @@ AArch64 after CPU feature detection, for both Base64 and UU codecs.
 MIME content scanning uses SSE2 or AVX2 with POPCNT on x86/x86-64 and NEON on
 AArch64 to find boundary candidates and count/classify newlines in one pass.
 CPU selection is retained across messages and source replacement. These
-non-validating scans do not implement MimeKit's body compliance diagnostics.
+fast scans do not themselves validate content. Optional compliance reporting
+uses separate Base64, quoted-printable, and UU validators; Base64 validation is
+currently scalar rather than using MimeKit's SIMD validator kernels.
 Other CPUs use scalar fallbacks.
 32-bit ARM is not accelerated; AVX-512 is intentionally omitted.
 
@@ -8946,8 +9016,10 @@ Keep compiler, CPU flags, features, buffering, and output policies fixed for
 before/after comparisons, and rerun the old revision on the same machine to
 control for environmental noise. The standalone harness is intentionally short;
 use `--criterion` on the metabench target for longer statistical timing.
-The RTF tokenizer remains I/O-coupled in this batch. The TNEF reader still needs
-its own benchmark baseline before its planned sans-I/O refactor.
+The RTF tokenizer remains I/O-coupled; its baseline prerequisite is now complete.
+The TNEF reader is not ported yet. It needs an initial implementation,
+representative benchmark workloads, and an I/O-coupled baseline before its
+planned sans-I/O refactor.
 
 #### Address, codec/filter, and message benchmarks
 
@@ -9027,7 +9099,8 @@ compliance reporting). No library APIs are exposed solely for benchmarking,
 and full MIME-reader validation is not mislabeled as isolated validator work.
 The existing MIME benchmark target continues to omit upstream async and legacy
 parser variants. There is no TNEF benchmark class in this upstream checkout;
-representative TNEF workloads and a pre-sans-I/O baseline remain queued.
+representative workloads and a pre-sans-I/O baseline remain queued after the
+initial TNEF reader port.
 
 #### Optional metabench targets
 
