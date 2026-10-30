@@ -1,8 +1,9 @@
 * text=auto eol=lf
 
-# Preserve message and HTML fixtures exactly, including mixed line endings.
+# Preserve message, HTML, and codec fixtures exactly, including mixed line endings.
 *.eml  -text
 *.mbox -text
 *.mime -text
 tests/data/** -text
 benches/data/html/** -text
+benches/data/encoders/** -text

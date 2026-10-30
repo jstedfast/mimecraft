@@ -47,6 +47,18 @@ name = "rtf"
 harness = false
 
 [[bench]]
+name = "headers"
+harness = false
+
+[[bench]]
+name = "filters"
+harness = false
+
+[[bench]]
+name = "message"
+harness = false
+
+[[bench]]
 name = "base64_metabench"
 harness = false
 required-features = ["bench-metabench"]
@@ -63,5 +75,20 @@ required-features = ["bench-metabench"]
 
 [[bench]]
 name = "rtf_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
+name = "headers_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
+name = "filters_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
+name = "message_metabench"
 harness = false
 required-features = ["bench-metabench"]

@@ -8777,6 +8777,9 @@ cargo bench --bench html
 cargo bench --bench html --no-default-features
 cargo bench --bench rtf
 cargo bench --bench rtf --no-default-features
+cargo bench --bench headers
+cargo bench --bench filters
+cargo bench --bench message
 ```
 
 The base64 benchmark, which needs no extra benchmarking framework, compares scalar-only and runtime-dispatched
@@ -8932,15 +8935,96 @@ use `--criterion` on the metabench target for longer statistical timing.
 The RTF tokenizer remains I/O-coupled in this batch. The TNEF reader still needs
 its own benchmark baseline before its planned sans-I/O refactor.
 
+#### Address, codec/filter, and message benchmarks
+
+The `headers`, `filters`, and `message` targets port the remaining upstream
+workloads that have matching public Rust entry points, adding 118 cases:
+
+| Target | Upstream benchmark classes | Cases |
+| --- | --- | ---: |
+| `headers` | `AddressParserBenchmarks`, `Utils/Rfc2047Benchmarks` | 84 |
+| `filters` | All seven `IO/Filters/*Benchmarks` classes | 31 |
+| `message` | `MimeMessageBenchmarks` | 3 |
+
+`headers` preserves all 41 address-generator inputs and both `ParseBytes` and
+`ParseString`, including malformed brackets, unknown charsets, UTF-8/encoded
+names, quoted local-parts, folding, long atoms, and long comments. Every input
+and complete parsed name/address/group sequence is checked against MimeKit
+FNV-1a references, not just address counts. Both Rust entry points consume UTF-8;
+`ParseString` does not incur MimeKit's UTF-16-to-UTF-8 conversion. Results and
+their decoding diagnostics are allocated and dropped within each operation.
+The two RFC 2047 cases preserve the original `ILoveMimeSoMuch` input and assert
+the fully decoded Unicode text outside measurement.
+
+`filters` includes direct/streaming Base64 encode at widths 60, 64, 68, 72, and
+76, streaming quoted-printable/UU encode, direct/streaming decode for all three
+codecs, both From-line filters, both BestEncoding inputs, trailing whitespace,
+and all eight newline-filter cases. Upstream's `photo.b64`, `photo.uu`,
+`wikipedia.txt`, and `wikipedia.qp` are preserved byte-for-byte in
+`benches/data/encoders`, with Git text normalization disabled. Its `photo.jpg`
+is identical to the existing `tests/data/attachments/girl.jpg`, which is reused
+rather than duplicated; lorem ipsum is also reused from the attachment corpus.
+Fixture and transformed-output lengths/hashes come from the upstream files and
+converters. BestEncoding recommendations and reset behavior are checked too.
+
+Fresh codecs, filters, and output buffers are created inside each operation.
+Direct encoding reserves the calculated output capacity; direct decoding
+reserves input length as an upper bound, since Rust has no output-estimate API.
+These allocations and destruction are timed. Stream cases use `FilteredWriter`
+and explicitly call `finish`, not merely Rust's non-finalizing `flush`.
+From-line filters retain their full output vector and 1 KiB submissions;
+other stream filters write to a measuring sink with 4 KiB submissions.
+This intentionally uses Rust's adapter, which itself accepts at most 4 KiB
+per write, rather than trying to reproduce .NET's `MemoryStream.CopyTo` fast
+path or pooled input buffers. BestEncoding uses the original 100 reset passes
+per operation and 4 KiB chunks, with reusable output storage; its byte rate
+counts all 100 passes. Unlike MimeKit's pass-through slice, Rust's filter API
+copies those bytes into the output buffer.
+
+Upstream's newline setup converts *both* `LoremIpsumDos` and `LoremIpsumUnix`
+with `Unix2DosFilter`. That quirk is preserved, rather than silently changing
+the benchmark inputs. The quoted-printable and UU encoder cases do not use
+the upstream `MaxLineLength` parameter, so their five identical copies are
+collapsed into one case each. Hardware-enabled/disabled Base64 pairs use one
+Rust identity: compare default features with `--no-default-features` for
+dispatched/scalar builds. The .NET `System.Buffers.Text.Base64` comparison
+baselines are omitted, not relabeled as Rust MIME codecs.
+
+`message` constructs the original two-leaf multipart body outside timing,
+then reuses it and resets both leaves to `Unspecified` before every `prepare`,
+as upstream does. It measures all three constraints, including reset/header
+updates and a `RefCell` mutable borrow, but not message construction or payload
+loading. Content uses memory-backed cursors, not upstream's file-backed JPEG
+stream. The exact leaf encoding choices are checked on consecutive operations.
+Reported MiB/s counts logical payload size, not actual bytes read: unrestricted
+preparation can choose binary without scanning that content.
+
+`tests/core_benchmarks.rs` exercises the shared setups and correctness checks.
+Address/filter references were generated against MimeKit revision
+`20ab449ec5ee334efd6c5d909424ee61971267d5`. All three targets use the existing
+three-warm-up/five-sample standalone policy; the optional metabench targets
+below register the same 118 identities for Criterion and allocation tracking.
+These measure the current Rust API costs, not cross-runtime speed ratios.
+
+Deferred upstream benchmark classes are `AddressValidatorBenchmarks` (the
+separate address compliance validator is not ported) and
+`Encodings/EncodingValidatorBenchmarks` (Rust's validators are private to
+compliance reporting). No library APIs are exposed solely for benchmarking,
+and full MIME-reader validation is not mislabeled as isolated validator work.
+The existing MIME benchmark target continues to omit upstream async and legacy
+parser variants. There is no TNEF benchmark class in this upstream checkout;
+representative TNEF workloads and a pre-sans-I/O baseline remain queued.
+
 #### Optional metabench targets
 
-The `base64`, `mime_reader`, `html`, and `rtf` targets remain available without any
-benchmark framework. Separate `base64_metabench`, `mime_reader_metabench`,
-`html_metabench`, and `rtf_metabench`
-targets are enabled by `--features bench-metabench`; their optional dependencies
+The `base64`, `mime_reader`, `html`, `rtf`, `headers`, `filters`, and `message`
+targets remain available without any benchmark framework. Separate targets
+with the `_metabench` suffix are enabled by `--features bench-metabench`;
+their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 21 Base64, 27 MIME, twelve HTML, and twenty RTF cases.
+`benches/support`, covering all 21 Base64, 27 MIME, twelve HTML, twenty RTF,
+84 address/RFC 2047, 31 codec/filter, and three message-preparation cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs
@@ -8957,6 +9041,10 @@ cargo bench --features bench-metabench --bench html_metabench -- --test
 cargo bench --features bench-metabench --bench rtf_metabench -- --criterion
 cargo bench --features bench-metabench --bench rtf_metabench -- --allocations
 cargo bench --features bench-metabench --bench rtf_metabench -- --test
+cargo bench --features bench-metabench --bench headers_metabench -- --criterion
+cargo bench --features bench-metabench --bench filters_metabench -- --allocations
+cargo bench --features bench-metabench --bench message_metabench -- --criterion
+cargo bench --features bench-metabench --bench headers_metabench --bench filters_metabench --bench message_metabench -- --test
 ```
 
 Criterion timing and allocation tracking work on Windows as well as Linux.
@@ -9003,8 +9091,8 @@ report is otherwise the automatic baseline. Use separate output paths with
 `--output <path>` for engine/feature configurations you want to retain.
 
 These are cached in-memory workloads without storage or network I/O.
-Reader/parser measurements do not decode MIME bodies; RTF converters do decode
-their text. Results are not a throughput guarantee or a direct
+Reader/parser measurements do not decode MIME bodies; converter and codec cases
+do process decoded content. Results are not a throughput guarantee or a direct
 cross-runtime comparison against MimeKit; measure server workloads too.
 
 The UU backend comparison is an ignored unit test so it can force scalar,
