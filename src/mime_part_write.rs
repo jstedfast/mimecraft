@@ -105,7 +105,7 @@ impl<R: Read + Seek> MimePart<R> {
     ///
     /// Newly UU-encoded bodies get `begin 0644 filename` and `end` wrappers.
     /// The filename comes from Content-Disposition, then Content-Type's `name`,
-    /// then `unknown`; surrounding whitespace is trimmed. Control characters
+    /// then `unknown`; surrounding whitespace is preserved. Control characters
     /// are rejected rather than allowing extra wrapper lines. Already stored UU
     /// is copied with newline conversion, without adding another wrapper.
     ///
@@ -285,7 +285,7 @@ impl<R: Read + Seek> MimePart<R> {
 
     fn uu_file_name(&self) -> io::Result<String> {
         let name = self
-            .file_name_untrimmed_with_options(&crate::ParameterParseOptions::default())
+            .file_name()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             .unwrap_or_else(|| "unknown".to_owned());
         if name.chars().any(char::is_control) {
@@ -294,6 +294,6 @@ impl<R: Read + Seek> MimePart<R> {
                 "UU filename must not contain control characters",
             ));
         }
-        Ok(name.trim().to_owned())
+        Ok(name)
     }
 }

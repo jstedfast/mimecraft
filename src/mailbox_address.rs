@@ -226,7 +226,8 @@ impl MailboxAddress {
 
     /// Creates a mailbox from a Unicode display name and a parsed address.
     ///
-    /// The name is trimmed, but not unquoted, RFC 2047-decoded, or sanitized.
+    /// The name is trimmed of ASCII space/tab/CR/LF, but not unquoted,
+    /// RFC 2047-decoded, or sanitized. Unicode whitespace is preserved.
     /// Use an empty name for an unnamed mailbox. The route is initially empty;
     /// [`Self::route_mut`] can populate it. The address and its diagnostics are
     /// retained unchanged; unlike MimeKit's string constructor, this requires
@@ -255,7 +256,7 @@ impl MailboxAddress {
         &self.name.text
     }
 
-    /// Replaces the name with trimmed Unicode text, without decoding or sanitizing.
+    /// Replaces the name, trimming ASCII space/tab/CR/LF without decoding or sanitizing.
     ///
     /// Clears previous name-decoding diagnostics, even when the text is unchanged.
     /// The address, its diagnostics, and the source route are unaffected.
@@ -366,10 +367,10 @@ impl MailboxAddress {
 }
 
 pub(crate) fn assigned_name(name: &str) -> DecodedHeader {
-    // Leading/trailing whitespace may be folded or dropped beside encoded
+    // Leading/trailing ASCII whitespace may be folded or dropped beside encoded
     // words, so trim assigned names to keep them consistent across round trips.
     DecodedHeader {
-        text: name.trim().to_owned(),
+        text: crate::parse_utils::trim_whitespace(name).to_owned(),
         issues: Vec::new(),
     }
 }
@@ -496,16 +497,24 @@ impl Parser<'_> {
     fn decode_name(&self, input: &[u8]) -> DecodedHeader {
         if input.is_ascii() && !input.contains(&b'=') {
             return DecodedHeader {
-                text: std::str::from_utf8(input)
-                    .expect("plain ASCII is valid UTF-8")
-                    .trim()
-                    .to_owned(),
+                text: crate::parse_utils::trim_whitespace(
+                    std::str::from_utf8(input).expect("plain ASCII is valid UTF-8"),
+                )
+                .to_owned(),
                 issues: Vec::new(),
             };
         }
         let mut name = rfc2047::decode_phrase_with_options(input, &self.options.name_decoding);
-        name.text.truncate(name.text.trim_end().len());
-        let start = name.text.len() - name.text.trim_start().len();
+        name.text.truncate(
+            name.text
+                .trim_end_matches(crate::parse_utils::is_whitespace_char)
+                .len(),
+        );
+        let start = name.text.len()
+            - name
+                .text
+                .trim_start_matches(crate::parse_utils::is_whitespace_char)
+                .len();
         name.text.drain(..start);
         name
     }

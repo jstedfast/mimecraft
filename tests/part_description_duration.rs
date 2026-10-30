@@ -251,12 +251,9 @@ fn duration_accepts_nonnegative_int32_seconds_after_header_decoding() {
         ("000500", 500),
         ("2147483647", i32::MAX),
         (" \t500 \t", 500),
-        ("\u{a0}500\u{2003}", 500),
-        ("\x0b500\x0c", 500),
         ("=?utf-8?q?500?=", 500),
         ("=?utf-8?q?5=0D=0A00?=", 500),
         ("500\0\0", 500),
-        ("500 \t\x0b\x0c\0", 500),
         ("500\0 ", 500),
     ] {
         let part = part(format!("Content-Duration: {value}\r\n").as_bytes());
@@ -292,6 +289,10 @@ fn invalid_durations_do_not_fall_back_to_absence_or_later_duplicates() {
         "\0",
         "5\0 00",
         "500\u{a0}\0",
+        "\u{a0}500\u{2003}",
+        "\x0b500\x0c",
+        "500 \t\x0b\x0c\0",
+        "500 \t\0",
         "garbage",
         "=?utf-8?q?+500?=",
     ] {

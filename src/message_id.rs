@@ -158,7 +158,7 @@ impl MessageId {
     /// Normalizes a value using MimeKit's message-ID property setter rules.
     ///
     /// Unlike [`Self::parse`] and [`FromStr`], this rejects NULs and non-folding
-    /// CR/LF within the trimmed value. It first trims outer Unicode whitespace.
+    /// CR/LF within the trimmed value. It first trims outer ASCII space/tab/CR/LF.
     /// Interior CRLF, bare CR, or bare LF must be followed by a space or tab;
     /// the line break is removed but the following whitespace is retained.
     ///
@@ -190,8 +190,11 @@ impl MessageId {
     /// unfolding, or adding brackets. Errors on synthetic brackets map to the
     /// corresponding boundary of the trimmed value.
     pub fn from_value(value: &str) -> Result<Self, MessageIdParseError> {
-        let start = value.len() - value.trim_start().len();
-        let trimmed = value.trim();
+        let start = value.len()
+            - value
+                .trim_start_matches(crate::parse_utils::is_whitespace_char)
+                .len();
+        let trimmed = crate::parse_utils::trim_whitespace(value);
         if trimmed.is_empty() {
             return Err(MessageIdParseError::new(
                 MessageIdParseErrorKind::MissingId,

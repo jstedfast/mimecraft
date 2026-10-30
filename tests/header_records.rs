@@ -180,7 +180,7 @@ fn decoding_unfolds_after_encoded_word_decoding_and_preserves_other_text() {
         ),
         (
             "Subject: \u{a0}caf\u{e9}\u{1f642}\u{3000}",
-            "caf\u{e9}\u{1f642}",
+            "\u{a0}caf\u{e9}\u{1f642}\u{3000}",
         ),
         ("Subject: =?utf-8?q?unterminated", "=?utf-8?q?unterminated"),
     ] {
@@ -276,7 +276,7 @@ fn unfolding_borrows_trimmed_text_and_preserves_internal_whitespace() {
         (" \t\r\n", ""),
         ("unchanged", "unchanged"),
         (" \ttrimmed\r\n", "trimmed"),
-        ("\u{a0}text\u{3000}", "text"),
+        ("\u{a0}text\u{3000}", "\u{a0}text\u{3000}"),
         ("a  \tb", "a  \tb"),
     ] {
         let output = unfold(input);
@@ -296,7 +296,7 @@ fn unfolding_borrows_trimmed_text_and_preserves_internal_whitespace() {
 }
 
 #[test]
-fn unfolding_uses_unicode_whitespace_only_at_the_edges() {
+fn unfolding_trims_only_mime_whitespace_at_the_edges() {
     let whitespace = [
         '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}',
         '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
@@ -304,7 +304,13 @@ fn unfolding_uses_unicode_whitespace_only_at_the_edges() {
         '\u{3000}',
     ];
     for ch in whitespace {
-        assert_eq!(unfold(&format!("{ch}text{ch}")), "text");
+        let padded = format!("{ch}text{ch}");
+        let expected = if matches!(ch, ' ' | '\t' | '\r' | '\n') {
+            "text"
+        } else {
+            &padded
+        };
+        assert_eq!(unfold(&padded), expected);
         let input = format!("a{ch}b");
         let expected = if matches!(ch, '\r' | '\n') {
             "ab"
@@ -338,7 +344,7 @@ fn decoded_in_place_unfolding_matches_the_standalone_transform() {
             for last in alphabet {
                 let value = format!("{first}{middle}{last}");
                 let expected: String = value
-                    .trim()
+                    .trim_matches([' ', '\t', '\r', '\n'])
                     .chars()
                     .filter(|&ch| ch != '\r' && ch != '\n')
                     .collect();

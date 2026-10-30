@@ -68,7 +68,7 @@ impl Header {
     /// Creates an unstructured header with explicit formatting options.
     ///
     /// The field must be nonempty printable ASCII without a colon. Its spelling
-    /// is preserved. Like MimeKit's value assignment, trims Unicode whitespace
+    /// is preserved. Like MimeKit's value assignment, trims ASCII space/tab/CR/LF
     /// and removes internal CR/LF before encoding; other controls are encoded,
     /// not silently removed. The value is literal text: encoded-word lookalikes
     /// are encoded again so readers do not reinterpret them.
@@ -365,7 +365,7 @@ impl Header {
 
     /// Decodes the value as RFC 2047 text, then unfolds it for display.
     ///
-    /// Matches MimeKit's `Value` getter: trims surrounding Unicode whitespace
+    /// Matches MimeKit's `Value` getter: trims surrounding ASCII space/tab/CR/LF
     /// and removes all remaining CR/LF after decoding. Internal spaces, tabs,
     /// quotes, NUL, and other controls are retained. This is not sanitization,
     /// structured-value parsing, or text suitable for direct header authoring.

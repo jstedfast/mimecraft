@@ -7,8 +7,8 @@ use crate::mime_types_data::{EXTENSIONS, MIME_TYPES};
 
 /// Filename MIME-type guesses and preferred extensions, with local overrides.
 ///
-/// Uses MimeKit-derived mappings with selected IANA additions and corrections.
-/// Gzip and FLAC filenames use registered names; legacy reverse aliases remain.
+/// Uses MimeKit-derived mappings, including its October 29, 2026 refresh.
+/// Legacy reverse aliases and ambiguous filename mappings remain.
 /// Does not consult the OS, inspect file contents, access the filesystem, or
 /// update from a registry at runtime. A filename guess is not validation of its
 /// content.
@@ -160,8 +160,8 @@ mod tests {
 
     #[test]
     fn builtin_tables_are_sorted_unique_ascii_keys() {
-        assert_eq!(MIME_TYPES.len(), 562);
-        assert_eq!(EXTENSIONS.len(), 409);
+        assert_eq!(MIME_TYPES.len(), 591);
+        assert_eq!(EXTENSIONS.len(), 457);
         for table in [MIME_TYPES, EXTENSIONS] {
             assert!(table.windows(2).all(|rows| rows[0].0 < rows[1].0));
             for &(key, value) in table {

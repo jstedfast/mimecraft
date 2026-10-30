@@ -57,17 +57,19 @@ fn canonical_encoding_tokens_follow_mimepart() {
 }
 
 #[test]
-fn transfer_encoding_uses_unicode_whitespace_like_mimekit() {
-    for whitespace in [
-        '\t', '\n', '\u{000b}', '\u{000c}', '\r', ' ', '\u{0085}', '\u{00a0}', '\u{1680}',
-        '\u{2000}', '\u{2007}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
-    ] {
+fn transfer_encoding_uses_only_mime_whitespace() {
+    for whitespace in [' ', '\t', '\r', '\n'] {
         let value = format!("{whitespace}base64{whitespace}ignored");
         assert_eq!(value.parse(), Ok(ContentEncoding::Base64), "{value:?}");
     }
-    for nonwhitespace in ['\0', '\u{001c}', '\u{200b}', '\u{feff}'] {
+    for nonwhitespace in [
+        '\u{000b}', '\u{000c}', '\u{0085}', '\u{00a0}', '\u{1680}', '\u{2000}', '\u{2007}',
+        '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}', '\0', '\u{001c}', '\u{200b}',
+        '\u{feff}',
+    ] {
         assert!(ContentEncoding::parse(&format!("{nonwhitespace}base64")).is_err());
         assert!(ContentEncoding::parse(&format!("base64{nonwhitespace}")).is_err());
+        assert!(ContentEncoding::parse(&format!("base64{nonwhitespace}junk")).is_err());
     }
 }
 

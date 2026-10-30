@@ -126,7 +126,7 @@ fn classification_recognizes_aliases_case_and_trimmed_flowed_parameters() {
         ),
         (
             "text/plain; format=\"\u{a0}flowed\u{2003}\"",
-            TextFormat::Flowed,
+            TextFormat::Plain,
         ),
         ("text/plain; format=fixed", TextFormat::Plain),
         ("text/plain; format=\"\"", TextFormat::Plain),

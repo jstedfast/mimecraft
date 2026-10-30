@@ -8,19 +8,19 @@ fn mailbox(name: &str, address: &str) -> MailboxAddress {
 }
 
 #[test]
-fn constructors_and_setters_trim_unicode_name_whitespace() {
+fn constructors_and_setters_trim_only_mime_name_whitespace() {
     let mut mailbox = mailbox(" \tJohn Smith\u{a0} ", "j.smith@example.com");
-    assert_eq!(mailbox.display_name(), "John Smith");
+    assert_eq!(mailbox.display_name(), "John Smith\u{a0}");
     assert!(mailbox.display_name_issues().is_empty());
     assert!(mailbox.route().is_empty());
     mailbox.set_display_name("  Jane Smith  ");
     assert_eq!(mailbox.display_name(), "Jane Smith");
     mailbox.set_display_name(" \t\u{a0}\r\n");
-    assert_eq!(mailbox.display_name(), "");
+    assert_eq!(mailbox.display_name(), "\u{a0}");
     assert_eq!(mailbox.address().as_str(), "j.smith@example.com");
 
     let mut group = GroupAddress::new("\u{2003} Friends \t", AddressList::new());
-    assert_eq!(group.display_name(), "Friends");
+    assert_eq!(group.display_name(), "\u{2003} Friends");
     assert!(group.display_name_issues().is_empty());
     assert!(group.members().is_empty());
     group.set_display_name("\t Colleagues \r\n");

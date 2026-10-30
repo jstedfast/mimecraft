@@ -343,10 +343,7 @@ fn basenames_and_linked_uri_escaping_preserve_literal_filenames() {
         (" report.txt ", " report.txt ", "%20report.txt%20"),
     ] {
         let mut entity = attachment::from_bytes_with_options(path, IMAGE, &options).unwrap();
-        assert_eq!(
-            part(&entity).file_name().unwrap().as_deref(),
-            Some(name.trim())
-        );
+        assert_eq!(part(&entity).file_name().unwrap().as_deref(), Some(name));
         assert_eq!(
             part(&entity).content_type().unwrap().unwrap().name(),
             Some(name)
@@ -365,10 +362,7 @@ fn basenames_and_linked_uri_escaping_preserve_literal_filenames() {
         let mut wire = Vec::new();
         entity.write_to(&mut wire).unwrap();
         let loaded = MimeEntity::load(&mut wire.as_slice()).unwrap();
-        assert_eq!(
-            part(&loaded).file_name().unwrap().as_deref(),
-            Some(name.trim())
-        );
+        assert_eq!(part(&loaded).file_name().unwrap().as_deref(), Some(name));
         assert_eq!(
             part(&loaded).content_type().unwrap().unwrap().name(),
             Some(name)

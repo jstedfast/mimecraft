@@ -318,10 +318,14 @@ fn empty_bodies_obey_newline_option_for_every_encoding_path() {
 }
 
 #[test]
-fn uu_filename_precedence_fallback_trim_and_utf8() {
+fn uu_filename_precedence_fallback_whitespace_and_utf8() {
     for (disposition, content_name, expected) in [
-        (Some("  caf\u{e9}.txt  "), Some("ignored"), "caf\u{e9}.txt"),
-        (None, Some(" type.bin "), "type.bin"),
+        (
+            Some("  caf\u{e9}.txt  "),
+            Some("ignored"),
+            "  caf\u{e9}.txt  ",
+        ),
+        (None, Some(" type.bin "), " type.bin "),
         (None, None, "unknown"),
         (Some(""), Some("ignored"), ""),
     ] {

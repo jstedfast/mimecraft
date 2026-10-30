@@ -36,7 +36,7 @@ fn part(raw: &[u8]) -> MimePart<NoIo> {
 }
 
 #[test]
-fn getter_precedence_trimming_and_absence_match_upstream() {
+fn getter_precedence_whitespace_preservation_and_absence_match_upstream() {
     for (raw, expected) in [
         ("", None),
         ("Content-Disposition: attachment\n", None),
@@ -55,15 +55,15 @@ fn getter_precedence_trimming_and_absence_match_upstream() {
         ),
         (
             "Content-Disposition: attachment; filename=\"   \"\nContent-Type: text/plain; name=fallback.txt\n",
-            Some(""),
+            Some("   "),
         ),
         (
             "Content-Disposition: attachment\nContent-Type: text/plain; name=\" fallback.txt \"\n",
-            Some("fallback.txt"),
+            Some(" fallback.txt "),
         ),
         (
             "Content-Disposition: attachment; filename*=utf-8''%C2%A0caf%C3%A9.txt%C2%A0\n",
-            Some("caf\u{e9}.txt"),
+            Some("\u{a0}caf\u{e9}.txt\u{a0}"),
         ),
         (
             "Content-Disposition: inline; filename=first.txt\nContent-Disposition: attachment; filename=second.txt\n",
@@ -176,7 +176,7 @@ fn assignments_update_both_parameters_and_only_create_missing_dispositions() {
         let content_type = part.content_type().unwrap().unwrap();
         assert_eq!(content_type.name(), Some(" image.png "));
         assert_eq!(content_type.parameters().get("x"), Some("type"));
-        assert_eq!(part.file_name().unwrap().as_deref(), Some("image.png"));
+        assert_eq!(part.file_name().unwrap().as_deref(), Some(" image.png "));
     }
 }
 
@@ -390,7 +390,7 @@ fn checked_authoring_preserves_literal_values_and_physical_line_limits() {
                 part.content_disposition().unwrap().unwrap().file_name(),
                 Some(name)
             );
-            assert_eq!(part.file_name().unwrap().as_deref(), Some(name.trim()));
+            assert_eq!(part.file_name().unwrap().as_deref(), Some(name));
             for header in part.headers().iter() {
                 assert!(header.raw().is_ascii());
                 assert!(!header.raw().contains(&0));
@@ -449,11 +449,11 @@ fn text_parts_and_serialized_messages_observe_both_filename_parameters() {
 }
 
 #[test]
-fn uu_writing_rejects_controls_before_filename_trimming() {
+fn uu_writing_rejects_controls_in_preserved_filenames() {
     for name in ["\tfile.txt", "file.txt\r\n", "\u{0085}file.txt"] {
         let mut part = MimePart::new(MimeContent::new(NoIo));
         part.set_file_name(Some(name)).unwrap();
-        assert_eq!(part.file_name().unwrap().as_deref(), Some("file.txt"));
+        assert_eq!(part.file_name().unwrap().as_deref(), Some(name));
         part.set_content_transfer_encoding(ContentEncoding::UuEncode);
         let mut output = Vec::new();
         assert_eq!(
@@ -472,5 +472,5 @@ fn uu_writing_rejects_controls_before_filename_trimming() {
     part.set_content_transfer_encoding(ContentEncoding::UuEncode);
     let mut output = Vec::new();
     part.write_content_to(&mut output).unwrap();
-    assert_eq!(output, b"begin 0644 file.txt\r\n#86)C\r\n`\r\nend\r\n");
+    assert_eq!(output, b"begin 0644  file.txt \r\n#86)C\r\n`\r\nend\r\n");
 }

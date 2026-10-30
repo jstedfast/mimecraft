@@ -86,10 +86,10 @@ impl Address {
         }
     }
 
-    /// Replaces either variant's name with trimmed, undecoded Unicode text.
+    /// Replaces either variant's name, trimming ASCII space/tab/CR/LF.
     ///
     /// Clears that name's decoding diagnostics without changing other fields.
-    /// This does not sanitize the name for use in headers.
+    /// This does not decode or sanitize the name for use in headers.
     pub fn set_display_name(&mut self, name: &str) {
         match self {
             Self::Mailbox(mailbox) => mailbox.set_display_name(name),

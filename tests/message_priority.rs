@@ -26,7 +26,7 @@ fn importance_values_parse_format_and_create_headers() {
         assert_eq!(MessageImportance::parse(token), Ok(value));
         assert_eq!(token.parse(), Ok(value));
         assert_eq!(
-            MessageImportance::parse(&format!("\u{a0}{}\u{2003}", token.to_ascii_uppercase())),
+            MessageImportance::parse(&format!(" \t{}\r\n", token.to_ascii_uppercase())),
             Ok(value)
         );
         assert_eq!(value.as_str(), token);
@@ -50,7 +50,7 @@ fn priority_values_parse_format_and_create_headers() {
         assert_eq!(MessagePriority::parse(token), Ok(value));
         assert_eq!(token.parse(), Ok(value));
         assert_eq!(
-            MessagePriority::parse(&format!("\r\n\t{}\u{a0}", token.to_ascii_uppercase())),
+            MessagePriority::parse(&format!("\r\n\t{} ", token.to_ascii_uppercase())),
             Ok(value)
         );
         assert_eq!(value.as_str(), token);

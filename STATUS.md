@@ -215,7 +215,7 @@ MimeKit. The crate is not configured for publication.
   names, angle-bracket recovery, and complete/prefix APIs.
 - Group/address-list parsing with bounded nesting, editable ordered lists,
   depth-first mailbox traversal, and explicit malformed-member errors.
-- Mailbox/group construction and editing with typed addresses, trimmed Unicode
+- Mailbox/group construction and editing with typed addresses, ASCII-trimmed
   names, mutable routes/members, and explicit decoding-diagnostic lifetimes.
 - Unencoded address display formatting with quoted mailbox names, preserved
   source routes/group boundaries, and iterative nested-group formatting.
@@ -1095,7 +1095,7 @@ selectors. Related-root lookup observes the current raw headers on each call.
 
 `file_name()` returns `Result<Option<String>, ContentHeaderParseError>`, checking
 the first Content-Disposition's `filename` parameter before the first
-Content-Type's `name`. The decoded value is Unicode-trimmed. An empty filename
+Content-Type's `name`. The decoded value is preserved verbatim. An empty filename
 prevents fallback; an invalid disposition reports an error rather than falling
 back. Content-Type is not parsed when a disposition filename is available.
 `file_name_with_options()` accepts `ParameterParseOptions`; recovery diagnostics
@@ -1105,8 +1105,8 @@ The returned name is untrusted metadata, **not a sanitized filesystem path**.
 `set_file_name(Some(name))` updates both parameters atomically. It preserves
 existing disposition tokens and other parameters, creating an `attachment`
 disposition only when absent. It requires an existing valid Content-Type rather
-than guessing a media type. The assignment is stored literally, without the
-getter's trimming; Unicode, controls, and encoded-word lookalikes are encoded
+than guessing a media type. Both assignment and lookup preserve whitespace;
+Unicode, controls, and encoded-word lookalikes are encoded
 by the checked header formatter. Empty text writes empty parameters.
 
 `set_file_name(None)` removes both parameters while preserving existing headers
@@ -1120,7 +1120,7 @@ absent is a no-op, even with invalid formatting options.
 Filename accessors and the underlying content-header metadata methods require
 no source I/O traits. Text parts expose them through `part()`/`part_mut()`.
 The UU writer shares the same lookup precedence, but still rejects control
-characters **before trimming** and uses `unknown` only when no name exists.
+characters and uses `unknown` only when no name exists. It preserves whitespace.
 
 `content_description()` returns the first Content-Description as an owned
 `Option<rfc2047::DecodedHeader>`, retaining tolerant decoding diagnostics.
@@ -1138,8 +1138,8 @@ empty text leaves one empty header. Formatting errors leave all records intact.
 `content_duration()` returns `Result<Option<i32>, InvalidContentDuration>` in
 whole seconds. It follows MimeKit by decoding and unfolding the first header,
 then accepting ASCII decimal digits through `i32::MAX`, including leading
-zeros. The decoded value is Unicode-trimmed; trailing NULs, optionally preceded
-by ASCII whitespace, are accepted as in the upstream integer parser. Signs,
+zeros. Only outer ASCII space/tab/CR/LF is trimmed; trailing NULs immediately
+following digits are accepted as in the upstream integer parser. Signs,
 comments, fractions, internal spaces, and overflow produce an accessor error,
 not a message-loading failure or a fallback to later duplicate headers.
 Charset diagnostics remain available through the raw header's decoder.
@@ -1154,7 +1154,7 @@ and need no source I/O trait bounds. Text parts expose them through
 
 `content_md5()` reads the first Content-MD5 as detached decoded text with
 charset-recovery diagnostics, using the same tolerant decoding, unfolding, and
-Unicode trimming as Content-Description. `content_md5_with_options` accepts
+ASCII space/tab/CR/LF trimming as Content-Description. `content_md5_with_options` accepts
 `rfc2047::DecodeOptions`. Missing and present-empty headers remain distinct;
 arbitrary or malformed checksum text is preserved rather than rejected.
 Raw edits are observed immediately, and later duplicates do not override the
@@ -1272,7 +1272,7 @@ output or an extra body newline.
 
 New UU output includes `begin 0644 filename` and `end` lines. The filename uses
 Content-Disposition, then Content-Type's `name`, then `unknown`, with surrounding
-whitespace trimmed. Control characters are rejected rather than introducing
+whitespace preserved. Control characters are rejected rather than introducing
 extra wrapper lines. Already UU-encoded content retains its existing wrapper.
 
 Header normalization preserves field spelling, folding, duplicates, malformed
@@ -1342,7 +1342,7 @@ formatting path, without selecting a transfer encoding.
 `format()` classifies current metadata without source I/O. `is_plain`,
 `is_flowed`, `is_html`, `is_enriched`, and `is_rich_text` share the body selector's
 case-insensitive matching. Flowed is also plain; `format=flowed` is
-Unicode-trimmed and only applies to `text/plain`. The older `text/richtext`
+trimmed of ASCII space/tab/CR/LF and only applies to `text/plain`. The older `text/richtext`
 counts as Enriched, not RTF. Charset labels, markup, and body bytes are not
 validated. Unknown `text/*` subtypes classify as Plain, matching MimeKit's
 fallback, but do not satisfy `is_plain()` or plain-body selection.
@@ -2221,7 +2221,7 @@ precedes display unfolding; diagnostic ranges refer to the raw header value.
 Getters never modify headers or inspect body sources.
 
 `set_subject` and `set_subject_with_options` format a complete replacement
-before editing. Like MimeKit, they trim surrounding Unicode whitespace and
+before editing. Like MimeKit, they trim surrounding ASCII space/tab/CR/LF and
 remove CR/LF without inserting replacement spaces. Other controls are encoded,
 not silently removed. Assigned encoded-word lookalikes are literal text, not
 pre-encoded input.
@@ -2560,8 +2560,8 @@ assert_eq!(message.x_priority().unwrap().number(), 2);
 `importance()`, `priority()`, and `x_priority()` read only the first matching
 message header on every call. Missing fields yield Normal, while invalid
 present values return `MessagePriorityParseError` rather than MimeKit's Normal
-fallback. Importance and Priority use `Header::decode_value`, then trim Unicode
-whitespace and compare complete tokens ignoring ASCII case. Supported tokens
+fallback. Importance and Priority use `Header::decode_value`, then trim ASCII
+space/tab/CR/LF and compare complete tokens ignoring ASCII case. Supported tokens
 are `low`/`normal`/`high` and `non-urgent`/`normal`/`urgent`, respectively.
 Comments and unknown tokens are errors. Decode the raw header directly for
 charset-recovery diagnostics; standalone enum parsing does not decode words.
@@ -4819,8 +4819,8 @@ operations.
 
 `report_type()` reads the authoritative raw header on every call and returns a
 detached decoded value: `None` means absent, while `Some("")` means empty.
-Reads do not trim or change case. `set_report_type` trims outer Unicode
-whitespace, preserving case and internal whitespace. An exact match to either
+Reads do not trim or change case. `set_report_type` trims outer ASCII
+space/tab/CR/LF, preserving case and internal whitespace. An exact match to either
 the supplied or trimmed value is a no-op, retaining raw spelling, folds, and
 duplicates without validating boundary or formatting options.
 
@@ -4864,7 +4864,7 @@ assert!(joined.headers().contains("Subject"));
 
 `id()`, `number()`, and `total()` reparse authoritative headers without source
 I/O; `part_mut()` permits raw edits. Only absent parameters return `None`.
-Numbers accept ASCII digits, surrounding ASCII space or tab-through-CR
+Numbers accept ASCII digits, surrounding ASCII space, tab, CR, or LF
 whitespace, and values through `i32::MAX`, including zero when reading.
 Unlike MimeKit's nullable getters, malformed present numbers return explicit
 errors. No sign, Unicode whitespace/digits, or trailing NUL is accepted.
@@ -5426,12 +5426,19 @@ record limit. Use `HeaderParser` to find header/body boundaries and preserve
 unterminated or malformed records exactly.
 
 `decode_value()` follows MimeKit's `Value` getter: decode RFC 2047 text, trim
-surrounding Unicode whitespace, then remove remaining CR/LF. Internal spaces,
+surrounding ASCII space/tab/CR/LF, then remove remaining CR/LF. Internal spaces,
 tabs, quotes, and other controls are preserved, including NUL. Decode-before-
 unfold ordering also removes line breaks encoded inside encoded words. This is
 display decoding, not structured parsing, control sanitization, or encoding for
 safe insertion into a new header. Malformed records have an empty raw value
 and return empty decoded text; inspect `is_invalid()` separately.
+
+The October 29, 2026 MimeKit whitespace fix is applied throughout MIME header
+normalization: only ASCII space, tab, CR, and LF count as removable whitespace.
+Unicode spaces, vertical tab, and form feed remain significant. Filenames and
+boundaries preserve parameter whitespace verbatim. Token and numeric parsing
+does not silently discard non-MIME whitespace; existing explicit Rust errors
+remain in place instead of MimeKit's nullable/default fallbacks.
 
 `decode_value_with_options(&rfc2047::DecodeOptions)` selects strict/loose
 encoded-word boundaries and an optional fallback charset for this call.
@@ -5663,8 +5670,8 @@ recognized as ordinary metadata only; no cryptographic support is added.
 
 ### Filename MIME-types and preferred extensions
 
-`MimeTypes` provides 562 filename-extension mappings and 409 independent
-preferred-extension mappings, based on MimeKit with selected IANA updates.
+`MimeTypes` provides 591 filename-extension mappings and 457 independent
+preferred-extension mappings, synchronized with MimeKit's October 29, 2026 refresh.
 Built-in tables are immutable;
 `new()` and `Default` start with no overrides. Registrations belong to an
 instance, not a global registry, and cloning copies overrides independently.
@@ -5700,6 +5707,13 @@ and `.flac` returns `audio/flac`. Reverse lookup still accepts
 `application/x-gzip` and `audio/x-flac` for compatibility. This is a targeted
 update, not exhaustive coverage of the IANA registry.
 
+The October 29 synchronization also includes newer image, document, media,
+database, and scientific-data mappings. Forward and preferred-extension tables
+remain independent: for example, `.opus` maps to `audio/ogg`, whose preferred
+extension is `.ogg`, while the legacy `audio/opus` alias still resolves to
+`.opus`. Older Matroska and Python aliases remain accepted. Ambiguous suffixes
+such as `.ts`, `.rpm`, `.xml`, `.rtf`, and `.db` retain their existing mappings.
+
 `register` adds a leading dot when absent, overwrites just the two supplied
 lookup keys, and preserves other aliases and old reverse mappings. Returned
 values retain spelling. Only empty MIME-type/extension strings are errors,
@@ -5714,7 +5728,7 @@ and global mutable dictionaries.
 
 `ContentEncoding::parse(&str)` and `"base64".parse::<ContentEncoding>()` follow
 MimeKit's tolerant Content-Transfer-Encoding value parsing. They skip leading
-Unicode whitespace and recognize the first token case-insensitively. Whitespace
+ASCII space/tab/CR/LF and recognize the first token case-insensitively. MIME whitespace
 or a semicolon ends the token; everything following it is ignored. This retains
 MimeKit's workaround for Google Docs appending a semicolon.
 
@@ -5802,8 +5816,8 @@ an embedded `<id>` and can absorb whitespace-separated text in a loose local
 part. Both APIs take a complete input slice, independent of I/O or chunking.
 
 `MessageId::from_value(&str)` ports the assignment rules used by MimeKit's
-message-ID, content-ID, and reference-list setters. It trims outer Unicode
-whitespace, rejects NULs, and requires every remaining CRLF, bare CR, or bare LF
+message-ID, content-ID, and reference-list setters. It trims outer ASCII
+space/tab/CR/LF, rejects NULs, and requires every remaining CRLF, bare CR, or bare LF
 to be followed by ASCII space or tab. Accepted folds lose the line break but
 retain the following whitespace. Because trimming happens first, outer line
 endings are removed rather than rejected.
@@ -6122,8 +6136,8 @@ assert_eq!(
 # Ok::<(), mimecraft::AddrSpecParseError>(())
 ```
 
-Both constructors and `set_display_name` trim leading/trailing Unicode
-whitespace but do **not** unquote, decode encoded words, or sanitize text.
+Both constructors and `set_display_name` trim leading/trailing ASCII
+space/tab/CR/LF but do **not** unquote, decode encoded words, or sanitize text.
 An empty string represents an absent name. Replacing a name clears its previous
 decoding diagnostics even when the text is unchanged; unrelated fields and
 member diagnostics remain intact. `Address::set_display_name` handles either
@@ -7979,7 +7993,7 @@ preserve parsed parameters and use atomic duplicate-collapsing formatting.
 Explicit parse errors replace implicit malformed-header fallback behavior;
 checked formatting failures preserve the original metadata.
 Filename metadata follows `MimePart.FileName`: disposition-first lookup,
-Unicode trimming on read, and updates to both MIME parameter collections.
+verbatim whitespace preservation, and updates to both MIME parameter collections.
 Detached parsing and formatting make the two-header update atomic. Unlike
 MimeKit's always-present ContentType object, missing raw Content-Type prevents
 non-null assignments instead of silently supplying a media type. Removal
@@ -8551,7 +8565,7 @@ traversal; the depth option is bounded to 255 rather than an unrestricted intege
 Malformed members return errors instead of internal TryParse-style dropping or
 empty-group recovery. Malformed-header resynchronization remains deferred.
 Construction and editing adapt `MailboxAddress.cs`, `GroupAddress.cs`, and
-`InternetAddress.Name`, including Unicode name trimming. Typed addr-spec
+`InternetAddress.Name`, including ASCII space/tab/CR/LF name trimming. Typed addr-spec
 assignment replaces string reparsing; ordinary Rust mutable borrows replace
 change events. Replacing a name explicitly clears only its decoding diagnostics.
 Equality follows `MailboxAddress.Equals`, `GroupAddress.Equals`, and

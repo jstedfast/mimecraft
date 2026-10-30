@@ -4,7 +4,10 @@
 
 use std::{error::Error, fmt, str::FromStr};
 
-use crate::{Header, parse_utils::skip_whitespace};
+use crate::{
+    Header,
+    parse_utils::{skip_whitespace, trim_whitespace},
+};
 
 /// An Importance header value, independent of Priority and X-Priority.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -20,14 +23,14 @@ pub enum MessageImportance {
 
 impl MessageImportance {
     /// Parses `low`, `normal`, or `high`, ignoring ASCII case and surrounding
-    /// Unicode whitespace. Does not decode encoded words or remove comments.
+    /// ASCII space/tab/CR/LF. Does not decode encoded words or remove comments.
     ///
     /// # Errors
     ///
     /// Empty or unknown values return [`MessagePriorityParseError::Importance`]
     /// rather than MimeKit's implicit Normal fallback.
     pub fn parse(value: &str) -> Result<Self, MessagePriorityParseError> {
-        let value = value.trim();
+        let value = trim_whitespace(value);
         [Self::Low, Self::Normal, Self::High]
             .into_iter()
             .find(|importance| value.eq_ignore_ascii_case(importance.as_str()))
@@ -77,14 +80,14 @@ pub enum MessagePriority {
 
 impl MessagePriority {
     /// Parses `non-urgent`, `normal`, or `urgent`, ignoring ASCII case and
-    /// surrounding Unicode whitespace. Does not decode words or remove comments.
+    /// surrounding ASCII space/tab/CR/LF. Does not decode words or remove comments.
     ///
     /// # Errors
     ///
     /// Empty or unknown values return [`MessagePriorityParseError::Priority`]
     /// rather than MimeKit's implicit Normal fallback.
     pub fn parse(value: &str) -> Result<Self, MessagePriorityParseError> {
-        let value = value.trim();
+        let value = trim_whitespace(value);
         [Self::NonUrgent, Self::Normal, Self::Urgent]
             .into_iter()
             .find(|priority| value.eq_ignore_ascii_case(priority.as_str()))

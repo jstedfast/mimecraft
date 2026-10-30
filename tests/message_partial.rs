@@ -187,6 +187,7 @@ fn numeric_parameters_distinguish_absence_invalid_values_and_zero() {
         ("0", 0),
         ("000000000000000000000000000001", 1),
         (" \t5\t ", 5),
+        (" \t1\r\n ", 1),
         ("2147483647", i32::MAX as u32),
     ] {
         for name in ["number", "total"] {
@@ -207,6 +208,8 @@ fn numeric_parameters_distinguish_absence_invalid_values_and_zero() {
         "2147483648",
         "4294967296",
         "\u{a0}1",
+        "\x0b1\x0b",
+        "\x0c1\x0c",
         "\u{661}",
         "1\0",
     ] {

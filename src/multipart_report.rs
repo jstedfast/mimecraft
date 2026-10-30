@@ -40,7 +40,7 @@ pub struct MultipartReport<R = Cursor<Vec<u8>>> {
 impl<R> MultipartReport<R> {
     /// Creates an empty multipart/report with an explicit boundary and report type.
     ///
-    /// Trims leading/trailing Unicode whitespace from `report_type`, retaining
+    /// Trims leading/trailing ASCII space/tab/CR/LF from `report_type`, retaining
     /// case and internal whitespace. Empty strings are retained, not removed.
     /// No child entities, disposition, or transfer encoding are generated.
     ///
@@ -114,7 +114,7 @@ impl<R> MultipartReport<R> {
         self.set_report_type_with_options(value, &HeaderFormatOptions::default())
     }
 
-    /// Sets the report type, trimming outer Unicode whitespace and retaining case.
+    /// Sets the report type, trimming outer ASCII space/tab/CR/LF and retaining case.
     ///
     /// Empty and unknown values are allowed, including values that do not match
     /// any child. Does not change other parameters, children, preamble, epilogue,
@@ -140,14 +140,15 @@ impl<R> MultipartReport<R> {
         // MimeKit checks before trimming, and Parameter.Value suppresses a
         // change when the trimmed value is equal too. Preserve raw headers in
         // both cases instead of unnecessarily reserializing them.
-        if current == Some(value) || current == Some(value.trim()) {
+        let trimmed = crate::parse_utils::trim_whitespace(value);
+        if current == Some(value) || current == Some(trimmed) {
             return Ok(());
         }
         // The report type describes the second child, but MimeKit does not
         // enforce that relationship or rewrite the children when it changes.
         content_type
             .parameters_mut()
-            .set_optional("report-type", Some(value.trim().to_owned()));
+            .set_optional("report-type", Some(trimmed.to_owned()));
         self.multipart
             .set_content_type_with_options(&content_type, options)
             .map_err(MultipartReportError::Multipart)

@@ -51,11 +51,8 @@ fn source_invalid_setter_vectors() {
 }
 
 #[test]
-fn outer_unicode_whitespace_is_trimmed_before_validation() {
-    for whitespace in [
-        '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}',
-        '\u{2007}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
-    ] {
+fn outer_mime_whitespace_is_trimmed_before_validation() {
+    for whitespace in [' ', '\t', '\r', '\n'] {
         for token in ["a@b", "<a@b>"] {
             let input = format!("{whitespace}{token}{whitespace}");
             assert_eq!(MessageId::from_value(&input).unwrap().as_str(), "a@b");
@@ -65,7 +62,7 @@ fn outer_unicode_whitespace_is_trimmed_before_validation() {
         assert_eq!(error.kind(), Kind::MissingId);
         assert_eq!(error.offset(), empty.len());
     }
-    // Like MimeKit's Trim(), outer line endings are removed, not rejected.
+    // Like MimeKit's TrimWhiteSpace(), outer line endings are removed, not rejected.
     assert_eq!(
         MessageId::from_value("\r\n a@b\r\n").unwrap().as_str(),
         "a@b"
@@ -222,18 +219,18 @@ fn reading_apis_remain_tolerant() {
 #[test]
 fn offsets_refer_to_original_bytes_after_trim_unfold_and_wrapping() {
     for (input, kind, marker) in [
-        ("\u{a0} <a@\r\n .bad> \t", Kind::InvalidDomain, ".bad"),
+        ("\t  <a@\r\n .bad> \t", Kind::InvalidDomain, ".bad"),
         (" \u{e9}@.bad \t", Kind::InvalidDomain, ".bad"),
         ("<\"x\r\n y\n\tz\"@.bad>", Kind::InvalidDomain, ".bad"),
         ("<a@b>\r\n (unfinished", Kind::IncompleteComment, "("),
         ("  \"x\r\n y@b", Kind::IncompleteQuotedString, "\""),
-        ("\u{a0}<\u{e9}\0@b>", Kind::NulCharacter, "\0"),
-        ("\u{a0}<\u{e9}\rX@b>", Kind::InvalidLineBreak, "\r"),
+        ("\t <\u{e9}\0@b>", Kind::NulCharacter, "\0"),
+        ("\t <\u{e9}\rX@b>", Kind::InvalidLineBreak, "\r"),
         (" \u{e9}\r\n @b ", Kind::UnquotedWhitespace, " @"),
         ("<a@b>\r\n <c@d>", Kind::TrailingInput, "<c"),
         ("<a@b>\r\n (tail) \n\t<c@d>", Kind::TrailingInput, "<c"),
         (
-            "\u{a0}<a@b>\r\n (tail\r\n (inner))\n\t<c@d>",
+            "\t <a@b>\r\n (tail\r\n (inner))\n\t<c@d>",
             Kind::TrailingInput,
             "<c",
         ),
@@ -256,11 +253,11 @@ fn missing_input_and_synthetic_bracket_errors_point_to_original_boundaries() {
     let error = MessageId::from_value(input).unwrap_err();
     assert_eq!(error.kind(), Kind::TrailingInput);
     assert_eq!(error.offset(), input.trim_end().len());
-    let input = "\u{a0}<abc \t";
+    let input = "\t <abc \t";
     let error = MessageId::from_value(input).unwrap_err();
     assert_eq!(error.kind(), Kind::IncompleteId);
     assert_eq!(error.offset(), input.trim_end().len());
-    let error = MessageId::from_value(" \u{a0}< >").unwrap_err();
+    let error = MessageId::from_value(" \t < >").unwrap_err();
     assert_eq!(error.kind(), Kind::EmptyId);
     assert_eq!(error.offset(), 3);
     let error = MessageId::from_value("").unwrap_err();
@@ -270,7 +267,7 @@ fn missing_input_and_synthetic_bracket_errors_point_to_original_boundaries() {
 
 #[test]
 fn multiple_folds_preserve_original_error_offsets_without_a_source_map() {
-    let mut input = String::from("\u{a0}<\"x");
+    let mut input = String::from("\t <\"x");
     for _ in 0..10_000 {
         input.push_str("\r\n \u{e9}");
     }

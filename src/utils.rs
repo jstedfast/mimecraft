@@ -7,12 +7,14 @@
 //! quoted-string grammar, encode words or character sets, or make arbitrary
 //! text safe to insert into headers. In particular, quoting preserves controls
 //! and line breaks; unquoting tolerates malformed quotes and escapes.
-//! Unfolding trims surrounding Unicode whitespace and removes CR/LF, but is
+//! Unfolding trims surrounding ASCII space/tab/CR/LF and removes CR/LF, but is
 //! not general control-character sanitization or strict folding validation.
 //! The separate SMTP validators check exact addr-spec syntax and policy without
 //! rewriting the supplied text.
 
 use std::borrow::Cow;
+
+use crate::parse_utils::{is_whitespace_char, trim_whitespace};
 
 pub use crate::smtp_address::{validate_smtp_address, validate_smtp_address_with_options};
 pub use crate::smtp_utf8_address::{
@@ -21,7 +23,7 @@ pub use crate::smtp_utf8_address::{
 
 /// Unfolds a header value using MimeKit's display transformation.
 ///
-/// Trims surrounding Unicode whitespace, then removes all internal CR/LF,
+/// Trims surrounding ASCII space/tab/CR/LF, then removes all internal CR/LF,
 /// including bare line breaks not followed by space or tab. All other internal
 /// whitespace, quotes, and controls remain unchanged. No space is inserted in
 /// place of a line break. This does not decode encoded words or character sets.
@@ -34,10 +36,10 @@ pub use crate::smtp_utf8_address::{
 ///
 /// assert_eq!(unfold(" \r\nhello\r\n\tworld \r\n"), "hello\tworld");
 /// assert_eq!(unfold("a\r\nb"), "ab");
-/// assert_eq!(unfold("\u{a0}text\u{3000}"), "text");
+/// assert_eq!(unfold("\u{a0}text\u{3000}"), "\u{a0}text\u{3000}");
 /// ```
 pub fn unfold(text: &str) -> Cow<'_, str> {
-    let trimmed = text.trim();
+    let trimmed = trim_whitespace(text);
     if trimmed.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
         let mut output = trimmed.to_owned();
         unfold_in_place(&mut output);
@@ -48,8 +50,8 @@ pub fn unfold(text: &str) -> Cow<'_, str> {
 }
 
 pub(crate) fn unfold_in_place(text: &mut String) {
-    text.truncate(text.trim_end().len());
-    let start = text.len() - text.trim_start().len();
+    text.truncate(text.trim_end_matches(is_whitespace_char).len());
+    let start = text.len() - text.trim_start_matches(is_whitespace_char).len();
     text.drain(..start);
     // Remove the line breaks, not the following whitespace: collapsing spaces
     // or converting continuation tabs would change MimeKit's displayed value.

@@ -3,6 +3,8 @@
 
 use std::{error::Error, fmt, str::FromStr};
 
+use crate::parse_utils::is_whitespace_char;
+
 /// A MIME content transfer encoding, matching MimeKit's `ContentEncoding`.
 ///
 /// This identifies an encoding; it does not encode, decode, or validate bytes.
@@ -34,8 +36,8 @@ pub enum ContentEncoding {
 impl ContentEncoding {
     /// Parses a Content-Transfer-Encoding value using MimeKit's tolerant rules.
     ///
-    /// Skips leading Unicode whitespace and recognizes the first token,
-    /// case-insensitively, up to whitespace or a semicolon. Remaining text is
+    /// Skips leading ASCII space/tab/CR/LF and recognizes the first token,
+    /// case-insensitively, up to those characters or a semicolon. Remaining text is
     /// ignored. In addition to the standard names, `x-uuencode`, `uuencode`,
     /// and `x-uue` all select [`UuEncode`](Self::UuEncode).
     ///
@@ -56,11 +58,11 @@ impl ContentEncoding {
     /// assert!(ContentEncoding::parse("unknown").is_err());
     /// ```
     pub fn parse(value: &str) -> Result<Self, UnknownContentEncoding> {
-        let value = value.trim_start_matches(char::is_whitespace);
+        let value = value.trim_start_matches(is_whitespace_char);
         // Google Docs appends a semicolon to some encoding values. As in
         // MimeKit, stop at it rather than including it in the encoding token.
         let end = value
-            .find(|ch: char| ch == ';' || ch.is_whitespace())
+            .find(|ch: char| ch == ';' || is_whitespace_char(ch))
             .unwrap_or(value.len());
         let token = &value[..end];
 

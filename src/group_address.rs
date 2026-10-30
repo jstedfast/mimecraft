@@ -82,7 +82,8 @@ impl GroupAddress {
 
     /// Creates a group from a Unicode display name and an ordered member list.
     ///
-    /// The name is trimmed, but not unquoted, RFC 2047-decoded, or sanitized.
+    /// The name is trimmed of ASCII space/tab/CR/LF, but not unquoted,
+    /// RFC 2047-decoded, or sanitized. Unicode whitespace is preserved.
     /// Members are moved without validation, sorting, or deduplication. Unlike
     /// parsing, construction and editing impose no nesting limit; callers must
     /// bound programmatically assembled trees themselves.
@@ -110,7 +111,7 @@ impl GroupAddress {
         &self.name.text
     }
 
-    /// Replaces the name with trimmed Unicode text, without decoding or sanitizing.
+    /// Replaces the name, trimming ASCII space/tab/CR/LF without decoding or sanitizing.
     ///
     /// Clears previous name-decoding diagnostics even if the text is unchanged.
     /// Members and their diagnostics are unaffected.

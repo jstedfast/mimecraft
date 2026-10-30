@@ -43,7 +43,10 @@ impl TextFormat {
                     && content_type
                         .parameters()
                         .get("format")
-                        .is_some_and(|value| value.trim().eq_ignore_ascii_case("flowed"))
+                        .is_some_and(|value| {
+                            crate::parse_utils::trim_whitespace(value)
+                                .eq_ignore_ascii_case("flowed")
+                        })
             }
             Self::Html => content_type.is_mime_type("text", "html"),
             Self::Enriched => {

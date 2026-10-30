@@ -71,9 +71,9 @@ fn defaults_and_simple_ascii_output() {
 #[test]
 fn assignment_trims_and_unfolds_without_decoding_literal_words() {
     for (value, expected) in [
-        (" \t\r\nHello\r\n world \u{3000}", "Hello world"),
+        (" \t\r\nHello\r\n world \u{3000}", "Hello world \u{3000}"),
         ("a\r\nb\nc\rd", "abcd"),
-        ("\u{a0} spaced  text \u{a0}", "spaced  text"),
+        ("\u{a0} spaced  text \u{a0}", "\u{a0} spaced  text \u{a0}"),
         ("=?utf-8?q?hello?=", "=?utf-8?q?hello?="),
         ("literal =?broken?= text", "literal =?broken?= text"),
         ("a\0b\u{7f}c", "a\0b\u{7f}c"),
@@ -88,7 +88,7 @@ fn assignment_trims_and_unfolds_without_decoding_literal_words() {
 
 #[test]
 fn empty_normalized_values_create_empty_headers() {
-    for value in ["", " \t", "\r\n", "\u{3000}\u{a0}"] {
+    for value in ["", " \t", "\r\n"] {
         let header = round_trip("Comments", value, &Options::default());
         assert_eq!(header.raw(), b"Comments:\r\n");
         assert_eq!(header.decode_value().text, "");
@@ -649,7 +649,7 @@ fn international_mode_still_validates_options_and_empty_headers() {
         max_line_length: 60,
         ..Default::default()
     };
-    for value in ["", " \t\r\n\u{3000}"] {
+    for value in ["", " \t\r\n"] {
         assert_eq!(
             round_trip("Subject", value, &options).raw(),
             b"Subject:\r\n"

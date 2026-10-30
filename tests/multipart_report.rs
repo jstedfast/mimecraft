@@ -31,7 +31,7 @@ fn construction_trims_type_and_does_not_generate_children_or_other_headers() {
         MultipartReport::new("\u{2003}\tDelivery-Status\r\n", "explicit-boundary").unwrap();
     assert_eq!(
         report.report_type().unwrap().as_deref(),
-        Some("Delivery-Status")
+        Some("\u{2003}\tDelivery-Status")
     );
     let part = report.multipart();
     assert_eq!(part.headers().len(), 1);
@@ -197,7 +197,10 @@ fn exact_untrimmed_match_is_unchanged_but_changed_assignments_are_trimmed() {
     report.set_report_type("old").unwrap();
     assert_eq!(report.report_type().unwrap().as_deref(), Some("old"));
     report.set_report_type(" \u{2003}New Type\t ").unwrap();
-    assert_eq!(report.report_type().unwrap().as_deref(), Some("New Type"));
+    assert_eq!(
+        report.report_type().unwrap().as_deref(),
+        Some("\u{2003}New Type")
+    );
     report.set_report_type(" \t ").unwrap();
     assert_eq!(report.report_type().unwrap().as_deref(), Some(""));
 }

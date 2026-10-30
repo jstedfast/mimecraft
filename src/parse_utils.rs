@@ -6,6 +6,14 @@ pub(crate) fn is_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+pub(crate) fn is_whitespace_char(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\r' | '\n')
+}
+
+pub(crate) fn trim_whitespace(text: &str) -> &str {
+    text.trim_matches(is_whitespace_char)
+}
+
 // IPv4-address-literal = Snum 3("." Snum); each Snum is 1-3 digits, 0-255.
 pub(crate) fn skip_ipv4(text: &str, index: &mut usize, allow_leading_zeros: bool) -> bool {
     for group in 0..4 {
@@ -290,5 +298,35 @@ fn parse_domain_literal(
         }
         output.push(char::from(byte));
         *index += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_whitespace_char, trim_whitespace};
+
+    #[test]
+    fn trims_only_mime_whitespace() {
+        for (text, expected) in [
+            ("", ""),
+            (" \t\r\n", ""),
+            (" \tvalue\r\n ", "value"),
+            (" \t\u{a0}value\u{2008}\r\n ", "\u{a0}value\u{2008}"),
+            ("\x0bvalue\x0c", "\x0bvalue\x0c"),
+        ] {
+            assert_eq!(trim_whitespace(text), expected);
+        }
+    }
+
+    #[test]
+    fn recognizes_exactly_four_whitespace_characters() {
+        for ch in '\0'..=char::MAX {
+            assert_eq!(
+                is_whitespace_char(ch),
+                [' ', '\t', '\r', '\n'].contains(&ch),
+                "U+{:04X}",
+                u32::from(ch),
+            );
+        }
     }
 }

@@ -66,7 +66,7 @@ fn first_header_wins_even_when_empty_or_not_a_checksum() {
         ("XYZ", "XYZ"),
         ("not base64!", "not base64!"),
         ("8criUiOQmpfifOuOmYFtEQ==", "8criUiOQmpfifOuOmYFtEQ=="),
-        ("\u{a0}value\u{2003}", "value"),
+        ("\u{a0}value\u{2003}", "\u{a0}value\u{2003}"),
         ("=?utf-8?q?XYZ?=", "XYZ"),
         ("=?utf-8?q?X=0D=0AYZ?=", "XYZ"),
         ("first\r\n\tsecond", "first\tsecond"),

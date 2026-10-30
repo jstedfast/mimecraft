@@ -317,7 +317,7 @@ impl<R: Read + Seek> MessagePartial<R> {
 
     /// Returns the declared fragment number, including zero if present.
     ///
-    /// Accepts ASCII digits with surrounding ASCII space or tab-through-CR
+    /// Accepts ASCII digits with surrounding ASCII space, tab, CR, or LF
     /// whitespace, but no sign. Values cannot exceed `i32::MAX`. Unlike MimeKit's
     /// nullable getter, invalid present values are errors, not missing values.
     ///
@@ -485,7 +485,7 @@ fn number_parameter(
     let Some(raw) = value.parameters().get(name) else {
         return Ok(None);
     };
-    let text = raw.trim_matches(|ch: char| matches!(ch, ' ' | '\t'..='\r'));
+    let text = crate::parse_utils::trim_whitespace(raw);
     let number = (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
         .then(|| text.parse::<u32>().ok())
         .flatten()

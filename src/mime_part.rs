@@ -306,8 +306,9 @@ impl<R> MimePart<R> {
 
     /// Decodes the first Content-Description header, or returns `None` if absent.
     ///
-    /// Uses tolerant RFC 2047 decoding followed by unfolding and Unicode
-    /// trimming, as in MimeKit. An empty header returns present empty text.
+    /// Uses tolerant RFC 2047 decoding followed by unfolding and ASCII
+    /// space/tab/CR/LF trimming, as in MimeKit. An empty header returns present
+    /// empty text.
     /// The detached result retains charset-recovery diagnostics; their offsets
     /// refer to the original raw value. Does not read content or mutate headers.
     pub fn content_description(&self) -> Option<crate::rfc2047::DecodedHeader> {
@@ -347,7 +348,7 @@ impl<R> MimePart<R> {
 
     /// Assigns Content-Description using checked unstructured-header formatting.
     ///
-    /// Trims Unicode whitespace and removes CR/LF before encoding. Other
+    /// Trims ASCII space/tab/CR/LF and removes CR/LF before encoding. Other
     /// controls and literal encoded-word lookalikes are encoded, not discarded
     /// or interpreted. See [`Header::from_unstructured_with_options`].
     ///
@@ -373,10 +374,10 @@ impl<R> MimePart<R> {
     ///
     /// Decodes and unfolds the header first, as MimeKit does. Accepts ASCII
     /// decimal digits (including leading zeros) through `i32::MAX`. Surrounding
-    /// Unicode whitespace is trimmed by header decoding; numeric parsing also
-    /// accepts trailing NULs, optionally preceded by ASCII whitespace, matching
-    /// the source's integer parser. Signs, fractions, comments, interior spaces,
-    /// non-ASCII digits, and larger numbers are invalid.
+    /// ASCII space/tab/CR/LF is trimmed by header decoding. Trailing NULs are
+    /// accepted by the source's integer parser, but whitespace before those NULs
+    /// is not. Signs, fractions, comments, interior spaces, non-ASCII digits,
+    /// non-linear whitespace, and larger numbers are invalid.
     ///
     /// Does not inspect the media, cache a value, or change raw headers. Charset
     /// diagnostics remain available by decoding the raw header directly.
@@ -392,13 +393,9 @@ impl<R> MimePart<R> {
             return Ok(None);
         };
         let decoded = header.decode_value();
-        // MimeKit uses integer parsing with only leading/trailing whitespace
-        // enabled: a leading '+' is not allowed. Its runtime also permits NUL
-        // terminators after the number and any trailing numeric whitespace.
-        let value = decoded
-            .text
-            .trim_end_matches('\0')
-            .trim_end_matches([' ', '\t', '\r', '\n', '\x0b', '\x0c']);
+        // MimeKit trims MIME whitespace before parsing with NumberStyles.None.
+        // Its runtime still permits NUL terminators immediately after digits.
+        let value = decoded.text.trim_end_matches('\0');
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(InvalidContentDuration);
         }
@@ -448,8 +445,8 @@ impl<R> MimePart<R> {
     /// Decodes the first Content-MD5 header, or returns `None` when absent.
     ///
     /// Adapts MimeKit's `ContentMd5` property: tolerant RFC 2047 decoding,
-    /// unfolding, and Unicode trimming produce a detached text value with
-    /// charset-recovery diagnostics. Empty or malformed checksum text remains
+    /// unfolding, and ASCII space/tab/CR/LF trimming produce a detached text value
+    /// with charset-recovery diagnostics. Empty or malformed checksum text remains
     /// present; later duplicate headers do not override the first.
     ///
     /// This is metadata access, not Base64 decoding, digest-length validation,
@@ -504,7 +501,7 @@ impl<R> MimePart<R> {
 
     /// Assigns Content-MD5 text using explicit unstructured-header formatting.
     ///
-    /// Like MimeKit's generic header formatter, trims Unicode whitespace and
+    /// Like MimeKit's generic header formatter, trims ASCII space/tab/CR/LF and
     /// unfolds input before encoding. Controls and literal encoded-word
     /// lookalikes are safely encoded, not interpreted. This does not enforce
     /// Base64 syntax, digest length, or consistency with the body.
@@ -888,7 +885,7 @@ impl<R> MimePart<R> {
         Ok(())
     }
 
-    /// Returns a decoded, Unicode-trimmed filename, or `None` when absent.
+    /// Returns a decoded filename without trimming, or `None` when absent.
     ///
     /// Checks the first Content-Disposition's `filename` parameter, then the
     /// first Content-Type's `name` only if no disposition filename exists.
@@ -911,8 +908,8 @@ impl<R> MimePart<R> {
 
     /// Reads a filename with explicit parameter parsing and decoding options.
     ///
-    /// Uses [`Self::file_name`]'s precedence and trimming. The returned string
-    /// does not carry recovery diagnostics; inspect the corresponding parsed
+    /// Uses [`Self::file_name`]'s precedence and preserves whitespace. The returned
+    /// string does not carry recovery diagnostics; inspect the corresponding parsed
     /// header's [`crate::ParameterList::issues`] for those.
     ///
     /// # Errors
@@ -922,16 +919,7 @@ impl<R> MimePart<R> {
         &self,
         options: &ParameterParseOptions,
     ) -> Result<Option<String>, ContentHeaderParseError> {
-        self.file_name_untrimmed_with_options(options)
-            .map(|name| name.map(|name| name.trim().to_owned()))
-    }
-
-    pub(crate) fn file_name_untrimmed_with_options(
-        &self,
-        options: &ParameterParseOptions,
-    ) -> Result<Option<String>, ContentHeaderParseError> {
         // MimeKit prefers filename over name, even when filename is empty.
-        // Keep trimming separate so UU output can reject controls first.
         let disposition = self.content_disposition_with_options(options)?;
         match disposition.as_ref().and_then(ContentDisposition::file_name) {
             Some(name) => Ok(Some(name.to_owned())),

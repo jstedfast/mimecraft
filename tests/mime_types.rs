@@ -4,6 +4,199 @@
 use mimecraft::{MimeTypeRegistrationError, MimeTypes};
 
 #[test]
+fn refreshed_filename_mappings_and_preferred_extensions() {
+    let types = MimeTypes::new();
+    for (extension, mime_type) in [
+        (".3mf", "model/3mf"),
+        (".aiff", "audio/x-aiff"),
+        (".apng", "image/apng"),
+        (".arrow", "application/vnd.apache.arrow.file"),
+        (".avi", "video/x-msvideo"),
+        (".cbor", "application/cbor"),
+        (".class", "application/java-vm"),
+        (".dart", "application/vnd.dart"),
+        (".deb", "application/vnd.debian.binary-package"),
+        (".dwg", "image/vnd.dwg"),
+        (".dxf", "image/vnd.dxf"),
+        (".eot", "application/vnd.ms-fontobject"),
+        (".geojson", "application/geo+json"),
+        (".glb", "model/gltf-binary"),
+        (".gltf", "model/gltf+json"),
+        (".hqx", "application/mac-binhex40"),
+        (".jp2", "image/jp2"),
+        (".jpf", "image/jpx"),
+        (".m3u", "audio/x-mpegurl"),
+        (".m3u8", "application/vnd.apple.mpegurl"),
+        (".mif", "application/vnd.mif"),
+        (".mka", "audio/matroska"),
+        (".mkv", "video/matroska"),
+        (".obj", "model/obj"),
+        (".odf", "application/vnd.oasis.opendocument.formula"),
+        (".odg", "application/vnd.oasis.opendocument.graphics"),
+        (
+            ".otg",
+            "application/vnd.oasis.opendocument.graphics-template",
+        ),
+        (
+            ".otp",
+            "application/vnd.oasis.opendocument.presentation-template",
+        ),
+        (
+            ".ots",
+            "application/vnd.oasis.opendocument.spreadsheet-template",
+        ),
+        (".ott", "application/vnd.oasis.opendocument.text-template"),
+        (".p12", "application/pkcs12"),
+        (".parquet", "application/vnd.apache.parquet"),
+        (".pcl", "application/vnd.hp-PCL"),
+        (".pnm", "image/x-portable-anymap"),
+        (".psd", "image/vnd.adobe.photoshop"),
+        (".py", "text/x-script.python"),
+        (".roff", "text/troff"),
+        (".smil", "application/smil+xml"),
+        (".sqlite3", "application/vnd.sqlite3"),
+        (".step", "model/step"),
+        (".stl", "model/stl"),
+        (".vsd", "application/vnd.visio"),
+        (".vtt", "text/vtt"),
+        (".webmanifest", "application/manifest+json"),
+        (".wpd", "application/vnd.wordperfect"),
+        (".wrl", "model/vrml"),
+        (".xls", "application/vnd.ms-excel"),
+        (".xpm", "image/x-xpixmap"),
+    ] {
+        assert_eq!(types.mime_type(&format!("file{extension}")), mime_type);
+        assert_eq!(
+            types.mime_type(&format!("file{}", extension.to_ascii_uppercase())),
+            mime_type
+        );
+        assert_eq!(types.extension(mime_type), Some(extension));
+        assert_eq!(
+            types.extension(&mime_type.to_ascii_uppercase()),
+            Some(extension)
+        );
+    }
+}
+
+#[test]
+fn refreshed_alternate_extensions_use_the_independent_preferred_mapping() {
+    let types = MimeTypes::new();
+    for (extension, mime_type, preferred) in [
+        (".aif", "audio/x-aiff", ".aiff"),
+        (".aifc", "audio/x-aiff", ".aiff"),
+        (".asx", "video/x-ms-asf", ".asf"),
+        (".au", "audio/basic", ".snd"),
+        (".jpg2", "image/jp2", ".jp2"),
+        (".jpx", "image/jpx", ".jpf"),
+        (".man", "text/troff", ".roff"),
+        (".me", "text/troff", ".roff"),
+        (".ms", "text/troff", ".roff"),
+        (".opus", "audio/ogg", ".ogg"),
+        (".pfx", "application/pkcs12", ".p12"),
+        (".pm", "image/x-xpixmap", ".xpm"),
+        (".smi", "application/smil+xml", ".smil"),
+        (".sml", "application/smil+xml", ".smil"),
+        (".sqlite", "application/vnd.sqlite3", ".sqlite3"),
+        (".stp", "model/step", ".step"),
+        (".t", "text/troff", ".roff"),
+        (".tr", "text/troff", ".roff"),
+        (".udeb", "application/vnd.debian.binary-package", ".deb"),
+        (".vrml", "model/vrml", ".wrl"),
+        (".vss", "application/vnd.visio", ".vsd"),
+        (".vst", "application/vnd.visio", ".vsd"),
+        (".vsw", "application/vnd.visio", ".vsd"),
+        (".w60", "application/vnd.wordperfect", ".wpd"),
+        (".w61", "application/vnd.wordperfect", ".wpd"),
+        (".wp", "application/vnd.wordperfect", ".wpd"),
+        (".wp5", "application/vnd.wordperfect", ".wpd"),
+        (".wp6", "application/vnd.wordperfect", ".wpd"),
+        (".wrz", "model/vrml", ".wrl"),
+        (".wsc", "text/scriptlet", ".sct"),
+        (".xl", "application/vnd.ms-excel", ".xls"),
+        (".xlb", "application/vnd.ms-excel", ".xls"),
+        (".xlc", "application/vnd.ms-excel", ".xls"),
+        (".xld", "application/vnd.ms-excel", ".xls"),
+        (".xlk", "application/vnd.ms-excel", ".xls"),
+        (".xll", "application/vnd.ms-excel", ".xls"),
+        (".xlm", "application/vnd.ms-excel", ".xls"),
+        (".xlv", "application/vnd.ms-excel", ".xls"),
+        (".xlw", "application/vnd.ms-excel", ".xls"),
+    ] {
+        assert_eq!(types.mime_type(&format!("file{extension}")), mime_type);
+        assert_eq!(
+            types.mime_type(&format!("file{}", extension.to_ascii_uppercase())),
+            mime_type
+        );
+        assert_eq!(types.extension(mime_type), Some(preferred));
+        assert_eq!(
+            types.extension(&mime_type.to_ascii_uppercase()),
+            Some(preferred)
+        );
+    }
+}
+
+#[test]
+fn legacy_reverse_aliases_and_ambiguous_filename_mappings_remain() {
+    let types = MimeTypes::new();
+    for (mime_type, extension) in [
+        ("video/x-matroska", ".mkv"),
+        ("application/sla", ".stl"),
+        ("application/acad", ".dwg"),
+        ("application/binhex", ".hqx"),
+        ("application/dart", ".dart"),
+        ("application/dxf", ".dxf"),
+        ("application/excel", ".xls"),
+        ("application/pkcs-12", ".p12"),
+        ("application/smil", ".smi"),
+        ("application/step", ".step"),
+        ("application/vnd.bw-fontobject", ".eot"),
+        ("application/wordperfect", ".wp5"),
+        ("application/wordperfect6.0", ".w60"),
+        ("application/wordperfect6.1", ".w61"),
+        ("application/x-deb", ".deb"),
+        ("application/x-debian-package", ".deb"),
+        ("application/x-java-applet", ".class"),
+        ("application/x-mif", ".mif"),
+        ("application/x-mplayer2", ".asx"),
+        ("application/x-pcl", ".pcl"),
+        ("application/x-pkcs12", ".pfx"),
+        ("application/x-portable-anymap", ".pnm"),
+        ("application/x-sqlite3", ".sqlite3"),
+        ("application/x-troff", ".roff"),
+        ("application/x-troff-man", ".man"),
+        ("application/x-troff-me", ".me"),
+        ("application/x-troff-ms", ".ms"),
+        ("application/x-visio", ".vsd"),
+        ("application/x-vrml", ".vrml"),
+        ("application/x-world", ".svr"),
+        ("audio/aiff", ".aiff"),
+        ("audio/opus", ".opus"),
+        ("audio/x-au", ".au"),
+        ("audio/x-matroska", ".mka"),
+        ("audio/x-mpequrl", ".m3u"),
+        ("image/xpm", ".xpm"),
+        ("text/scriplet", ".wsc"),
+        ("text/x-script.phyton", ".py"),
+        ("video/avi", ".avi"),
+    ] {
+        assert_eq!(types.extension(mime_type), Some(extension));
+        assert_eq!(
+            types.extension(&mime_type.to_ascii_uppercase()),
+            Some(extension)
+        );
+    }
+    for (extension, mime_type) in [
+        (".ts", "application/typescript"),
+        (".rpm", "audio/x-pn-realaudio-plugin"),
+        (".xml", "text/xml"),
+        (".rtf", "text/rtf"),
+        (".db", "application/octet-stream"),
+    ] {
+        assert_eq!(types.mime_type(&format!("file{extension}")), mime_type);
+    }
+}
+
+#[test]
 fn canonical_filename_and_preferred_extension_examples() {
     let types = MimeTypes::new();
     for (filename, expected) in [

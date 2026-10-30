@@ -250,7 +250,8 @@ impl<R: Read + Seek> TextPart<R> {
     /// Recognizes flowed plain text, HTML, enriched text (including the older
     /// `text/richtext`), and RTF. Unknown text subtypes return Plain as in
     /// MimeKit, even though [`Self::is_plain`] is false for those subtypes.
-    /// The format parameter is Unicode-trimmed before comparing with `flowed`.
+    /// The format parameter is trimmed of ASCII space/tab/CR/LF before comparing
+    /// with `flowed`.
     ///
     /// Uses the same case-insensitive matching as body selection and the
     /// predicates, including uppercase `PLAIN`, matching MimeKit.
