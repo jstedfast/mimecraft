@@ -78,4 +78,17 @@ fn main() {
             assert_eq!(output, fixture.input);
         }
     }
+
+    for name in workloads::STREAMING_INPUTS {
+        let mut case = workloads::StreamingCase::new(name);
+        assert_eq!(case.decode(), case.decoded_length);
+        measure(
+            &format!("stream/{name}/chunk=4096"),
+            case.input.len(),
+            || {
+                case.decode();
+            },
+        );
+        assert_eq!(case.decode(), case.decoded_length);
+    }
 }

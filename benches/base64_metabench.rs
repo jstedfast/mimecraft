@@ -75,6 +75,17 @@ fn decode_match(case: &mut Case) {
     workloads::decode_match(&case.input, case.chunk_size, &mut case.output);
 }
 
+#[metabench::benchmark(STREAM, "base64", "stream")]
+#[bench::unwrapped(&mut workloads::StreamingCase::new("unwrapped"))]
+#[bench::mime_crlf(&mut workloads::StreamingCase::new("mime-crlf"))]
+#[bench::mime_lf(&mut workloads::StreamingCase::new("mime-lf"))]
+#[bench::short_lines(&mut workloads::StreamingCase::new("short-lines"))]
+#[bench::garbage(&mut workloads::StreamingCase::new("garbage"))]
+#[bench::small(&mut workloads::StreamingCase::new("small"))]
+fn stream(case: &mut workloads::StreamingCase) {
+    case.decode();
+}
+
 fn criterion_benchmarks(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group(ENCODE.group_name());
     for chunk_size in workloads::ENCODE_CHUNKS {
@@ -99,10 +110,17 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
             });
         }
     }
+    for name in workloads::STREAMING_INPUTS {
+        let mut case = workloads::StreamingCase::new(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        group.bench_function(BenchmarkId::new(STREAM.benchmark_name(), name), |b| {
+            b.iter(|| stream(&mut case));
+        });
+    }
     group.finish();
 }
 
 metabench::main!(
     criterion = criterion_benchmarks,
-    benchmarks = [ENCODE, DECODE, MATCH]
+    benchmarks = [ENCODE, DECODE, MATCH, STREAM]
 );

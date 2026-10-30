@@ -386,6 +386,8 @@ impl Base64Decoder {
         self.decode_scalar(input, output);
     }
 
+    // Keep byte-sized scalar handoffs inline even as the SIMD path grows.
+    #[inline(always)]
     fn decode_scalar(&mut self, input: &[u8], output: &mut Vec<u8>) {
         // Decode every accepted quartet into up to three bytes. Invalid bytes
         // do not advance the quartet; '=' contributes a zero rank and a pad bit.

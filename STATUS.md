@@ -8009,6 +8009,13 @@ tree. The Base64 implementation follows `MimeKit/Encodings/Base64Encoder.cs` and
 `UnitTests/Encodings` files and add chunk-boundary coverage. SIMD optimizations
 are adapted from MimeKit's SSSE3, AVX2, and AdvSimd kernels, which credit the .NET
 runtime Base64 helpers, Wojciech Mula's base64simd project, and aklomp/base64.
+The AVX2 MIME-line tail fast path follows MimeKit commit `7f829400`, including
+its simdutf/SimdBase64 inspiration and applicable inline comments. It decodes
+the twelve characters before LF or CRLF without leaving the AVX2 loop and
+appends exactly nine bytes. Other invalid input and padding retain the
+SSSE3/scalar handoff. Exhaustive tail/newline mutations compare every available
+backend with scalar output and state; additional tests cover every split,
+truncated input, and direct AVX2 continuation without a scalar handoff.
 The quoted-printable port follows `QuotedPrintableEncoder.cs` and
 `QuotedPrintableDecoder.cs`, with compatibility vectors and line-boundary
 regressions adapted from their corresponding unit tests.
@@ -8918,6 +8925,55 @@ and LF. Rates count input bytes and report the median of five timed
 samples after warm-up. These are in-memory microbenchmarks, not message-parser or
 end-to-end I/O throughput, and results depend on the CPU and compiler.
 
+Six additional `stream/*/chunk=4096` cases port MimeKit's
+`Benchmarks/Encodings/Base64DecoderBenchmarks.cs`: `Unwrapped`, `MimeCrlf`,
+`MimeLf`, `ShortLines`, `Garbage`, and `Small`. They preserve its 65,536-byte
+payloads (48 bytes for `Small`), 76-character MIME lines, seven-character lines
+separated by space/tab/CRLF, and 23-character runs separated by `!?`/space/tab/CRLF.
+The existing deterministic PRNG replaces .NET's `Random`; payload bytes are not
+identical across runtimes. Each operation resets the decoder and reuses a
+4 KiB output buffer, clearing it between chunks. Setup checks every decoded
+chunk against the original payload, outside timing. The original 21 cases and
+their order are unchanged; the new six are also registered with metabench.
+
+The AVX2 tail optimization was compared on October 30, 2026, using an original
+decoder executable built before the production changes, with the same expanded
+benchmark harness as the final executable. Both used Rust 1.99.1/MSVC,
+`target-cpu=x86-64-v3`, default SIMD, fat LTO, and one codegen unit on an Intel
+Core Ultra 7 268V. Five alternating before/after pairs were pinned to logical
+CPU 2 (affinity mask `0x4`), reversing execution order each pair, with no
+concurrent build or second benchmark. Values below are medians of the five
+per-process medians; each process uses three warm-ups and five samples of at
+least 100 ms. Rates count encoded input bytes, including ignored separators.
+
+| Case | Before MiB/s | After MiB/s | Change |
+| --- | ---: | ---: | ---: |
+| `decode/unwrapped/chunk=1` | 515.4 | 502.7 | -2.5% |
+| `decode/unwrapped/chunk=78` | 2950.4 | 3090.8 | +4.8% |
+| `decode/unwrapped/chunk=4096` | 13734.5 | 15820.4 | +15.2% |
+| `decode/mime-crlf/chunk=1` | 502.3 | 502.2 | 0.0% |
+| `decode/mime-crlf/chunk=78` | 3266.9 | 3371.4 | +3.2% |
+| `decode/mime-crlf/chunk=4096` | 6162.7 | 11535.4 | +87.2% |
+| `decode/noisy/chunk=1` | 541.2 | 525.3 | -2.9% |
+| `decode/noisy/chunk=78` | 2137.2 | 2212.4 | +3.5% |
+| `decode/noisy/chunk=4096` | 3270.6 | 3425.8 | +4.7% |
+| `stream/unwrapped/chunk=4096` | 14051.6 | 17106.2 | +21.7% |
+| `stream/mime-crlf/chunk=4096` | 6409.5 | 11959.1 | +86.6% |
+| `stream/mime-lf/chunk=4096` | 6475.7 | 12228.1 | +88.8% |
+| `stream/short-lines/chunk=4096` | 949.4 | 1035.3 | +9.0% |
+| `stream/garbage/chunk=4096` | 1615.4 | 1693.7 | +4.8% |
+| `stream/small/chunk=4096` | 1750.9 | 1571.6 | -10.2% |
+
+MIME-wrapped streaming improved about 87-89%, but this is not a uniform speedup:
+the 48-byte payload case lost 10.2% throughput (about 35 ns to 39 ns per
+operation). The unchanged encoder and match-decoder controls ranged from -1.5%
+to +2.6% in this comparison. These are shared-host regression-screening
+measurements, not confidence intervals. All 27 cases allocate zero times during
+measurement with their preallocated/reused buffers; fixture construction is
+excluded. The Rust port explicitly keeps the scalar fallback inline: allowing
+the larger SIMD function to change inlining decisions caused substantial
+short-line/noisy-input regressions in an earlier version of the port.
+
 The `mime_reader` benchmark ports the synchronous reader and
 parser workloads from MimeKit's `Benchmarks/MimeParserBenchmarks.cs`, retaining
 their benchmark names: `StarTrekMessage`, `ContentLengthMbox`, `JwzMbox`,
@@ -9222,7 +9278,7 @@ with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 21 Base64, 27 MIME, twelve HTML, twenty RTF,
+`benches/support`, covering all 27 Base64, 27 MIME, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, and three message-preparation cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name

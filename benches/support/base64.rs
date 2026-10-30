@@ -7,6 +7,26 @@ use mimecraft::encodings::{Base64Decoder, Base64Encoder};
 pub const ENCODE_CHUNKS: [usize; 3] = [1, 57, 4096];
 pub const DECODE_CHUNKS: [usize; 3] = [1, 78, 4096];
 pub const DECODE_INPUTS: [&str; 3] = ["unwrapped", "mime-crlf", "noisy"];
+pub const STREAMING_INPUTS: [&str; 6] = [
+    "unwrapped",
+    "mime-crlf",
+    "mime-lf",
+    "short-lines",
+    "garbage",
+    "small",
+];
+
+fn random_bytes(length: usize) -> Vec<u8> {
+    let mut random = 0x1234_5678u32;
+    (0..length)
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random as u8
+        })
+        .collect()
+}
 
 pub struct Fixture {
     pub input: Vec<u8>,
@@ -19,15 +39,7 @@ impl Fixture {
     pub fn new() -> Self {
         // Deterministic, non-repeating alphabet distribution rather than an all-zero
         // payload that could favor the match decoder's first branch.
-        let mut random = 0x1234_5678u32;
-        let input: Vec<u8> = (0..1024 * 1024)
-            .map(|_| {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
-                random as u8
-            })
-            .collect();
+        let input = random_bytes(1024 * 1024);
         let mut encoded = Vec::new();
         let mut encoder = Base64Encoder::new();
         encoder.encode(&input, &mut encoded);
@@ -61,6 +73,66 @@ impl Fixture {
             "noisy" => &self.noisy,
             _ => panic!("unknown Base64 benchmark input: {name}"),
         }
+    }
+}
+
+// Adapted from MimeKit's Base64DecoderBenchmarks. Preserve its input sizes,
+// layouts and 4096-byte chunks, using our deterministic PRNG instead of .NET's.
+pub struct StreamingCase {
+    pub input: Vec<u8>,
+    output: Vec<u8>,
+    decoder: Base64Decoder,
+    pub decoded_length: usize,
+}
+
+impl StreamingCase {
+    pub fn new(name: &str) -> Self {
+        let data = random_bytes(if name == "small" { 48 } else { 65536 });
+        let mut encoded = Vec::new();
+        let mut encoder = Base64Encoder::new();
+        encoder.encode(&data, &mut encoded);
+        encoder.finish(&mut encoded);
+        encoded.retain(|&byte| !matches!(byte, b'\r' | b'\n'));
+        let (width, separator): (usize, &[u8]) = match name {
+            "mime-crlf" => (76, b"\r\n"),
+            "mime-lf" => (76, b"\n"),
+            "short-lines" => (7, b" \t\r\n"),
+            "garbage" => (23, b"!? \t\r\n"),
+            "unwrapped" | "small" => (encoded.len(), b""),
+            _ => panic!("unknown Base64 streaming benchmark input: {name}"),
+        };
+        let mut input = Vec::new();
+        for line in encoded.chunks(width) {
+            input.extend_from_slice(line);
+            input.extend_from_slice(separator);
+        }
+        let mut case = Self {
+            input,
+            output: Vec::with_capacity(4096),
+            decoder: Base64Decoder::new(),
+            decoded_length: data.len(),
+        };
+        let mut decoded = 0;
+        for chunk in case.input.chunks(4096) {
+            case.output.clear();
+            case.decoder.decode(chunk, &mut case.output);
+            assert_eq!(case.output, data[decoded..decoded + case.output.len()]);
+            decoded += case.output.len();
+        }
+        assert_eq!(decoded, case.decoded_length);
+        case
+    }
+
+    pub fn decode(&mut self) -> usize {
+        self.decoder.reset();
+        let mut decoded = 0;
+        for chunk in black_box(&self.input).chunks(4096) {
+            self.output.clear();
+            self.decoder.decode(chunk, &mut self.output);
+            decoded += self.output.len();
+            black_box(&self.output);
+        }
+        black_box(decoded)
     }
 }
 

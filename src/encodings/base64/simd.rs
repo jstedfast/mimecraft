@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 // MimeKit credits the .NET runtime Base64 helpers and Wojciech Mula's
 // base64simd project for the shuffle, translation, and packing algorithms.
+// Its MIME-line tail optimization was inspired by simdutf/SimdBase64,
+// but is specialized for this permissive decoder rather than a direct port.
 
 #![allow(unsafe_code)]
 
@@ -56,12 +58,13 @@ impl Accelerator {
         }
     }
 
-    // Returns (input bytes consumed as complete quartets, scalar prefix length).
+    // Returns (input bytes consumed, scalar prefix length). Consumed input
+    // contains complete quartets and, for AVX2 MIME-line tails, their newline.
     // Quartets before the first non-alphabet character are independent and can
     // still be decoded. From the updated input position, the scalar decoder must
     // handle the remaining characters through that invalid character, inclusive.
     // Padding '=' counts as invalid here, even though the scalar decoder accepts it.
-    // A zero scalar length means there was no invalid character before the tail.
+    // A zero scalar length means no invalid character needs scalar processing.
     // A run always advances when input.len() >= 16.
     pub(super) fn decode(self, input: &[u8], output: &mut Vec<u8>) -> (usize, usize) {
         // SAFETY: same feature and bounds invariants as encode().
@@ -309,6 +312,8 @@ fn decode_ssse3(input: &[u8], output: &mut Vec<u8>) -> (usize, usize) {
 fn decode_avx2(input: &[u8], output: &mut Vec<u8>) -> (usize, usize) {
     // See decode_ssse3() for the nibble validation, ASCII offsets, and packing
     // bit layouts. AVX2 applies the same operations to two 128-bit lanes.
+    // Decode full blocks and the 12-character tails of 76-character MIME lines;
+    // leave other whitespace, garbage and padding to the narrower/scalar paths.
     let lut_hi = _mm256_broadcastsi128_si256(_mm_setr_epi8(
         0x10, 0x10, 1, 2, 4, 8, 4, 8, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
     ));
@@ -332,11 +337,47 @@ fn decode_avx2(input: &[u8], output: &mut Vec<u8>) -> (usize, usize) {
             _mm256_shuffle_epi8(lut_hi, hi),
             _mm256_shuffle_epi8(lut_lo, lo),
         );
-        let valid = _mm256_movemask_epi8(_mm256_cmpeq_epi8(invalid, _mm256_setzero_si256()));
-        if valid != -1 {
-            // Let SSSE3 salvage complete quartets before the invalid character
-            // rather than discarding the entire 32-byte block to scalar code.
-            break;
+        if _mm256_testz_si256(invalid, invalid) == 0 {
+            // Let SSSE3 salvage complete quartets before other invalid bytes.
+            let valid = _mm_movemask_epi8(_mm_cmpeq_epi8(
+                _mm256_castsi256_si128(invalid),
+                _mm_setzero_si128(),
+            ));
+            if valid & 0xfff != 0xfff {
+                break;
+            }
+            let tail_length = if input[consumed + 12] == b'\n' {
+                13
+            } else if input[consumed + 12] == b'\r' && input[consumed + 13] == b'\n' {
+                14
+            } else {
+                0
+            };
+            if tail_length == 0 {
+                break;
+            }
+            // Stay in this loop for the 12 characters left after two
+            // 32-character blocks. Only those characters must be valid.
+            let tail = _mm256_castsi256_si128(str);
+            let shift = _mm_shuffle_epi8(
+                _mm256_castsi256_si128(lut_shift),
+                _mm_add_epi8(
+                    _mm256_castsi256_si128(hi),
+                    _mm_cmpeq_epi8(tail, _mm_set1_epi8(b'/' as i8)),
+                ),
+            );
+            let ranks = _mm_add_epi8(tail, shift);
+            let merged = _mm_maddubs_epi16(ranks, _mm_set1_epi32(0x0140_0140));
+            let packed = _mm_madd_epi16(merged, _mm_set1_epi32(0x0001_1000));
+            let result = _mm_shuffle_epi8(packed, _mm256_castsi256_si128(pack));
+            let mut decoded = [0u8; 16];
+            // SAFETY: the local holds the entire vector. Append exactly
+            // nine bytes, not the remaining invalid quartet's output.
+            // Unlike MimeKit's in-place API, input and output cannot alias.
+            unsafe { _mm_storeu_si128(decoded.as_mut_ptr().cast(), result) };
+            output.extend_from_slice(&decoded[..9]);
+            consumed += tail_length;
+            continue;
         }
         let shift = _mm256_shuffle_epi8(
             lut_shift,
@@ -359,4 +400,29 @@ fn decode_avx2(input: &[u8], output: &mut Vec<u8>) -> (usize, usize) {
     }
     let (tail, scalar) = decode_ssse3(&input[consumed..], output);
     (consumed + tail, scalar)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avx2_consumes_mime_tails_and_continues_without_scalar_handoff() {
+        if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("ssse3") {
+            return;
+        }
+        for newline in [b"\n".as_slice(), b"\r\n"] {
+            // A standalone tail is also valid at a streaming chunk boundary.
+            for prefix in [0, 32, 64] {
+                let mut input = vec![b'A'; prefix + 12];
+                input.extend_from_slice(newline);
+                input.extend_from_slice(&[b'A'; 32]);
+                let mut output = b"prefix".to_vec();
+                let (consumed, scalar) = Accelerator(Cpu::Avx2).decode(&input, &mut output);
+                assert_eq!((consumed, scalar), (input.len(), 0));
+                assert_eq!(&output[..6], b"prefix");
+                assert_eq!(&output[6..], vec![0; prefix / 4 * 3 + 9 + 24]);
+            }
+        }
+    }
 }

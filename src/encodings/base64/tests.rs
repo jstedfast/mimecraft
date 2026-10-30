@@ -197,6 +197,61 @@ fn every_decoder_backend_handles_every_byte_at_every_position() {
 }
 
 #[test]
+fn every_decoder_backend_matches_scalar_for_mime_line_tail_mutations() {
+    // Port MimeKit's exhaustive mutations of all twelve tail characters and
+    // both newline bytes, including padding, high bytes and malformed breaks.
+    let data = random_bytes(228);
+    let backends = backends();
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        let original = encode_with_new_line_format(&data, 76, &[228], Backend::Scalar, format);
+        let newline_length = if format == NewLineFormat::Unix { 1 } else { 2 };
+        for byte in 0..=255u8 {
+            for position in 64..76 + newline_length {
+                let mut input = original[6..].to_vec();
+                input[position] = byte;
+                let expected = decode(&input, input.len(), Backend::Scalar);
+                for &backend in &backends {
+                    for chunk in [77, 78, 100, usize::MAX] {
+                        assert_eq!(
+                            decode(&input, chunk, backend),
+                            expected,
+                            "{backend:?}, {format:?}, byte={byte}, position={position}, chunk={chunk}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mime_line_tails_preserve_state_at_every_split_and_truncated_end() {
+    let data = random_bytes(228);
+    for format in [NewLineFormat::Unix, NewLineFormat::Dos] {
+        let encoded = encode_with_new_line_format(&data, 76, &[228], Backend::Scalar, format);
+        let input = &encoded[6..];
+        for backend in backends() {
+            for split in 0..=input.len() {
+                let mut decoder = Base64Decoder::new();
+                let mut output = b"prefix".to_vec();
+                decoder.decode_with_backend(&input[..split], &mut output, backend);
+                let expected = decode(&input[..split], usize::MAX, Backend::Scalar);
+                assert_eq!(
+                    (&output, (decoder.value, decoder.padding, decoder.count)),
+                    (&expected.0, expected.1),
+                    "{backend:?}, {format:?}, truncated at {split}"
+                );
+                decoder.decode_with_backend(b"", &mut output, backend);
+                decoder.decode_with_backend(&input[split..], &mut output, backend);
+                assert_eq!(&output[..6], b"prefix");
+                assert_eq!(&output[6..], data);
+                assert_eq!((decoder.value, decoder.padding, decoder.count), (0, 0, 0));
+            }
+        }
+    }
+}
+
+#[test]
 fn every_decoder_backend_handles_random_noise_and_concatenated_blocks() {
     let random = random_bytes(8192);
     let mut input = Vec::new();
