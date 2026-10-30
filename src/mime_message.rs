@@ -1851,13 +1851,14 @@ impl<R: Read + Seek> MimeMessage<R> {
     /// Reads the body in a requested format, or returns `None` when absent.
     ///
     /// Uses [`MimeEntity::text_body`] for selection, stored transfer decoding,
-    /// strict charset decoding, and flowed-text unwrapping. Only the selected
-    /// source is read. Other formats retain decoded text/markup and newlines.
+    /// automatic charset detection/recovery, and flowed-text unwrapping. Only
+    /// the selected source is read. Other formats retain decoded text/markup
+    /// and newlines.
     /// This materializes the body in memory and does not sanitize HTML.
     ///
     /// # Errors
     ///
-    /// Returns metadata, charset, and I/O errors without trying another body.
+    /// Returns metadata and I/O errors without trying another body.
     /// A successful byte copy rewinds its source before charset decoding.
     ///
     /// ```

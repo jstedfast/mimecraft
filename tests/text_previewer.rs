@@ -5,9 +5,7 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 use mimecraft::{
     ContentEncoding, ContentType, Header, HeaderList, MimeContent, MimeEntity, MimePart,
-    TextFormat, TextPart, TextPartError,
-    charsets::{Charset, CharsetError},
-    encodings::Base64Encoder,
+    TextFormat, TextPart, TextPartError, charsets::Charset, encodings::Base64Encoder,
     text::TextPreviewer,
 };
 
@@ -152,7 +150,7 @@ fn only_html_dispatches_to_the_html_previewer() {
 }
 
 #[test]
-fn declared_charsets_win_and_strict_text_getters_are_unchanged() {
+fn declared_charsets_win_and_previewing_does_not_change_text_decoding() {
     let input = "hello \u{65e5}\u{672c}";
     for label in ["utf-8", "utf-16", "utf-16be", "shift_jis", "gb18030"] {
         let charset = Charset::from_label(label).unwrap();
@@ -181,11 +179,28 @@ fn declared_charsets_win_and_strict_text_getters_are_unchanged() {
     ] {
         let mut part = raw_part(content_type, bytes, ContentEncoding::Unspecified);
         let headers = part.part().headers().clone();
-        assert!(matches!(part.text(), Err(TextPartError::Charset(_))));
+        let strict_charset = part
+            .part()
+            .content_type()
+            .unwrap()
+            .unwrap()
+            .charset_encoding()
+            .ok()
+            .flatten()
+            .unwrap_or(Charset::UTF8);
+        assert!(matches!(
+            part.text_with_charset(strict_charset),
+            Err(TextPartError::Charset(_))
+        ));
+        assert_eq!(part.text().unwrap(), expected);
         assert_eq!(TextPreviewer::new().preview(&mut part).unwrap(), expected);
         assert_eq!(part.part().headers(), &headers);
         assert_eq!(part.part().content().get_ref().get_ref(), bytes);
-        assert!(matches!(part.text(), Err(TextPartError::Charset(_))));
+        assert!(matches!(
+            part.text_with_charset(strict_charset),
+            Err(TextPartError::Charset(_))
+        ));
+        assert_eq!(part.text().unwrap(), expected);
     }
     let mut unknown = raw_part(
         "text/plain; charset=x-unknown",
@@ -193,10 +208,7 @@ fn declared_charsets_win_and_strict_text_getters_are_unchanged() {
         ContentEncoding::Unspecified,
     );
     assert_eq!(TextPreviewer::new().preview(&mut unknown).unwrap(), "valid");
-    assert!(matches!(
-        unknown.text(),
-        Err(TextPartError::Charset(CharsetError::UnsupportedLabel(_)))
-    ));
+    assert_eq!(unknown.text().unwrap(), "valid");
 }
 
 #[test]

@@ -466,8 +466,8 @@ impl<R: Read + Seek> MimeEntity<R> {
     ///
     /// Uses [`Self::text_body_part`]'s selection rules. `None` means no matching
     /// body; an empty matching body returns `Some(String::new())`. Decoding uses
-    /// the stored transfer encoding, then the declared charset or strict UTF-8
-    /// when absent. There is no BOM/HTML sniffing, replacement, or fallback.
+    /// the stored transfer encoding, then [`crate::TextPart::text`]'s automatic
+    /// charset detection and recovery, including BOM and HTML meta sniffing.
     ///
     /// For text/plain with `format=flowed`, [`crate::text::FlowedToText`] unwraps
     /// paragraphs, using `delsp=yes` (ASCII-insensitive, without trimming) to
@@ -483,9 +483,9 @@ impl<R: Read + Seek> MimeEntity<R> {
     ///
     /// # Errors
     ///
-    /// Selection and charset-label errors precede I/O. Read/seek errors retain
+    /// Selection errors precede I/O. Read/seek errors retain
     /// [`crate::MimeContent::decode_to`]'s source-position behavior; a successful
-    /// byte copy rewinds the source even if charset decoding subsequently fails.
+    /// byte copy rewinds the source before charset decoding.
     /// Errors never cause selection of an earlier alternative.
     pub fn text_body(&mut self, format: TextFormat) -> Result<Option<String>, TextBodyError> {
         let Some(path) = crate::text_body::select(self, format, true)? else {

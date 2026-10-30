@@ -91,7 +91,7 @@ fn charset_construction_and_updates_use_actual_codec_labels_and_bytes() {
 }
 
 #[test]
-fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
+fn unlabelled_text_detects_boms_and_recovers_latin1_without_changing_explicit_decoding() {
     let mut text = TextPart::from_part(raw_part(
         "text/plain",
         b"\xef\xbb\xbfhello\n",
@@ -105,8 +105,12 @@ fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
         ContentEncoding::Unspecified,
     ))
     .unwrap();
+    assert_eq!(
+        text.text_and_charset().unwrap(),
+        ("Ren\u{e9}e".into(), Charset::LATIN1)
+    );
     assert!(matches!(
-        text.text(),
+        text.text_with_charset(Charset::UTF8),
         Err(TextPartError::Charset(CharsetError::InvalidBytes(charset)))
             if charset == Charset::UTF8
     ));
@@ -122,7 +126,7 @@ fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
         ContentEncoding::Unspecified,
     ))
     .unwrap();
-    assert!(text.text().is_err());
+    assert_eq!(text.text().unwrap(), "\u{feff}Hi");
     assert_eq!(
         text.text_with_charset(Charset::from_label("utf-16").unwrap())
             .unwrap(),
@@ -134,7 +138,7 @@ fn unlabelled_text_is_strict_utf8_without_bom_sniffing_or_latin1_fallback() {
         ContentEncoding::Unspecified,
     ))
     .unwrap();
-    assert!(text.text().is_err());
+    assert_eq!(text.text().unwrap(), "<meta charset=iso-8859-1>Ren\u{e9}e");
 }
 
 #[test]
@@ -155,12 +159,8 @@ fn declared_charset_wins_and_explicit_override_does_not_edit_headers() {
         .replace_all(Header::parse(b"Content-Type: text/plain; charset=x-unknown").unwrap())
         .unwrap();
     text.part_mut().content_mut().get_mut().set_position(1);
-    let error = text.text().unwrap_err();
-    assert!(
-        matches!(&error, TextPartError::Charset(CharsetError::UnsupportedLabel(label)) if label == "x-unknown")
-    );
-    assert!(error.source().is_some());
-    assert_eq!(text.part().content().get_ref().position(), 1);
+    assert_eq!(text.text().unwrap(), "\u{e9}");
+    assert_eq!(text.part().content().get_ref().position(), 0);
     assert_eq!(text.text_with_charset(Charset::UTF8).unwrap(), "\u{e9}");
     assert_eq!(
         text.part().content_type().unwrap().unwrap().charset(),

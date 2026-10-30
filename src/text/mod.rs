@@ -72,6 +72,7 @@ mod rtf_to_html;
 mod rtf_to_text;
 mod rtf_tokenizer;
 mod rtf_validator;
+pub(crate) mod text_encoding;
 mod text_html_callbacks;
 mod text_previewer;
 mod text_to_flowed;
@@ -124,6 +125,7 @@ pub use rtf_tokenizer::{
     RtfTokenKind, RtfTokenizer, RtfTokenizerOptions,
 };
 pub use rtf_validator::{RtfIssue, RtfValidationOptions, RtfValidator, RtfViolation};
+pub use text_encoding::TextEncodingConfidence;
 pub use text_previewer::TextPreviewer;
 pub use text_to_flowed::TextToFlowed;
 pub use text_to_html::TextToHtml;

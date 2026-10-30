@@ -291,6 +291,19 @@ impl fmt::Display for CharsetError {
 
 impl Error for CharsetError {}
 
+pub(crate) fn bom_charset(bytes: &[u8]) -> Option<Charset> {
+    // Match CharsetUtils.TryGetBomEncoding: UTF-16LE, UTF-16BE, then UTF-8.
+    if bytes.starts_with(b"\xff\xfe") {
+        Some(Charset(Codec::Encoding(rs::UTF_16LE)))
+    } else if bytes.starts_with(b"\xfe\xff") {
+        Some(Charset(Codec::Encoding(rs::UTF_16BE)))
+    } else if bytes.starts_with(b"\xef\xbb\xbf") {
+        Some(Charset::UTF8)
+    } else {
+        None
+    }
+}
+
 /// Decodes unlabelled text using MimeKit's UTF-8, preferred-charset, Latin-1 order.
 ///
 /// Valid UTF-8 always wins, even when a preferred charset is supplied. Otherwise

@@ -150,7 +150,8 @@ impl<R: Read + Seek> MultipartAlternative<R> {
     /// Adapts MimeKit's `GetTextBody`, `TextBody`, and `HtmlBody` through a single
     /// format-taking method. Uses [`Self::text_body_part`]'s selection rules and
     /// [`crate::MimeEntity::text_body`]'s shared decoding: stored transfer encoding,
-    /// declared charset or strict UTF-8, then flowed conversion with `delsp=yes`.
+    /// automatic charset detection/recovery, then flowed conversion with
+    /// `delsp=yes`.
     /// Missing bodies return `None`; an empty body returns `Some("")`.
     ///
     /// Only the selected source is accessed. Decoded content is materialized in
@@ -159,9 +160,9 @@ impl<R: Read + Seek> MultipartAlternative<R> {
     ///
     /// # Errors
     ///
-    /// Selection and charset-label errors precede source I/O. Decode, seek,
-    /// read, and final rewind errors propagate without trying an earlier
-    /// alternative. Source positions follow [`crate::MimeContent::decode_to`].
+    /// Selection errors precede source I/O. Seek, read, and final rewind
+    /// errors propagate without trying an earlier alternative. Source positions
+    /// follow [`crate::MimeContent::decode_to`].
     pub fn text_body(
         &mut self,
         format: TextFormat,

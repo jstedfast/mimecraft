@@ -5,7 +5,7 @@ use std::io::{self, Read, Seek};
 
 use crate::{
     TextPart, TextPartError,
-    charsets::{Charset, CharsetError},
+    charsets::{Charset, CharsetError, bom_charset},
 };
 
 use super::{
@@ -35,7 +35,7 @@ use super::{
 ///
 /// The default output limit is 230; valid limits are 1 through 1024 Unicode
 /// scalars. Output is plain text, not safe HTML; escape it before embedding.
-/// This separate preview API does not change [`TextPart::text`]'s strictness.
+/// Unlike [`TextPart::text`], previewing does not sniff HTML meta declarations.
 ///
 /// ```
 /// use mimecraft::{TextPart, text::TextPreviewer};
@@ -94,7 +94,7 @@ impl TextPreviewer {
     ///
     /// Returns metadata, seek, or read errors without a partial preview.
     /// Unsupported charset labels intentionally use the recovery path
-    /// documented on [`TextPreviewer`]; [`TextPart::text`] remains strict.
+    /// documented on [`TextPreviewer`].
     pub fn preview<R: Read + Seek>(&self, body: &mut TextPart<R>) -> Result<String, TextPartError> {
         let content_type = body.checked_content_type()?;
         let charset = match content_type.charset_encoding() {
@@ -134,17 +134,10 @@ impl TextPreviewer {
                     .preview_reader(&mut input)
             }
         };
-        // Match CharsetUtils.TryGetBomEncoding: UTF-16LE, UTF-16BE, then UTF-8.
         // Only missing/unsupported declarations permit BOM-based selection.
-        let charset = declared.unwrap_or_else(|| {
-            if bytes.starts_with(b"\xff\xfe") {
-                Charset::from_label("utf-16").expect("supported UTF-16LE")
-            } else if bytes.starts_with(b"\xfe\xff") {
-                Charset::from_label("utf-16be").expect("supported UTF-16BE")
-            } else {
-                Charset::UTF8
-            }
-        });
+        let charset = declared
+            .or_else(|| bom_charset(bytes))
+            .unwrap_or(Charset::UTF8);
         let preamble: &[u8] = match charset.name() {
             "utf-8" => b"\xef\xbb\xbf",
             "utf-16" => b"\xff\xfe",

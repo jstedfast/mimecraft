@@ -171,14 +171,8 @@ pub(crate) fn decode_selected<R: Read + Seek>(
         unreachable!("body selection paths end at leaf parts");
     };
     let content_type = part.content_type().map_err(TextBodyError::ContentType)?;
-    let charset = content_type
-        .as_ref()
-        .map(|value| value.charset_encoding())
-        .transpose()
-        .map_err(|error| TextBodyError::Text(TextPartError::Charset(error)))?
-        .flatten()
-        .unwrap_or(crate::charsets::Charset::UTF8);
-    let text = crate::text_part::decode_text(part, charset).map_err(TextBodyError::Text)?;
+    let (text, _) = crate::text_part::decode_text_auto(part, content_type.as_ref())
+        .map_err(TextBodyError::Text)?;
     if let Some(content_type) = content_type
         && TextFormat::Flowed.matches(&content_type)
     {

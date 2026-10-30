@@ -299,12 +299,10 @@ fn selection_keeps_attached_alternatives_and_ignores_unvisited_metadata() {
         panic!()
     };
     assert!(std::ptr::eq(selected, expected));
-    assert!(matches!(
-        alternative.text_body(TextFormat::Plain),
-        Err(MultipartAlternativeError::Body(TextBodyError::Text(
-            TextPartError::Charset(_)
-        )))
-    ));
+    assert_eq!(
+        selected.content_type().unwrap().unwrap().charset(),
+        Some("x-unknown")
+    );
     // A malformed visited earlier alternative is an error, not a reason to skip it.
     assert!(matches!(
         alternative.text_body_part(TextFormat::Html),
@@ -431,7 +429,7 @@ impl Seek for Source {
 }
 
 #[test]
-fn source_errors_and_charset_errors_never_fall_back_to_earlier_bodies() {
+fn source_errors_and_charset_recovery_never_select_earlier_bodies() {
     for fault in ["none", "initial-seek", "read", "final-seek", "charset"] {
         let mut alternative = MultipartAlternative::with_boundary("b").unwrap();
         for selected in [false, true] {
@@ -469,13 +467,7 @@ fn source_errors_and_charset_errors_never_fall_back_to_earlier_bodies() {
         }
         let result = alternative.text_body(TextFormat::Plain);
         match fault {
-            "none" => assert_eq!(result.unwrap().as_deref(), Some("Body")),
-            "charset" => assert!(matches!(
-                result,
-                Err(MultipartAlternativeError::Body(TextBodyError::Text(
-                    TextPartError::Charset(_)
-                )))
-            )),
+            "none" | "charset" => assert_eq!(result.unwrap().as_deref(), Some("Body")),
             _ => assert!(matches!(
                 result,
                 Err(MultipartAlternativeError::Body(TextBodyError::Text(
@@ -495,11 +487,7 @@ fn source_errors_and_charset_errors_never_fall_back_to_earlier_bodies() {
             .unwrap()
             .content()
             .get_ref();
-        if fault == "charset" {
-            assert_eq!(selected.reads, 0);
-            assert_eq!(selected.seeks, 0);
-            assert_eq!(selected.bytes.position(), 2);
-        } else if fault == "none" {
+        if matches!(fault, "none" | "charset") {
             assert_eq!(selected.seeks, 2);
             assert_eq!(selected.bytes.position(), 0);
         }

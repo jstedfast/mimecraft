@@ -95,8 +95,8 @@ MimeKit. The crate is not configured for publication.
   metadata edits, and independent stored-body and transfer-header encodings.
 - Synchronous single-part writing with streaming transfer conversion, UU
   wrappers, header/body separation, and configurable newline handling.
-- Text parts with strict charset-aware reading, borrowed or owned source
-  streams, and atomic in-memory text/charset replacement.
+- Text parts with automatic MIME/BOM/HTML charset detection and recovery,
+  strict explicit overrides, borrowed or owned streams, and atomic text edits.
 - Whole-string flowed-text wrapping and unwrapping, with quote-depth handling,
   space stuffing, UTF-8-safe wrapping, and explicit CRLF/LF output.
 - Plain-text previews with Unicode whitespace normalization, checked length
@@ -1352,16 +1352,47 @@ returns `TextPartError`, including `application/rtf`. Such content can remain
 an ordinary `MimePart` and match RichText body selection instead. Format
 classification does not broaden which bodies are eligible for selection.
 
-`text()` transfer-decodes using the stored content encoding, then strictly
-decodes the declared charset, using UTF-8 only when the charset is absent.
-`text_with_charset(charset)` overrides the label without editing headers.
-Unsupported labels and invalid byte sequences are explicit `TextPartError`s.
-Unlike MimeKit's automatic getter, this initial API does not sniff BOMs or HTML
-metadata, fall back to Latin-1, replace characters, or normalize newlines.
-Explicit BOMs remain characters. Whole-text reads allocate the decoded body and
-resulting string; use lower-level content/filter APIs for incremental processing.
-Successful copies rewind the source before charset decoding, including when
-charset decoding fails. I/O failures follow `MimeContent`'s existing rules.
+`text()` transfer-decodes using the stored content encoding, then selects a
+supported MIME charset, a UTF-8/UTF-16LE/UTF-16BE BOM, or an HTML meta charset,
+in that order. Unsupported MIME declarations allow subsequent detection.
+HTML scanning uses the first **1024 transfer-decoded bytes**, interpreted as
+Latin-1 for tokenization. Explicit html/head starts are required; a body tag
+stops scanning. Comments and raw-text elements cannot spoof metadata.
+First valued duplicate attributes win. Direct `charset` overrides `content`;
+the latter requires `http-equiv=Content-Type`, compared without trimming.
+Unsupported meta labels allow later meta tags. HTML `x-user-defined` maps to
+Windows-1252; UTF-16 meta labels mean UTF-8. MimeKit's end-head behavior is
+preserved: `</head>` alone does not stop its scanner.
+
+`detect_encoding()` returns `Result<Option<(Charset, TextEncodingConfidence)>,
+TextPartError>`. MIME declarations and BOMs are Certain; HTML metadata is
+Tentative; undetected input is `None`. Supported declarations need no source
+I/O. Otherwise detection rewinds first and reads up to three decoded bytes,
+then up to 1024 total for HTML when no BOM is found; it does not rewind afterward.
+Transfer decoders may read ahead in the encoded source. Read/seek failures are
+errors, not unsuccessful detection. All MIME content has a stream, so there is
+no counterpart to MimeKit's null-content ASCII/Irrelevant result: an unlabelled
+empty stream is undetected and automatic text decoding uses UTF-8.
+
+Undetected input, BOM-selected UTF-8, and coerced HTML UTF-16 declarations use
+strict UTF-8 with Latin-1 fallback. Other detected charsets use replacement
+decoding, matching MimeKit's decoder selection. Replacements use U+FFFD uniformly,
+not .NET's charset-dependent defaults. Incomplete trailing code units are
+finalized rather than reproducing MimeKit's charset-filter tail truncation.
+`text_and_charset()` also returns the charset actually used, including fallback.
+`text_with_charset(charset)` remains strict, overriding metadata without editing
+headers; malformed bytes are errors. Neither path normalizes newlines or strips
+BOMs. Codec support remains that of `Charset`, not every .NET code page.
+Whole-text reads allocate decoded bytes and the resulting string, reading the
+body once even when fallback is needed. Successful copies rewind the source
+before charset decoding; I/O failures follow `MimeContent`'s existing rules.
+
+Detection and recovery cases from `UnitTests/TextPartTests.cs` are ported,
+adapting absent content to the always-present stream model. Extra coverage
+checks exact byte limits, transfer decoding, truncated tags, attribute
+precedence/duplicates, tokenizer contexts, short/interrupted reads, errors,
+strict overrides, and unchanged headers, bytes, and parsed framing.
+Upstream contains no dedicated text-part charset-detection benchmarks.
 
 Text setters are available for the default `TextPart<Cursor<Vec<u8>>>` storage,
 not arbitrary file or borrowed-stream types. `set_text(text)` selects UTF-8;
@@ -1372,9 +1403,8 @@ remain untouched. In particular, the requested transfer encoding is preserved.
 The new body stores unencoded bytes at position zero with no newline hint.
 Failure leaves all old bytes, headers, and source position unchanged.
 
-Whole-text automatic charset detection/recovery and text-format conversion
-remain deferred. The separate `text::TextPreviewer` type provides bounded,
-best-effort previews as described below.
+Automatic text-format conversion remains separate. The `text::TextPreviewer`
+type provides bounded, best-effort previews as described below.
 
 ### Multipart ownership and MIME trees
 
@@ -3005,11 +3035,11 @@ visited metadata errors propagate. This requires no source traits or source I/O.
 an empty matching body returns `Some(String::new())`.
 
 Transfer decoding uses the stored content encoding, not a newly edited
-Content-Transfer-Encoding header. Charset decoding reuses `TextPart`'s strict
-decoder: the declared charset wins, absent charset means UTF-8, and unsupported
-labels or invalid bytes are errors. No BOM/HTML sniffing, Latin-1 fallback, or
-replacement occurs. Selection and charset-label errors happen before source
-I/O. Successful byte copying rewinds the source before charset decoding;
+Content-Transfer-Encoding header. Charset decoding reuses `TextPart::text()`'s
+automatic MIME/BOM/HTML detection and recovery, including replacement and
+Latin-1 fallback. Implicit text/plain bodies retain their default type without
+adding headers. Selection errors happen before source I/O.
+Successful byte copying rewinds the source before charset decoding;
 read/seek failures follow `MimeContent::decode_to`'s existing behavior.
 Failures do not trigger fallback to an earlier alternative.
 
@@ -3220,8 +3250,9 @@ read-ahead can exceed the decoded byte limit, and encoded whitespace or other
 filter-discarded input is not subject to that limit.
 Headers, body bytes, and parsed framing are unchanged.
 
-This best-effort API does not change `text()` or `text_with_charset()`:
-whole-text access remains strict. Preview output is plain text and needs
+Previewing does not alter whole-text decoding or headers: `text()` has its own
+automatic detection/recovery and `text_with_charset()` remains strict.
+Preview output is plain text and needs
 escaping before HTML embedding. Charset-selecting standalone preview readers
 and automatic message-body preview selection remain deferred.
 
@@ -3230,7 +3261,7 @@ fixtures and the three unknown-charset recovery cases. The new plain-text
 Planet Fitness fixture is copied byte-for-byte; the HTML fixtures are reused.
 Additional cases cover BOM precedence/replay, supported legacy charsets,
 Unicode limits, encoded-versus-decoded cutoffs, split characters, all transfer
-decoders, errors, reuse, and preservation of parsed framing and strict getters.
+decoders, errors, reuse, and preservation of parsed framing and text getters.
 Upstream contains no text-preview benchmarks to port.
 
 ### HTML text and attribute encoding
@@ -7990,14 +8021,18 @@ iterator stack instead of recursive calls. It retains pre-descent MIME-Version
 insertion and traversal-order partial changes on failure. Invalid versions
 produce typed errors rather than being treated as absent. Container metadata
 and framing remain unchanged, as in the source.
-Text parts adapt `TextPart.cs`'s subtype construction, explicit charset text
-access, and text/charset replacement. Composition over `MimePart<R>` replaces
+Text parts adapt `TextPart.cs`'s subtype construction, charset detection,
+automatic and explicit text access, and text/charset replacement.
+Composition over `MimePart<R>` replaces
 inheritance, while in-memory-only setters respect Rust source types. Existing
 strict charset conversion and checked header formatting make failed edits
-atomic. Unsupported labels and malformed bytes remain errors, and newlines/BOMs
-are preserved rather than applying MimeKit's detection, fallback, or newline
-normalization. Whole-text automatic detection and text-format conversion are
-not ported; the separate MIME-part preview API has explicit recovery rules.
+atomic. Automatic decoding ports MIME/BOM/HTML precedence and recovery;
+explicit overrides remain strict. Detection uses the shared HTML tokenizer and
+preserves the source's prescan comments. Newlines/BOMs remain unchanged, codec
+replacement uses U+FFFD, and trailing incomplete sequences are finalized.
+`TextEncodingConfidence` represents Certain/Tentative; `Option` replaces
+Undefined and the always-present stream model has no null-content Irrelevant
+state. Text-format conversion remains separate, as does MIME previewing.
 Format-based construction maps the supported `TextFormat` variants to the
 source's text subtypes and flowed parameter. Classification and predicates
 reuse body-selection matching, retaining the unknown-text Plain fallback while
@@ -8132,8 +8167,8 @@ and automatic string getters. Explicit errors replace silently ignored invalid
 metadata; related IDs are compared directly rather than through .NET URI
 canonicalization.
 Decoded body-text access adapts `MimeMessage.GetTextBody` and
-`MultipartAlternative.GetText`, reusing strict `TextPart` charset decoding
-rather than MimeKit's sniffing/fallback behavior. `Text/FlowedToText.cs` and
+`MultipartAlternative.GetText`, sharing `TextPart`'s automatic charset
+detection and recovery. `Text/FlowedToText.cs` and
 `UnitTests/Text/FlowedToTextTests.cs` provide the paragraph, stuffing,
 quote-depth, delsp, and final-soft-line rules. Deterministic CRLF/LF options
 replace platform-dependent writer newlines; whole-string conversion omits

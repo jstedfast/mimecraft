@@ -10,6 +10,10 @@ use std::{
 use crate::{
     ContentHeaderParseError, ContentType, HeaderFormatError, MimeContent, MimePart, TextFormat,
     charsets::{Charset, CharsetError},
+    text::{
+        TextEncodingConfidence,
+        text_encoding::{declared_encoding, detect_encoding},
+    },
 };
 
 /// A text MIME part with charset-aware access to its body.
@@ -24,13 +28,13 @@ use crate::{
 /// errors, not silently replaced. Other MIME metadata and serialization remain
 /// accessible through the underlying part.
 ///
-/// Unlike MimeKit's automatic text getter, decoding is strict: unsupported
-/// charsets and invalid bytes are errors. There is no BOM/HTML charset sniffing,
-/// Latin-1 fallback, replacement, newline normalization, or text-format
-/// conversion. Explicit BOMs are preserved as characters. Whole-text reads
-/// materialize the transfer-decoded bytes and resulting string in memory.
+/// Automatic text decoding uses MIME declarations, BOMs, HTML charset sniffing,
+/// and UTF-8/Latin-1 recovery. [`Self::text_with_charset`] remains a strict
+/// explicit override. Neither path normalizes newlines or converts text formats.
+/// Explicit BOMs are preserved as characters. Whole-text reads materialize the
+/// transfer-decoded bytes and resulting string in memory.
 /// [`crate::text::TextPreviewer`] separately provides bounded, best-effort previews
-/// with charset recovery; it does not change the strict text getters.
+/// with charset recovery, without HTML meta sniffing.
 ///
 /// ```
 /// use mimecraft::{ContentEncoding, TextPart};
@@ -330,25 +334,94 @@ impl<R: Read + Seek> TextPart<R> {
         Ok(TextFormat::RichText.matches(&self.checked_content_type()?))
     }
 
-    /// Reads text using the declared charset, or UTF-8 when absent.
+    /// Reads text with MimeKit-style automatic charset detection and recovery.
     ///
     /// Charset decoding follows transfer decoding using the stored content's
-    /// encoding, not the requested Content-Transfer-Encoding header. There is
-    /// no automatic recovery from unsupported labels or malformed bytes.
-    /// Newlines and explicit BOMs are preserved.
+    /// encoding, not the requested Content-Transfer-Encoding header. A supported
+    /// declaration wins, followed by a BOM, then HTML meta declarations in the
+    /// first 1024 decoded bytes. Undetected input tries strict UTF-8 and falls
+    /// back to Latin-1 on malformed bytes. Unsupported labels allow detection.
+    ///
+    /// Declared and ordinary HTML-detected charsets use replacement decoding.
+    /// BOM-detected UTF-8 and HTML UTF-16 labels coerced to UTF-8 use strict
+    /// UTF-8 with Latin-1 fallback, matching MimeKit. Replacement uses U+FFFD
+    /// uniformly instead of .NET's charset-dependent defaults. Incomplete
+    /// trailing sequences are finalized, not dropped. Newlines and explicit
+    /// BOMs are preserved, not normalized or stripped.
+    /// Use [`Self::text_with_charset`] to reject malformed input explicitly.
     ///
     /// # Errors
     ///
-    /// Metadata/charset-label errors precede I/O. Copying follows
+    /// Metadata errors precede I/O. Copying follows
     /// [`MimeContent::decode_to`]'s seek/error behavior. Successful copies rewind
-    /// the source before charset decoding, even if decoding subsequently fails.
+    /// the source before charset decoding.
     pub fn text(&mut self) -> Result<String, TextPartError> {
+        self.text_and_charset().map(|(text, _)| text)
+    }
+
+    /// Returns automatically decoded text and the charset actually used.
+    ///
+    /// Follows [`Self::text`], including Latin-1 recovery. The returned charset
+    /// can differ from [`Self::detect_encoding`] if decoding needed fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata or I/O errors, as in [`Self::text`].
+    pub fn text_and_charset(&mut self) -> Result<(String, Charset), TextPartError> {
         let content_type = self.checked_content_type()?;
-        let charset = content_type
-            .charset_encoding()
-            .map_err(TextPartError::Charset)?
-            .unwrap_or(Charset::UTF8);
-        decode_text(&mut self.part, charset)
+        decode_text_auto(&mut self.part, Some(&content_type))
+    }
+
+    /// Detects a charset without decoding the entire body.
+    ///
+    /// A supported MIME declaration returns Certain without source I/O.
+    /// Otherwise examines a three-byte BOM prefix, then (for HTML only) the
+    /// first 1024 transfer-decoded bytes for a Tentative meta declaration.
+    /// Requires explicit `html` and `head` starts and stops at a `body` tag.
+    /// UTF-16 meta labels mean UTF-8; `x-user-defined` means Windows-1252.
+    /// Unsupported declarations are skipped, not treated as conclusive.
+    ///
+    /// Returns `None` when no encoding is detected, including an unlabelled
+    /// empty stream. This does not validate bytes or select a fallback.
+    /// Content reads rewind first but not afterward, may read ahead, and do
+    /// not change stored bytes or headers. Short/interrupted reads are handled.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid metadata or source seek/read failures.
+    ///
+    /// ```
+    /// use mimecraft::{TextPart, text::TextEncodingConfidence};
+    /// use mimecraft::charsets::Charset;
+    ///
+    /// let mut body = TextPart::new("html", "<html><head><meta charset=windows-1252>")?;
+    /// // A supported MIME declaration takes precedence over HTML metadata.
+    /// assert_eq!(body.detect_encoding()?, Some((Charset::UTF8, TextEncodingConfidence::Certain)));
+    /// # Ok::<(), mimecraft::TextPartError>(())
+    /// ```
+    pub fn detect_encoding(
+        &mut self,
+    ) -> Result<Option<(Charset, TextEncodingConfidence)>, TextPartError> {
+        let content_type = self.checked_content_type()?;
+        if let Some(detected) = declared_encoding(Some(&content_type)) {
+            return Ok(Some((detected.charset, detected.confidence)));
+        }
+        let mut bytes = Vec::with_capacity(1024);
+        let mut reader = self.part.content.open().map_err(TextPartError::Io)?;
+        (&mut reader)
+            .take(3)
+            .read_to_end(&mut bytes)
+            .map_err(TextPartError::Io)?;
+        if crate::charsets::bom_charset(&bytes).is_none()
+            && content_type.is_mime_type("text", "html")
+        {
+            reader
+                .take((1024 - bytes.len()) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(TextPartError::Io)?;
+        }
+        Ok(detect_encoding(Some(&content_type), &bytes)
+            .map(|detected| (detected.charset, detected.confidence)))
     }
 
     /// Reads text using an explicit charset instead of the Content-Type label.
@@ -359,7 +432,8 @@ impl<R: Read + Seek> TextPart<R> {
     ///
     /// # Errors
     ///
-    /// Returns metadata, I/O, or charset errors as in [`Self::text`].
+    /// Returns metadata or I/O errors as in [`Self::text`], and a charset error
+    /// when the bytes cannot be decoded strictly.
     pub fn text_with_charset(&mut self, charset: Charset) -> Result<String, TextPartError> {
         self.checked_content_type()?;
         decode_text(&mut self.part, charset)
@@ -382,16 +456,39 @@ pub(crate) fn decode_text<R: Read + Seek>(
     part: &mut MimePart<R>,
     charset: Charset,
 ) -> Result<String, TextPartError> {
+    let bytes = decoded_bytes(part)?;
+    charset
+        .decode(&bytes)
+        .map(|text| text.into_owned())
+        .map_err(TextPartError::Charset)
+}
+
+pub(crate) fn decode_text_auto<R: Read + Seek>(
+    part: &mut MimePart<R>,
+    content_type: Option<&ContentType>,
+) -> Result<(String, Charset), TextPartError> {
+    let bytes = decoded_bytes(part)?;
+    if let Some(detected) = detect_encoding(content_type, &bytes)
+        && !detected.strict_utf8
+    {
+        return Ok((
+            detected.charset.decode_lossy(&bytes).0.into_owned(),
+            detected.charset,
+        ));
+    }
+    // Try strict UTF-8, then fall back to iso-8859-1 as in GetText(out encoding).
+    let (text, charset) = crate::charsets::decode_best(&bytes, None);
+    Ok((text.into_owned(), charset))
+}
+
+fn decoded_bytes<R: Read + Seek>(part: &mut MimePart<R>) -> Result<Vec<u8>, TextPartError> {
     let mut bytes = Vec::new();
     // Decoding only changes source position; the editing accessor would discard
     // parsed flags for absent content and missing header/body separators.
     part.content
         .decode_to(&mut bytes)
         .map_err(TextPartError::Io)?;
-    charset
-        .decode(&bytes)
-        .map(|text| text.into_owned())
-        .map_err(TextPartError::Charset)
+    Ok(bytes)
 }
 
 /// A text part could not be constructed, read, or edited.
