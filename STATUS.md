@@ -8775,6 +8775,8 @@ cargo bench --bench mime_reader
 cargo bench --bench mime_reader --no-default-features
 cargo bench --bench html
 cargo bench --bench html --no-default-features
+cargo bench --bench rtf
+cargo bench --bench rtf --no-default-features
 ```
 
 The base64 benchmark, which needs no extra benchmarking framework, compares scalar-only and runtime-dispatched
@@ -8858,15 +8860,87 @@ String allocation/destruction and conversion are timed; writer variants discard
 output. Default/filtered output lengths and FNV-1a fingerprints generated with
 MimeKit are checked outside timing, along with string/writer agreement.
 
+#### RTF benchmarks and pre-sans-I/O baseline
+
+The `rtf` harness ports all thirteen converter workloads from MimeKit's
+`Benchmarks/Text/RtfConverterBenchmarks.cs` and adds seven
+`RtfTokenizer_ReadAllTokens` cases over the same generated RTF documents.
+There is no separate upstream tokenizer benchmark class. The generators preserve
+the upstream inline rationale and exact input bytes: Word-like formatting,
+Unicode/DBCS, encapsulated HTML, deep identical/formatted groups, an oversized
+font table, and binary data. `LargeBinary` uses raw `0xff` bytes rather than
+UTF-8-encoding the upstream StringReader's U+00FF characters, so `\binN` consumes
+exactly the intended payload.
+
+Each iteration constructs a fresh synchronous tokenizer/converter with a 4 KiB
+RTF input buffer. Tokenizer timing includes counting and dropping owned tokens,
+the final EOF probe, and reader destruction. Converters return and drop complete
+strings, unlike upstream's null-writer measurements; no writer API was added
+just for benchmark parity. `RtfToHtml_Render` always renders RTF.
+`RtfToHtml_Extract/EncapsulatedHtml` composes `RtfHtmlExtractor` and `HtmlToHtml`,
+matching upstream's extraction/rewrite behavior while materializing both the
+intermediate and final strings. `HtmlToHtml/ExtractedHtml` measures rewriting the
+pre-generated HTML alone. These API/allocation differences preclude direct
+cross-runtime timing comparisons.
+
+Generation and assertions run outside measurement. The integration test
+`rtf_benchmarks` and both harnesses check original input fingerprints, canonical
+token counts, complete consumption, repeated EOF, and CRLF output fingerprints.
+References were generated using the unmodified MimeKit generators/converters
+at upstream revision `20ab449ec5ee334efd6c5d909424ee61971267d5`; raw extracted HTML
+also matches the independently generated HTML string exactly.
+
+The following baseline was recorded on October 29, 2026, before changing the
+I/O-coupled tokenizer, using the library at `1a6a57d` plus these harnesses:
+Windows x86-64, Intel Core Ultra 7 268V, rustc 1.99.1
+(`58cf8f9c3`, LLVM 23.1.1), MSVC target, default `simd` feature,
+`-C target-cpu=x86-64-v3`, fat LTO, and one codegen unit. Throughput is the
+standalone median of five samples of at least 100 ms after three warm-ups.
+Rates count original RTF bytes, or UTF-8 bytes for the extracted HTML baseline.
+Allocation counts/bytes are per operation from the separate metabench allocator
+run; allocated bytes are cumulative, not peak memory.
+
+| Operation | Document | MiB/s | Documents/s | Allocations | Allocated bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| RtfTokenizer_ReadAllTokens | WordDocument | 121.2 | 121.2 | 89,837 | 771,591 |
+| RtfToText | WordDocument | 35.6 | 35.6 | 89,858 | 2,247,394 |
+| RtfToHtml_Render | WordDocument | 24.9 | 24.9 | 138,248 | 9,104,713 |
+| RtfTokenizer_ReadAllTokens | UnicodeDocument | 68.8 | 68.8 | 159,731 | 184,742 |
+| RtfToText | UnicodeDocument | 41.7 | 41.7 | 159,750 | 1,005,006 |
+| RtfToHtml_Render | UnicodeDocument | 37.9 | 37.8 | 159,756 | 3,331,909 |
+| RtfTokenizer_ReadAllTokens | EncapsulatedHtml | 109.6 | 109.6 | 83,194 | 815,981 |
+| RtfToText | EncapsulatedHtml | 50.8 | 50.8 | 83,213 | 1,554,415 |
+| RtfToHtml_Render | EncapsulatedHtml | 44.0 | 44.0 | 97,758 | 3,459,919 |
+| RtfToHtml_Extract | EncapsulatedHtml | 35.8 | 35.8 | 117,698 | 4,360,481 |
+| RtfTokenizer_ReadAllTokens | DeepNesting | 60.0 | 60.0 | 4 | 4,132 |
+| RtfToText | DeepNesting | 24.5 | 24.5 | 8 | 5,160 |
+| RtfTokenizer_ReadAllTokens | DeepFormattedNesting | 39.8 | 67.4 | 190,651 | 194,779 |
+| RtfToText | DeepFormattedNesting | 27.6 | 46.7 | 190,672 | 660,943 |
+| RtfToHtml_Render | DeepFormattedNesting | 27.3 | 46.1 | 194,777 | 1,001,500 |
+| RtfTokenizer_ReadAllTokens | LargeFontTable | 114.2 | 114.4 | 103,514 | 647,005 |
+| RtfToText | LargeFontTable | 74.8 | 75.0 | 103,536 | 796,653 |
+| RtfTokenizer_ReadAllTokens | LargeBinary | 6,193.4 | 6,193.5 | 9 | 4,159 |
+| RtfToText | LargeBinary | 5,337.5 | 5,337.5 | 14 | 5,203 |
+| HtmlToHtml | ExtractedHtml | 104.1 | 276.7 | 34,480 | 2,429,172 |
+
+Reproduce with `cargo bench --bench rtf` and
+`cargo bench --features bench-metabench --bench rtf_metabench -- --allocations`.
+Keep compiler, CPU flags, features, buffering, and output policies fixed for
+before/after comparisons, and rerun the old revision on the same machine to
+control for environmental noise. The standalone harness is intentionally short;
+use `--criterion` on the metabench target for longer statistical timing.
+The RTF tokenizer remains I/O-coupled in this batch. The TNEF reader still needs
+its own benchmark baseline before its planned sans-I/O refactor.
+
 #### Optional metabench targets
 
-The `base64`, `mime_reader`, and `html` targets remain available without any
+The `base64`, `mime_reader`, `html`, and `rtf` targets remain available without any
 benchmark framework. Separate `base64_metabench`, `mime_reader_metabench`,
-and `html_metabench`
+`html_metabench`, and `rtf_metabench`
 targets are enabled by `--features bench-metabench`; their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 21 Base64, 27 MIME, and twelve HTML cases.
+`benches/support`, covering all 21 Base64, 27 MIME, twelve HTML, and twenty RTF cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs
@@ -8880,6 +8954,9 @@ cargo bench --features bench-metabench --bench base64_metabench --bench mime_rea
 cargo bench --features bench-metabench --bench html_metabench -- --criterion
 cargo bench --features bench-metabench --bench html_metabench -- --allocations
 cargo bench --features bench-metabench --bench html_metabench -- --test
+cargo bench --features bench-metabench --bench rtf_metabench -- --criterion
+cargo bench --features bench-metabench --bench rtf_metabench -- --allocations
+cargo bench --features bench-metabench --bench rtf_metabench -- --test
 ```
 
 Criterion timing and allocation tracking work on Windows as well as Linux.
@@ -8925,8 +9002,9 @@ select it with `--baseline <report.json>` for an explicit comparison. The previo
 report is otherwise the automatic baseline. Use separate output paths with
 `--output <path>` for engine/feature configurations you want to retain.
 
-These are cached in-memory workloads without decoding, storage, network I/O,
-or application processing. Results are not a throughput guarantee or a direct
+These are cached in-memory workloads without storage or network I/O.
+Reader/parser measurements do not decode MIME bodies; RTF converters do decode
+their text. Results are not a throughput guarantee or a direct
 cross-runtime comparison against MimeKit; measure server workloads too.
 
 The UU backend comparison is an ignored unit test so it can force scalar,

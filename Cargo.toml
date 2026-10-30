@@ -43,6 +43,10 @@ name = "html"
 harness = false
 
 [[bench]]
+name = "rtf"
+harness = false
+
+[[bench]]
 name = "base64_metabench"
 harness = false
 required-features = ["bench-metabench"]
@@ -54,5 +58,10 @@ required-features = ["bench-metabench"]
 
 [[bench]]
 name = "html_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
+name = "rtf_metabench"
 harness = false
 required-features = ["bench-metabench"]
