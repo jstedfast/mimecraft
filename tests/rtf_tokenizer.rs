@@ -6,7 +6,7 @@ use std::io::{self, BufRead, BufReader, Read};
 
 use mimecraft::text::{
     RtfKeyword, RtfLexicalIssue, RtfLexicalViolation, RtfSourcePosition, RtfToken, RtfTokenKind,
-    RtfTokenizer, RtfTokenizerOptions,
+    RtfTokenizer, RtfTokenizerEngine, RtfTokenizerError, RtfTokenizerOptions, RtfTokenizerResult,
 };
 
 fn tokenize(input: &[u8], capacity: usize) -> (Vec<RtfToken>, Vec<RtfLexicalIssue>) {
@@ -662,4 +662,320 @@ fn enabling_reporting_after_binary_data_retains_correct_line_positions() {
             depth: 0,
         }
     );
+}
+
+// Text chunk boundaries are intentionally observable. Expand text to individual
+// bytes so comparisons still check every byte's original position and group depth.
+fn normalize_text(tokens: Vec<RtfToken>) -> Vec<RtfToken> {
+    let mut normalized = Vec::new();
+    for token in tokens {
+        if let RtfTokenKind::Text(bytes) = token.kind {
+            for (index, byte) in bytes.into_iter().enumerate() {
+                let mut position = token.position;
+                position.offset += index as u64;
+                position.line_position += index as u64;
+                normalized.push(RtfToken {
+                    kind: RtfTokenKind::Text(vec![byte]),
+                    position,
+                });
+            }
+        } else {
+            normalized.push(token);
+        }
+    }
+    normalized
+}
+
+fn feed_chunks(chunks: &[&[u8]], limit: usize) -> (Vec<RtfToken>, Vec<RtfLexicalIssue>) {
+    let mut engine = RtfTokenizerEngine::with_options(&RtfTokenizerOptions {
+        max_issues_per_violation: limit,
+    });
+    let mut tokens = Vec::new();
+    let mut issues = Vec::new();
+    for &chunk in chunks {
+        let mut input = chunk;
+        loop {
+            match engine
+                .parse_with_issues(&mut input, |issue| issues.push(issue))
+                .unwrap()
+            {
+                RtfTokenizerResult::Token(token) => tokens.push(token),
+                RtfTokenizerResult::NeedInput => break,
+                RtfTokenizerResult::EndOfInput => panic!("implicit EOF"),
+            }
+        }
+        assert!(input.is_empty());
+        let position = engine.source_position();
+        for _ in 0..3 {
+            assert_eq!(
+                engine
+                    .parse_with_issues(&mut &[][..], |_| panic!("empty poll reported an issue"))
+                    .unwrap(),
+                RtfTokenizerResult::NeedInput
+            );
+            assert_eq!(engine.source_position(), position);
+        }
+    }
+    engine.finish();
+    engine.finish();
+    loop {
+        match engine
+            .parse_with_issues(&mut &[][..], |issue| issues.push(issue))
+            .unwrap()
+        {
+            RtfTokenizerResult::Token(token) => tokens.push(token),
+            RtfTokenizerResult::EndOfInput => break,
+            RtfTokenizerResult::NeedInput => panic!("finished engine requested input"),
+        }
+    }
+    assert_eq!(
+        engine.source_position().offset,
+        chunks.iter().map(|chunk| chunk.len() as u64).sum()
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            engine
+                .parse_with_issues(&mut &[][..], |_| panic!("replayed EOF issue"))
+                .unwrap(),
+            RtfTokenizerResult::EndOfInput
+        );
+    }
+    (normalize_text(tokens), issues)
+}
+
+#[test]
+fn sans_io_all_splits_and_eof_prefixes_preserve_bytes_positions_and_reports() {
+    let cases: &[&[u8]] = &[
+        b"",
+        b"{\\rtf1\\ansi Hello\r\n \\'E9\\\\\\{\\}\\fs-20\\foo x\\*\\\n\\par}",
+        b"{{\\fs-x\\fs- x\\'zz\\'4z\\'\\b\\\r\\\t\\~\\bin-5 x\\bin0 x}}",
+        b"\\bin4 \0\xff{\nZ{\\bin10 ab\n",
+        b"{\\abcdefghijklmnopqrstuvwxyzABCDEFG9999999999999999 \\'zz\\'zz\\fs-2147483649}",
+        b"\0\x80\xff\\\xfe\\abc\xc3\xa9\\fs-",
+        b"{\\rtf1{\\pict\\bin5 a\n\nb\n}\\'zz}",
+    ];
+    for &input in cases {
+        for limit in [0, 1, 2] {
+            let options = RtfTokenizerOptions {
+                max_issues_per_violation: limit,
+            };
+            let (tokens, issues) = collect_tokens(RtfTokenizer::with_options(input, &options));
+            let expected = (normalize_text(tokens), issues);
+            for split in 0..=input.len() {
+                assert_eq!(
+                    feed_chunks(&[&input[..split], &[], &input[split..]], limit),
+                    expected,
+                    "split={split}, limit={limit}, input={input:?}"
+                );
+            }
+            for size in [1, 2, 3, 7, 4096] {
+                assert_eq!(
+                    feed_chunks(&input.chunks(size).collect::<Vec<_>>(), limit),
+                    expected
+                );
+            }
+            // Explicit EOF in every scanner state, including the lone-minus
+            // quirk, zero/one hex digit, and incomplete binary payload.
+            for end in 0..=input.len() {
+                let prefix = &input[..end];
+                let (tokens, issues) = collect_tokens(RtfTokenizer::with_options(prefix, &options));
+                assert_eq!(
+                    feed_chunks(&prefix.chunks(1).collect::<Vec<_>>(), limit),
+                    (normalize_text(tokens), issues),
+                    "prefix={end}, limit={limit}, input={input:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sans_io_empty_input_is_not_eof_and_finished_input_is_rejected() {
+    for input in [
+        b"\\".as_slice(),
+        b"\\fs",
+        b"\\fs-",
+        b"\\fs-20",
+        b"\\'",
+        b"\\'a",
+        b"{",
+        b"\\bin3 x",
+    ] {
+        let mut engine = RtfTokenizerEngine::default();
+        let mut pending = input;
+        while let RtfTokenizerResult::Token(_) = engine.parse(&mut pending).unwrap() {}
+        assert!(pending.is_empty());
+        assert_eq!(
+            engine.parse(&mut &[][..]).unwrap(),
+            RtfTokenizerResult::NeedInput
+        );
+        let position = engine.source_position();
+        engine.finish();
+        let mut unexpected = b"extra".as_slice();
+        assert_eq!(
+            engine.parse(&mut unexpected),
+            Err(RtfTokenizerError::InputFinished)
+        );
+        assert_eq!(unexpected, b"extra");
+        assert_eq!(engine.source_position(), position);
+        while let RtfTokenizerResult::Token(_) = engine.parse(&mut &[][..]).unwrap() {}
+        assert_eq!(
+            engine.parse(&mut &[][..]).unwrap(),
+            RtfTokenizerResult::EndOfInput
+        );
+        assert_eq!(
+            engine.parse(&mut unexpected),
+            Err(RtfTokenizerError::InputFinished)
+        );
+    }
+    let mut engine = RtfTokenizerEngine::new();
+    engine.finish();
+    assert_eq!(
+        engine.parse(&mut &[][..]).unwrap(),
+        RtfTokenizerResult::EndOfInput
+    );
+}
+
+#[test]
+fn sans_io_leaves_delimiters_and_does_not_retain_input_or_callback() {
+    let mut engine = RtfTokenizerEngine::new();
+    let word = {
+        let bytes = b"\\fs20}".to_vec();
+        let mut input = bytes.as_slice();
+        let RtfTokenizerResult::Token(token) = engine
+            .parse_with_issues(&mut input, |_| panic!("valid input"))
+            .unwrap()
+        else {
+            panic!("expected word")
+        };
+        assert_eq!(input, b"}");
+        assert_eq!(engine.source_position().offset, 5);
+        token
+    };
+    let RtfTokenKind::ControlWord(word) = word.kind else {
+        panic!("expected word")
+    };
+    assert_eq!(word.name(), "fs");
+    assert_eq!(word.parameter(), Some(20));
+    let mut replacement = b"}".as_slice();
+    assert!(matches!(
+        engine.parse(&mut replacement).unwrap(),
+        RtfTokenizerResult::Token(RtfToken {
+            kind: RtfTokenKind::GroupEnd,
+            ..
+        })
+    ));
+    assert!(replacement.is_empty());
+}
+
+#[test]
+fn sans_io_reporting_budgets_survive_chunks_and_discarded_issues() {
+    let mut engine = RtfTokenizerEngine::with_options(&RtfTokenizerOptions {
+        max_issues_per_violation: 1,
+    });
+    for _ in 0..3 {
+        let mut input = b"\\'z".as_slice();
+        assert!(matches!(
+            engine.parse(&mut input).unwrap(),
+            RtfTokenizerResult::Token(_)
+        ));
+    }
+    let mut issues = Vec::new();
+    for _ in 0..4 {
+        for mut input in [b"\\'".as_slice(), b"z"] {
+            loop {
+                match engine
+                    .parse_with_issues(&mut input, |issue| issues.push(issue))
+                    .unwrap()
+                {
+                    RtfTokenizerResult::Token(_) => {}
+                    RtfTokenizerResult::NeedInput => break,
+                    RtfTokenizerResult::EndOfInput => panic!("implicit EOF"),
+                }
+            }
+        }
+    }
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].violation, RtfLexicalViolation::InvalidHexEscape);
+    assert_eq!(issues[0].position.offset, 9);
+    assert_eq!(
+        issues[1].violation,
+        RtfLexicalViolation::TooManyComplianceIssues
+    );
+    assert_eq!(issues[1].position.offset, 12);
+}
+
+#[test]
+fn reader_and_engine_handoffs_preserve_partial_tokens_and_budgets() {
+    let input = b"{\\fs-20 X\\'z\\'z}";
+    let options = RtfTokenizerOptions {
+        max_issues_per_violation: 1,
+    };
+    let expected = collect_tokens(RtfTokenizer::with_options(input.as_slice(), &options));
+    let source = FaultReader {
+        bytes: input.to_vec(),
+        offset: 0,
+        fault_at: 5,
+        fault_on_fill: usize::MAX,
+        fired: false,
+        kind: io::ErrorKind::WouldBlock,
+        fills: 0,
+    };
+    let mut reader = RtfTokenizer::with_options(source, &options);
+    let mut tokens = vec![reader.read_token().unwrap().unwrap()];
+    assert_eq!(
+        reader.read_token().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    let (source, mut engine) = reader.into_parts();
+    assert_eq!(engine.source_position().offset, 5);
+    let mut pending = &source.bytes[source.offset..source.offset + 3];
+    let RtfTokenizerResult::Token(word) = engine.parse(&mut pending).unwrap() else {
+        panic!("expected resumed word")
+    };
+    tokens.push(word);
+    assert!(pending.is_empty());
+    let mut reader = RtfTokenizer::from_parts(&source.bytes[source.offset + 3..], engine);
+    let mut issues = Vec::new();
+    while let Some(token) = reader
+        .read_token_with_issues(|issue| issues.push(issue))
+        .unwrap()
+    {
+        tokens.push(token);
+    }
+    assert_eq!(
+        (normalize_text(tokens), issues),
+        (normalize_text(expected.0), expected.1)
+    );
+    assert_eq!(reader.engine().source_position().offset, input.len() as u64);
+    let (_, engine) = reader.into_parts();
+    let mut finished = RtfTokenizer::from_parts(b"unread".as_slice(), engine);
+    assert!(finished.read_token().unwrap().is_none());
+    assert_eq!(*finished.get_ref(), b"unread");
+}
+
+#[test]
+fn sans_io_bounded_text_and_large_binary_payloads_across_chunks() {
+    let mut input = b"{\\bin100000 ".to_vec();
+    input.extend((0..100_000).map(|index| if index % 17 == 0 { b'\n' } else { b'{' }));
+    let text_start = input.len();
+    input.extend(std::iter::repeat_n(b'x', 10_000));
+    input.push(b'}');
+    let (expected, issues) = tokenize(&input, 4096);
+    for size in [1, 7, 4096, input.len()] {
+        assert_eq!(
+            feed_chunks(&input.chunks(size).collect::<Vec<_>>(), 0),
+            (normalize_text(expected.clone()), issues.clone())
+        );
+    }
+    let mut engine = RtfTokenizerEngine::new();
+    let mut pending = &input[text_start..input.len() - 1];
+    let mut lengths = Vec::new();
+    while let RtfTokenizerResult::Token(token) = engine.parse(&mut pending).unwrap() {
+        let RtfTokenKind::Text(text) = token.kind else {
+            panic!("expected text")
+        };
+        lengths.push(text.len());
+    }
+    assert_eq!(lengths, [4096, 4096, 1808]);
 }

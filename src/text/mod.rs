@@ -122,7 +122,8 @@ pub use rtf_to_html::RtfToHtml;
 pub use rtf_to_text::RtfToText;
 pub use rtf_tokenizer::{
     RtfControlWord, RtfLexicalIssue, RtfLexicalViolation, RtfSourcePosition, RtfToken,
-    RtfTokenKind, RtfTokenizer, RtfTokenizerOptions,
+    RtfTokenKind, RtfTokenizer, RtfTokenizerEngine, RtfTokenizerError, RtfTokenizerOptions,
+    RtfTokenizerResult,
 };
 pub use rtf_validator::{RtfIssue, RtfValidationOptions, RtfValidator, RtfViolation};
 pub use text_encoding::TextEncodingConfidence;

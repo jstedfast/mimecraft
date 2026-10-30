@@ -2,7 +2,11 @@
 // Reporting limits adapted from Text/RtfComplianceOptions.cs and RtfCappedComplianceLogger.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, BufRead};
+use std::{
+    error::Error,
+    fmt,
+    io::{self, BufRead},
+};
 
 use super::RtfKeyword;
 use super::rtf_reporting::{RtfReport, RtfReportingLimits};
@@ -70,7 +74,7 @@ pub enum RtfTokenKind {
     HexChar(u8),
     /// Raw bytes, at most 4096 per token, without RTF delimiters or CR/LF.
     ///
-    /// Token boundaries may depend on the reader's buffering. Bytes are not
+    /// Token boundaries may depend on input chunking. Bytes are not
     /// necessarily UTF-8 and remain unchanged, including NUL and high bytes.
     Text(Vec<u8>),
 }
@@ -100,6 +104,40 @@ pub struct RtfToken {
     /// Original source position.
     pub position: RtfSourcePosition,
 }
+
+/// Outcome of advancing an [`RtfTokenizerEngine`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+// Keep the outcome tag separate from the token payload, avoiding field
+// reshuffling when the caller extracts an owned token from the result.
+#[repr(u8)]
+pub enum RtfTokenizerResult {
+    /// A complete owned token; the supplied slice may still contain input.
+    Token(RtfToken),
+    /// The supplied slice was exhausted, but EOF has not been signaled.
+    NeedInput,
+    /// Input was explicitly finished and all pending tokens were returned.
+    EndOfInput,
+}
+
+/// Rejected input or an unrepresentable source position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RtfTokenizerError {
+    /// Nonempty input was supplied after [`RtfTokenizerEngine::finish`].
+    InputFinished,
+    /// Consuming the next bytes would overflow the source byte offset.
+    PositionOverflow,
+}
+
+impl fmt::Display for RtfTokenizerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InputFinished => "RTF input has already been finished",
+            Self::PositionOverflow => "RTF input byte offset overflow",
+        })
+    }
+}
+
+impl Error for RtfTokenizerError {}
 
 /// A lexical recovery or report-truncation marker from an [`RtfTokenizer`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -161,7 +199,7 @@ enum ScanState {
     Hex2,
 }
 
-/// A bounded, synchronous RTF lexer over a buffered byte reader.
+/// Synchronous `BufRead` adapter for the sans-I/O [`RtfTokenizerEngine`].
 ///
 /// Pass original RTF bytes, not charset-decoded Unicode. Real-world RTF often
 /// contains raw high bytes, and binary lengths count bytes. Charset/font
@@ -170,7 +208,8 @@ enum ScanState {
 ///
 /// Control names retain at most 32 letters; parameters retain the first ten
 /// digits and clamp to `i32`. Positive `\binN` payloads are skipped directly in
-/// the reader, without allocation proportional to N or interpreting braces.
+/// the supplied buffer, without allocation proportional to N or interpreting
+/// braces.
 /// Text tokens own at most 4096 bytes. The reader's own buffer is separate.
 ///
 /// Raw CR/LF are ignored; escaped CR/LF become LF control symbols. Malformed
@@ -205,6 +244,48 @@ enum ScanState {
 #[derive(Debug)]
 pub struct RtfTokenizer<R> {
     inner: R,
+    engine: RtfTokenizerEngine,
+}
+
+/// A bounded, byte-fed RTF lexer with no I/O or retained input buffer.
+///
+/// [`Self::parse`] advances a caller-owned slice and returns one owned token,
+/// [`RtfTokenizerResult::NeedInput`], or [`RtfTokenizerResult::EndOfInput`].
+/// Keep passing the unconsumed suffix until it is exhausted. Empty input is
+/// not EOF: partial words, parameters, hex escapes, and binary-skip progress
+/// survive any number of empty polls. Call [`Self::finish`] after consuming
+/// the final input, then parse empty slices to drain pending tokens.
+///
+/// Control names retain at most 32 letters, parameters accumulate at most ten
+/// digits, and text tokens own at most 4096 bytes. Binary payloads are skipped
+/// directly from the supplied slices, without copying or retaining them.
+/// Adjacent text tokens may split differently with different chunking; their
+/// bytes and original source positions are preserved. No charset decoding,
+/// rendering, header validation, or destination filtering is performed.
+///
+/// Recovery and reporting options are shared with [`RtfTokenizer`]. Callbacks
+/// are not retained, and calls without one discard issues without spending
+/// reporting budgets. An async driver can supply bytes without changing the
+/// engine; no async runtime is required.
+///
+/// ```
+/// use mimecraft::text::{RtfTokenKind, RtfTokenizerEngine, RtfTokenizerResult};
+///
+/// let mut engine = RtfTokenizerEngine::new();
+/// let mut input = &b"\\fs-"[..];
+/// assert_eq!(engine.parse(&mut input)?, RtfTokenizerResult::NeedInput);
+/// let mut input = &b"20 "[..];
+/// let RtfTokenizerResult::Token(token) = engine.parse(&mut input)? else {
+///     panic!("expected word");
+/// };
+/// let RtfTokenKind::ControlWord(word) = token.kind else { panic!("expected word") };
+/// assert_eq!(word.parameter(), Some(-20));
+/// engine.finish();
+/// assert_eq!(engine.parse(&mut &[][..])?, RtfTokenizerResult::EndOfInput);
+/// # Ok::<(), mimecraft::text::RtfTokenizerError>(())
+/// ```
+#[derive(Debug)]
+pub struct RtfTokenizerEngine {
     keyword: String,
     keyword_truncated: bool,
     parameter_invalid: bool,
@@ -252,32 +333,26 @@ impl<R: BufRead> RtfTokenizer<R> {
     pub fn with_options(inner: R, options: &RtfTokenizerOptions) -> Self {
         Self {
             inner,
-            keyword: String::with_capacity(MAX_KEYWORD_LENGTH),
-            keyword_truncated: false,
-            parameter_invalid: false,
-            parameter_digits: 0,
-            negative: false,
-            parameter: 0,
-            hex_value: 0,
-            binary_remaining: 0,
-            state: ScanState::Default,
-            offset: 0,
-            line_start: 0,
-            line_number: 1,
-            depth: 0,
-            token_position: RtfSourcePosition {
-                offset: 0,
-                line_number: 1,
-                line_position: 1,
-                depth: 0,
-            },
-            eof: false,
-            finished: false,
-            reported_truncation: false,
-            // One counter per defect in the dense enum range. The marker is
-            // not a document defect, so it has no counter or reporting budget.
-            reporting: RtfReportingLimits::new(options.max_issues_per_violation),
+            engine: RtfTokenizerEngine::with_options(options),
         }
+    }
+
+    /// Wraps a source and existing engine, preserving partial-token state.
+    ///
+    /// The source must begin at the engine's next unconsumed byte. This also
+    /// preserves EOF and reporting budgets; it does not restart the document.
+    pub fn from_parts(inner: R, engine: RtfTokenizerEngine) -> Self {
+        Self { inner, engine }
+    }
+
+    /// Recovers source and engine without losing partial-token state.
+    pub fn into_parts(self) -> (R, RtfTokenizerEngine) {
+        (self.inner, self.engine)
+    }
+
+    /// Borrows the engine and its current source position.
+    pub fn engine(&self) -> &RtfTokenizerEngine {
+        &self.engine
     }
 
     /// Returns the buffered source without advancing it.
@@ -309,6 +384,7 @@ impl<R: BufRead> RtfTokenizer<R> {
     /// # Errors
     ///
     /// Propagates source errors and reports an unrepresentable byte offset.
+    #[inline]
     pub fn read_token(&mut self) -> io::Result<Option<RtfToken>> {
         self.read_token_core(None::<fn(RtfLexicalIssue)>)
     }
@@ -334,33 +410,191 @@ impl<R: BufRead> RtfTokenizer<R> {
         self.read_token_core(Some(report))
     }
 
+    #[inline(always)]
     fn read_token_core(
         &mut self,
         mut report: Option<impl FnMut(RtfLexicalIssue)>,
     ) -> io::Result<Option<RtfToken>> {
+        loop {
+            let mut input = if self.engine.eof {
+                &[][..]
+            } else {
+                self.inner.fill_buf()?
+            };
+            let length = input.len();
+            if input.is_empty() {
+                self.engine.finish();
+            }
+            let result = self.engine.parse_core(&mut input, report.as_mut());
+            let consumed = length - input.len();
+            // Advance even if a later byte overflowed: the engine and source
+            // must agree on every byte already consumed before the error.
+            if consumed != 0 {
+                self.inner.consume(consumed);
+            }
+            match result.map_err(io::Error::other)? {
+                Some(kind) => return Ok(Some(self.engine.token(kind))),
+                None if self.engine.finished => return Ok(None),
+                None => {}
+            }
+        }
+    }
+
+    pub(super) fn source_position(&self) -> RtfSourcePosition {
+        self.engine.source_position()
+    }
+}
+
+impl Default for RtfTokenizerEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RtfTokenizerEngine {
+    /// Creates an engine with unlimited lexical reporting.
+    pub fn new() -> Self {
+        Self::with_options(&RtfTokenizerOptions::default())
+    }
+
+    /// Creates an engine with copied, per-stream reporting options.
+    pub fn with_options(options: &RtfTokenizerOptions) -> Self {
+        Self {
+            keyword: String::with_capacity(MAX_KEYWORD_LENGTH),
+            keyword_truncated: false,
+            parameter_invalid: false,
+            parameter_digits: 0,
+            negative: false,
+            parameter: 0,
+            hex_value: 0,
+            binary_remaining: 0,
+            state: ScanState::Default,
+            offset: 0,
+            line_start: 0,
+            line_number: 1,
+            depth: 0,
+            token_position: RtfSourcePosition {
+                offset: 0,
+                line_number: 1,
+                line_position: 1,
+                depth: 0,
+            },
+            eof: false,
+            finished: false,
+            reported_truncation: false,
+            // One counter per defect in the dense enum range. The marker is
+            // not a document defect, so it has no counter or reporting budget.
+            reporting: RtfReportingLimits::new(options.max_issues_per_violation),
+        }
+    }
+
+    /// Signals EOF without discarding pending words or escapes. Idempotent.
+    ///
+    /// Consume all supplied input first. Then parse empty slices until
+    /// [`RtfTokenizerResult::EndOfInput`]; nonempty input is rejected.
+    pub fn finish(&mut self) {
+        self.eof = true;
+    }
+
+    /// Parses one token, advancing `input` past consumed bytes.
+    ///
+    /// Empty input before [`Self::finish`] returns `NeedInput`, never EOF.
+    /// Tokens can be returned without consuming a delimiter belonging to the
+    /// next token. No input references are retained. Issues are discarded
+    /// without spending reporting budgets.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nonempty input after `finish`. A position overflow leaves the
+    /// offending bytes unconsumed; earlier progress remains reflected in
+    /// `input` and the engine's position.
+    #[inline(always)]
+    pub fn parse(&mut self, input: &mut &[u8]) -> Result<RtfTokenizerResult, RtfTokenizerError> {
+        let token = self.parse_core(input, None::<fn(RtfLexicalIssue)>)?;
+        Ok(self.parse_result(token))
+    }
+
+    /// Parses one token and reports lexical recoveries without retaining them.
+    ///
+    /// Issues may be delivered without a token, before `NeedInput`, or before
+    /// an error. They are never replayed. Budgets persist across chunks and
+    /// callback changes. EOF recovery occurs only after [`Self::finish`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same input/position errors as [`Self::parse`].
+    #[inline(always)]
+    pub fn parse_with_issues(
+        &mut self,
+        input: &mut &[u8],
+        report: impl FnMut(RtfLexicalIssue),
+    ) -> Result<RtfTokenizerResult, RtfTokenizerError> {
+        let token = self.parse_core(input, Some(report))?;
+        Ok(self.parse_result(token))
+    }
+
+    #[inline(always)]
+    fn parse_result(&self, token: Option<RtfTokenKind>) -> RtfTokenizerResult {
+        match token {
+            Some(kind) => RtfTokenizerResult::Token(self.token(kind)),
+            None if self.finished => RtfTokenizerResult::EndOfInput,
+            None => RtfTokenizerResult::NeedInput,
+        }
+    }
+
+    #[inline(always)]
+    fn parse_core(
+        &mut self,
+        input: &mut &[u8],
+        report: Option<impl FnMut(RtfLexicalIssue)>,
+    ) -> Result<Option<RtfTokenKind>, RtfTokenizerError> {
+        // Attach the source position only at the public API boundary, rather
+        // than copying it through each scanner and adapter result.
+        if self.eof && !input.is_empty() {
+            return Err(RtfTokenizerError::InputFinished);
+        }
         if self.finished {
             return Ok(None);
         }
+        // Braces dominate deeply nested documents. Avoid the full scanner's
+        // stack frame and scratch state for these single-byte tokens.
+        if self.state == ScanState::Default && self.binary_remaining == 0 {
+            match input.first() {
+                Some(b'{') => return self.consume_group(input, true).map(Some),
+                Some(b'}') => return self.consume_group(input, false).map(Some),
+                _ => {}
+            }
+        }
+        self.parse_slow(input, report)
+    }
 
-        // All scanning state lives in fields so refills and retryable errors
+    fn parse_slow(
+        &mut self,
+        input: &mut &[u8],
+        mut report: Option<impl FnMut(RtfLexicalIssue)>,
+    ) -> Result<Option<RtfTokenKind>, RtfTokenizerError> {
+        // All scanning state lives in fields so chunk boundaries
         // can occur at any point without restarting a partially consumed token.
         loop {
             if self.binary_remaining != 0 {
-                let available = self.available()?;
-                let count = available.min(self.binary_remaining);
-                self.consume(count)?;
+                let count = input.len().min(self.binary_remaining);
+                self.consume(input, count)?;
                 self.binary_remaining -= count;
                 if self.binary_remaining != 0 {
                     if self.eof {
                         self.binary_remaining = 0;
                         self.mark_token_start();
                         self.report_truncated(&mut report);
+                    } else {
+                        return Ok(None);
                     }
-                    continue;
                 }
             }
 
-            if self.available()? == 0 {
+            if input.is_empty() {
+                if !self.eof {
+                    return Ok(None);
+                }
                 // EOF legitimately terminates pending words and one-digit
                 // hex escapes. Emit those before returning end-of-stream.
                 match self.state {
@@ -385,47 +619,40 @@ impl<R: BufRead> RtfTokenizer<R> {
                 return Ok(None);
             }
 
-            let byte = self.inner.fill_buf()?[0];
+            let byte = input[0];
             match self.state {
                 ScanState::Default => {
                     self.mark_token_start();
                     match byte {
                         b'{' => {
-                            self.consume(1)?;
-                            self.depth = self.depth.saturating_add(1);
-                            return Ok(Some(self.token(RtfTokenKind::GroupStart)));
+                            return self.consume_group(input, true).map(Some);
                         }
                         b'}' => {
-                            self.consume(1)?;
-                            self.depth = self.depth.saturating_sub(1);
-                            // Both group braces are at the enclosing group's depth.
-                            self.token_position.depth = self.depth;
-                            return Ok(Some(self.token(RtfTokenKind::GroupEnd)));
+                            return self.consume_group(input, false).map(Some);
                         }
                         b'\\' => {
-                            self.consume(1)?;
+                            self.consume(input, 1)?;
                             self.state = ScanState::Backslash;
                         }
                         b'\r' | b'\n' => {
                             // RTF readers ignore raw CR/LF. Escaped line endings
                             // are different: see the Backslash state below.
-                            self.consume(1)?;
+                            self.consume(input, 1)?;
                         }
                         _ => {
-                            let buffer = self.inner.fill_buf()?;
-                            let length = buffer
+                            let length = input
                                 .iter()
                                 .take(MAX_TEXT_LENGTH)
                                 .take_while(|&&c| !matches!(c, b'{' | b'}' | b'\\' | b'\r' | b'\n'))
                                 .count();
-                            let text = buffer[..length].to_vec();
-                            self.consume(length)?;
-                            return Ok(Some(self.token(RtfTokenKind::Text(text))));
+                            let text = input[..length].to_vec();
+                            self.consume(input, length)?;
+                            return Ok(Some(RtfTokenKind::Text(text)));
                         }
                     }
                 }
                 ScanState::Backslash => {
-                    self.consume(1)?;
+                    self.consume(input, 1)?;
                     // Most names are lowercase ASCII, but real control words
                     // such as Office Math's \mmathPr also contain uppercase.
                     if byte.is_ascii_alphabetic() {
@@ -446,22 +673,23 @@ impl<R: BufRead> RtfTokenizer<R> {
                         // Escaped CR and LF are both equivalent to \par.
                         self.state = ScanState::Default;
                         let symbol = if byte == b'\r' { b'\n' } else { byte };
-                        return Ok(Some(self.token(RtfTokenKind::ControlSymbol(symbol))));
+                        return Ok(Some(RtfTokenKind::ControlSymbol(symbol)));
                     }
                 }
                 ScanState::Keyword => {
                     if byte.is_ascii_alphabetic() {
-                        self.consume(1)?;
+                        let length = input.iter().take_while(|c| c.is_ascii_alphabetic()).count();
                         // Consume excess letters but retain only the bounded
                         // prefix. An overlong word must remain unknown.
-                        if self.keyword.len() < MAX_KEYWORD_LENGTH {
-                            self.keyword.push(char::from(byte));
-                        } else {
-                            self.keyword_truncated = true;
-                        }
+                        let stored = length.min(MAX_KEYWORD_LENGTH - self.keyword.len());
+                        let letters = std::str::from_utf8(&input[..stored])
+                            .expect("control names contain only ASCII letters");
+                        self.consume(input, length)?;
+                        self.keyword.push_str(letters);
+                        self.keyword_truncated |= stored != length;
                     } else if byte == b'-' {
                         // A hyphen after a control word introduces its parameter.
-                        self.consume(1)?;
+                        self.consume(input, 1)?;
                         self.negative = true;
                         self.state = ScanState::ParameterSign;
                     } else if byte.is_ascii_digit() {
@@ -470,7 +698,7 @@ impl<R: BufRead> RtfTokenizer<R> {
                         // One delimiting space belongs to the control word.
                         // Every other delimiter belongs to the following token.
                         if byte == b' ' {
-                            self.consume(1)?;
+                            self.consume(input, 1)?;
                         }
                         return Ok(Some(self.complete_keyword(&mut report)));
                     }
@@ -488,7 +716,7 @@ impl<R: BufRead> RtfTokenizer<R> {
                 }
                 ScanState::ParameterDigits => {
                     if byte.is_ascii_digit() {
-                        self.consume(1)?;
+                        self.consume(input, 1)?;
                         // Consume all digits, but only accumulate the first ten.
                         // Clamp in complete_keyword rather than overflow.
                         if self.parameter_digits < MAX_PARAMETER_DIGITS {
@@ -499,14 +727,14 @@ impl<R: BufRead> RtfTokenizer<R> {
                         }
                     } else {
                         if byte == b' ' {
-                            self.consume(1)?;
+                            self.consume(input, 1)?;
                         }
                         return Ok(Some(self.complete_keyword(&mut report)));
                     }
                 }
                 ScanState::Hex1 => {
                     if let Some(value) = hex_digit(byte) {
-                        self.consume(1)?;
+                        self.consume(input, 1)?;
                         self.hex_value = value;
                         self.state = ScanState::Hex2;
                     } else {
@@ -520,7 +748,7 @@ impl<R: BufRead> RtfTokenizer<R> {
                     // One hex digit is accepted leniently as its own value.
                     // Leave a non-hex delimiter for the following token.
                     if let Some(value) = hex_digit(byte) {
-                        self.consume(1)?;
+                        self.consume(input, 1)?;
                         self.hex_value = (self.hex_value << 4) | value;
                     } else {
                         self.report(RtfLexicalViolation::InvalidHexEscape, &mut report);
@@ -531,32 +759,56 @@ impl<R: BufRead> RtfTokenizer<R> {
         }
     }
 
-    fn available(&mut self) -> io::Result<usize> {
-        if self.eof {
-            return Ok(0);
-        }
-        let length = self.inner.fill_buf()?.len();
-        self.eof = length == 0;
-        Ok(length)
+    #[inline]
+    fn consume_group(
+        &mut self,
+        input: &mut &[u8],
+        opening: bool,
+    ) -> Result<RtfTokenKind, RtfTokenizerError> {
+        self.mark_token_start();
+        self.consume(input, 1)?;
+        let kind = if opening {
+            self.depth = self.depth.saturating_add(1);
+            RtfTokenKind::GroupStart
+        } else {
+            self.depth = self.depth.saturating_sub(1);
+            // Both group braces are at the enclosing group's depth.
+            self.token_position.depth = self.depth;
+            RtfTokenKind::GroupEnd
+        };
+        Ok(kind)
     }
 
-    fn consume(&mut self, count: usize) -> io::Result<()> {
+    #[inline(always)]
+    fn consume(&mut self, input: &mut &[u8], count: usize) -> Result<(), RtfTokenizerError> {
         if count == 0 {
             return Ok(());
         }
         let end = self
             .offset
             .checked_add(count as u64)
-            .ok_or_else(|| io::Error::other("RTF input byte offset overflow"))?;
+            .ok_or(RtfTokenizerError::PositionOverflow)?;
         // Binary payloads can contain LF too. Track them without storing the
         // payload, so positions remain correct even if reporting starts later.
-        for (index, &byte) in self.inner.fill_buf()?[..count].iter().enumerate() {
-            if byte == b'\n' {
-                self.line_number = self.line_number.saturating_add(1);
-                self.line_start = self.offset + index as u64 + 1;
+        // Short lexical runs do not need the bulk newline search.
+        if count <= 32 {
+            for (index, &byte) in input[..count].iter().enumerate() {
+                if byte == b'\n' {
+                    self.line_number = self.line_number.saturating_add(1);
+                    self.line_start = self.offset + index as u64 + 1;
+                }
+            }
+        } else {
+            let mut newlines = memchr::memchr_iter(b'\n', &input[..count]);
+            if let Some(last) = newlines.next_back() {
+                self.line_number = self
+                    .line_number
+                    .saturating_add(1)
+                    .saturating_add(newlines.count() as u64);
+                self.line_start = self.offset + last as u64 + 1;
             }
         }
-        self.inner.consume(count);
+        *input = &input[count..];
         self.offset = end;
         Ok(())
     }
@@ -565,7 +817,8 @@ impl<R: BufRead> RtfTokenizer<R> {
         self.token_position = self.source_position();
     }
 
-    pub(super) fn source_position(&self) -> RtfSourcePosition {
+    /// Returns the position of the next unconsumed source byte.
+    pub fn source_position(&self) -> RtfSourcePosition {
         RtfSourcePosition {
             offset: self.offset,
             line_number: self.line_number,
@@ -607,7 +860,10 @@ impl<R: BufRead> RtfTokenizer<R> {
         }
     }
 
-    fn complete_keyword(&mut self, report: &mut Option<impl FnMut(RtfLexicalIssue)>) -> RtfToken {
+    fn complete_keyword(
+        &mut self,
+        report: &mut Option<impl FnMut(RtfLexicalIssue)>,
+    ) -> RtfTokenKind {
         self.state = ScanState::Default;
         let signed = if self.negative {
             -(self.parameter as i64)
@@ -639,12 +895,12 @@ impl<R: BufRead> RtfTokenizer<R> {
         if id == RtfKeyword::Bin && bounded > 0 {
             self.binary_remaining = bounded as usize;
         }
-        self.token(RtfTokenKind::ControlWord(word))
+        RtfTokenKind::ControlWord(word)
     }
 
-    fn complete_hex(&mut self) -> RtfToken {
+    fn complete_hex(&mut self) -> RtfTokenKind {
         self.state = ScanState::Default;
-        self.token(RtfTokenKind::HexChar(self.hex_value))
+        RtfTokenKind::HexChar(self.hex_value)
     }
 }
 
@@ -665,25 +921,79 @@ mod tests {
     fn long_words_and_digit_runs_retain_bounded_state() {
         let input = format!("\\{}{} x", "a".repeat(100_000), "9".repeat(100_000));
         let mut tokenizer = RtfTokenizer::new(input.as_bytes());
-        let capacity = tokenizer.keyword.capacity();
+        let capacity = tokenizer.engine.keyword.capacity();
         let token = tokenizer.read_token().unwrap().unwrap();
         assert!(matches!(token.kind, RtfTokenKind::ControlWord(_)));
-        assert_eq!(tokenizer.keyword.len(), MAX_KEYWORD_LENGTH);
-        assert_eq!(tokenizer.keyword.capacity(), capacity);
-        assert_eq!(tokenizer.parameter_digits, MAX_PARAMETER_DIGITS);
-        assert_eq!(tokenizer.parameter, 9_999_999_999);
-        assert_eq!(tokenizer.binary_remaining, 0);
+        assert_eq!(tokenizer.engine.keyword.len(), MAX_KEYWORD_LENGTH);
+        assert_eq!(tokenizer.engine.keyword.capacity(), capacity);
+        assert_eq!(tokenizer.engine.parameter_digits, MAX_PARAMETER_DIGITS);
+        assert_eq!(tokenizer.engine.parameter, 9_999_999_999);
+        assert_eq!(tokenizer.engine.binary_remaining, 0);
     }
 
     #[test]
     fn offset_overflow_is_an_error_without_consuming_input() {
         let mut tokenizer = RtfTokenizer::new(b"{".as_slice());
-        tokenizer.offset = u64::MAX;
+        tokenizer.engine.offset = u64::MAX;
         let error = tokenizer.read_token().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(*tokenizer.get_ref(), b"{");
-        assert_eq!(tokenizer.depth, 0);
-        assert_eq!(tokenizer.state, ScanState::Default);
+        assert_eq!(tokenizer.engine.depth, 0);
+        assert_eq!(tokenizer.engine.state, ScanState::Default);
+    }
+
+    #[test]
+    fn engine_offset_overflow_preserves_prior_progress_and_partial_state() {
+        let mut engine = RtfTokenizerEngine::new();
+        engine.offset = u64::MAX - 1;
+        let mut input = b"\\b".as_slice();
+        assert_eq!(
+            engine.parse(&mut input),
+            Err(RtfTokenizerError::PositionOverflow)
+        );
+        assert_eq!(input, b"b");
+        assert_eq!(engine.offset, u64::MAX);
+        assert_eq!(engine.state, ScanState::Backslash);
+        assert_eq!(engine.token_position.offset, u64::MAX - 1);
+        assert_eq!(
+            engine.parse(&mut input),
+            Err(RtfTokenizerError::PositionOverflow)
+        );
+        assert_eq!(input, b"b");
+    }
+
+    #[test]
+    fn short_and_bulk_consumption_saturate_lines_and_track_the_last_newline() {
+        for count in [0, 1, 2, 31, 32, 33, 64, 4096] {
+            let mut bytes = vec![b'x'; count + 1];
+            for (index, byte) in bytes[..count].iter_mut().enumerate() {
+                if index % 7 == 0 {
+                    *byte = b'\n';
+                }
+            }
+            let mut engine = RtfTokenizerEngine::new();
+            engine.offset = 100;
+            engine.line_start = 90;
+            engine.line_number = u64::MAX - 1;
+            let mut input = bytes.as_slice();
+            engine.consume(&mut input, count).unwrap();
+            let lines = bytes[..count].iter().filter(|&&b| b == b'\n').count();
+            let line_start = bytes[..count]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(90, |index| 101 + index as u64);
+            assert_eq!(input, b"x");
+            assert_eq!(engine.offset, 100 + count as u64);
+            assert_eq!(
+                engine.line_number,
+                (u64::MAX - 1).saturating_add(lines as u64)
+            );
+            assert_eq!(engine.line_start, line_start);
+            assert_eq!(
+                engine.source_position().line_position,
+                101 + count as u64 - line_start
+            );
+        }
     }
 
     #[test]
@@ -691,7 +1001,7 @@ mod tests {
         let options = RtfTokenizerOptions {
             max_issues_per_violation: usize::MAX,
         };
-        let mut tokenizer = RtfTokenizer::with_options(b"".as_slice(), &options);
+        let mut tokenizer = RtfTokenizerEngine::with_options(&options);
         let index = RtfLexicalViolation::InvalidHexEscape as usize;
         tokenizer.reporting.counts[index] = usize::MAX - 1;
         let mut issues = Vec::new();
@@ -715,7 +1025,7 @@ mod tests {
         let options = RtfTokenizerOptions {
             max_issues_per_violation: 2,
         };
-        let mut tokenizer = RtfTokenizer::with_options(b"".as_slice(), &options);
+        let mut tokenizer = RtfTokenizerEngine::with_options(&options);
         let kinds = [
             RtfLexicalViolation::KeywordTooLong,
             RtfLexicalViolation::InvalidParameter,
@@ -758,7 +1068,7 @@ mod tests {
             let options = RtfTokenizerOptions {
                 max_issues_per_violation: limit,
             };
-            let mut tokenizer = RtfTokenizer::with_options(b"".as_slice(), &options);
+            let mut tokenizer = RtfTokenizerEngine::with_options(&options);
             for _ in 0..100 {
                 tokenizer.report(
                     RtfLexicalViolation::InvalidHexEscape,

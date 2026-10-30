@@ -3,7 +3,10 @@
 
 use std::{fmt::Write, hint::black_box, io::BufReader};
 
-use mimecraft::text::{HtmlToHtml, RtfHtmlExtractor, RtfToHtml, RtfToText, RtfTokenizer};
+use mimecraft::text::{
+    HtmlToHtml, RtfHtmlExtractor, RtfToHtml, RtfToText, RtfTokenizer, RtfTokenizerEngine,
+    RtfTokenizerResult,
+};
 
 pub const CASES: [&str; 7] = [
     "WordDocument",
@@ -330,6 +333,38 @@ pub fn read_all_tokens(case: &Workload) -> (usize, usize, bool) {
     let reader = tokenizer.into_inner();
     let remaining = reader.buffer().len() + reader.get_ref().len();
     (tokens, case.input.len() - remaining, eof)
+}
+
+pub fn read_all_tokens_engine(case: &Workload) -> (usize, usize, bool) {
+    let mut engine = RtfTokenizerEngine::new();
+    let mut tokens = 0;
+    for chunk in black_box(case.input.as_slice()).chunks(BUFFER_SIZE) {
+        let mut input = chunk;
+        loop {
+            match engine.parse(&mut input).unwrap() {
+                RtfTokenizerResult::Token(token) => {
+                    black_box(token);
+                    tokens += 1;
+                }
+                RtfTokenizerResult::NeedInput => break,
+                RtfTokenizerResult::EndOfInput => panic!("implicit EOF"),
+            }
+        }
+        assert!(input.is_empty());
+    }
+    engine.finish();
+    loop {
+        match engine.parse(&mut &[][..]).unwrap() {
+            RtfTokenizerResult::Token(token) => {
+                black_box(token);
+                tokens += 1;
+            }
+            RtfTokenizerResult::EndOfInput => break,
+            RtfTokenizerResult::NeedInput => panic!("input requested after EOF"),
+        }
+    }
+    let eof = engine.parse(&mut &[][..]).unwrap() == RtfTokenizerResult::EndOfInput;
+    (tokens, engine.source_position().offset as usize, eof)
 }
 
 pub fn to_text(case: &Workload) -> String {

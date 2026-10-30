@@ -65,4 +65,14 @@ fn main() {
     }
     let html = &cases[7];
     measure("HtmlToHtml", html, || workloads::rewrite_html(html));
+    println!("Sans-I/O engine: borrowed 4 KiB input chunks, with explicit EOF.");
+    for case in &cases[..7] {
+        assert_eq!(
+            workloads::read_all_tokens_engine(case),
+            workloads::read_all_tokens(case)
+        );
+        measure("RtfTokenizerEngine_ReadAllTokens", case, || {
+            workloads::read_all_tokens_engine(case)
+        });
+    }
 }

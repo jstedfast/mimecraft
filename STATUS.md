@@ -41,7 +41,7 @@ Rust API, ownership, error-handling, and charset differences.
 |---|---|
 | TNEF | The reader and TNEF-to-MIME conversion are not ported. An initial implementation and representative fixture-based benchmarks are prerequisites for a reader sans-I/O refactor; there is no Rust TNEF baseline yet. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
-| I/O adapters | Async drivers and async model/storage APIs are not ported. MIME and HTML tokenization already have sans-I/O engines with synchronous drivers; the RTF tokenizer still owns a `BufRead` source. |
+| I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
 | MIME compatibility | Encoded message-wrapper interpretation and multipart body/boundary collision scanning remain absent. Source-backed body storage, slice parsing, malformed-message recovery, and explicit transport preparation are implemented. |
 | Address/header conveniences | Address sorting, standalone malformed-address-list resynchronization, recipient deduplication/sender-inclusive collection, and hidden-header serialization filtering remain absent. Checked header authoring, folded address output, and message address-header recovery are implemented. |
@@ -49,12 +49,10 @@ Rust API, ownership, error-handling, and charset differences.
 
 The queued performance work is:
 
-1. Refactor the RTF tokenizer to sans-I/O and compare against the recorded
-   [RTF baseline](#rtf-benchmarks-and-pre-sans-io-baseline).
-2. Port the TNEF reader, add representative benchmark workloads, and record its
+1. Port the TNEF reader, add representative benchmark workloads, and record its
    I/O-coupled baseline. The current upstream checkout has no TNEF benchmark class.
-3. Refactor that reader to sans-I/O only after its baseline is available.
-4. Investigate header-collection preallocation at reader/parser call sites.
+2. Refactor that reader to sans-I/O only after its baseline is available.
+3. Investigate header-collection preallocation at reader/parser call sites.
    This remains deferred; `HeaderList::with_capacity` and pre-sized indexing
    when constructing a list from a vector already exist.
 
@@ -153,7 +151,8 @@ scope decisions, not unfinished entries in the performance queue.
 - HTML-to-text conversion with paragraphs, headings, lists, quotations,
   preformatted text, optional link/image text, bounded UTF-8 input/output,
   and synchronous reader/writer adapters.
-- Streaming byte-oriented RTF tokenization with bounded owned tokens,
+- Sans-I/O byte-oriented RTF tokenization with explicit input/EOF and a
+  compatible synchronous `BufRead` adapter, bounded owned tokens,
   case-sensitive keyword classifications, binary-payload skipping, source
   positions, optionally capped lexical recovery callbacks, and a borrowed parser
   for decoded hyperlink-field instructions.
@@ -4009,9 +4008,11 @@ it does not yet expose a general compliance-reporting API.
 
 ### Streaming RTF tokenization
 
-`text::RtfTokenizer<R: BufRead>` reads original RTF bytes and returns owned
-`RtfToken { kind, position }` values. Byte slices already implement `BufRead`;
-wrap files and other `Read` sources in `std::io::BufReader`.
+`text::RtfTokenizerEngine` is a bounded sans-I/O lexer over caller-owned byte
+slices. `text::RtfTokenizer<R: BufRead>` remains its synchronous adapter,
+returning the same owned `RtfToken { kind, position }` values through the
+existing reader API. Byte slices already implement `BufRead`; wrap files and
+other `Read` sources in `std::io::BufReader`.
 
 ```rust
 use mimecraft::text::{RtfKeyword, RtfTokenKind, RtfTokenizer};
@@ -4027,11 +4028,45 @@ assert_eq!(tokenizer.read_token()?.unwrap().kind, RtfTokenKind::Text(b"hello".to
 # Ok::<(), std::io::Error>(())
 ```
 
+The engine's `parse(&mut &[u8])` advances the supplied slice and returns
+`RtfTokenizerResult::Token`, `NeedInput`, or `EndOfInput`. It retains lexical
+state but no input references or input queue. Feed every unconsumed suffix;
+empty input alone never implies EOF. After consuming the final slice, call
+`finish()` and parse empty slices to drain any pending word or hex escape.
+`finish()` and repeated EOF polls are idempotent. Supplying nonempty input after
+`finish()` returns `RtfTokenizerError::InputFinished` without consuming it;
+an unrepresentable byte offset returns `PositionOverflow`.
+
+```rust
+use mimecraft::text::{RtfTokenKind, RtfTokenizerEngine, RtfTokenizerResult};
+
+let mut engine = RtfTokenizerEngine::new();
+let mut input = &b"\\fs-"[..];
+assert_eq!(engine.parse(&mut input)?, RtfTokenizerResult::NeedInput);
+let mut input = &b"20 "[..];
+let RtfTokenizerResult::Token(token) = engine.parse(&mut input)? else {
+    panic!("expected word");
+};
+let RtfTokenKind::ControlWord(word) = token.kind else { panic!("expected word") };
+assert_eq!(word.parameter(), Some(-20));
+engine.finish();
+assert_eq!(engine.parse(&mut &[][..])?, RtfTokenizerResult::EndOfInput);
+# Ok::<(), mimecraft::text::RtfTokenizerError>(())
+```
+
+`parse_with_issues` delivers lexical issues to a callback without retaining it.
+`with_options` copies the same per-stream reporting limits as the adapter.
+Empty polls do not report truncation or spend budgets, and calls without a
+callback discard issues rather than deferring them. `source_position()` reports
+the next unconsumed byte. An async driver can feed the engine directly, without
+an async-runtime dependency in the lexer.
+
 `RtfTokenKind` carries group starts/ends, control words, control symbols,
 hexadecimal bytes, or raw text bytes. `RtfControlWord` retains the original
 bounded name, its ID, an optional `i32` parameter, and truncation/invalid-parameter
-flags. Tokens survive subsequent reads. Text tokens may split at reader buffer
-boundaries; concatenate adjacent text tokens when a contiguous run is needed.
+flags. Tokens survive subsequent reads. Text tokens may split at input-chunk or
+reader-buffer boundaries; concatenate adjacent text tokens when a contiguous
+run is needed.
 
 `RtfKeyword::from_name` is allocation-free and case-sensitive. Its 134 spellings
 match MimeKit's converter-focused table, not every control word in RTF.
@@ -4125,13 +4160,17 @@ The first empty source buffer latches EOF. Pending words and hex values are
 emitted before `None`, after which further calls perform no I/O.
 `into_inner()` recovers the buffered source and its unread bytes, but discards
 pending lexical state; it is not a way to resume a partially read token.
+Use `into_parts()` and `from_parts(reader, engine)` to transfer the source and
+engine together, retaining partial tokens, positions, EOF, and reporting
+budgets. The replacement source must start at the next unconsumed byte.
+`engine()` provides read-only access to the adapter's engine.
 
 This is tokenization only: RTF headers, destination groups, code pages, fields,
 formatting, Unicode fallback bytes, and attachments are not interpreted.
 Use `RtfToText` or `RtfToHtml` below for rendering. Token serialization,
 comprehensive compliance reporting, and async I/O remain deferred.
-The tokenizer's sans-I/O refactor is queued after its now-recorded
-[benchmark baseline](#rtf-benchmarks-and-pre-sans-io-baseline).
+The sans-I/O refactor preserves the original benchmark workloads; see the
+[before/after comparison](#rtf-sans-io-comparison).
 
 ### Validating RTF document structure
 
@@ -8338,11 +8377,15 @@ reporting are not part of this port.
 RTF tokenization ports `Text/RtfTokenizer.cs` and `Text/RtfKeyword.cs`, with
 canonical tokens, malformed recovery, and lexical positions from
 `UnitTests/Text/RtfTokenizerTests.cs` and `RtfInterpreterComplianceTests.cs`.
-`BufRead` and owned token payloads replace `TextReader` and reusable character
-buffers. Reading original bytes preserves raw high bytes and makes `\binN`
-lengths unambiguous without a Latin-1 decoding layer. A resumable state machine
-preserves source errors for retry; fixed lexical bounds, binary skipping,
-case-sensitive aliases, and applicable inline rationale are retained.
+The byte-fed `RtfTokenizerEngine`, its `BufRead` adapter, and owned token
+payloads replace `TextReader` and reusable character buffers. Reading original
+bytes preserves raw high bytes and makes `\binN` lengths unambiguous without a
+Latin-1 decoding layer. A resumable state machine
+preserves partial tokens across byte partitions and source errors for retry;
+fixed lexical bounds, binary skipping, case-sensitive aliases, and applicable
+inline rationale are retained. Engine tests cover every split and EOF prefix
+of malformed/valid samples, empty polling, reporting budgets, ownership,
+source/engine handoffs, bounded output, and position overflow/saturation.
 `RtfTokenizerOptions` and capped callback delivery adapt the lexical subset of
 `Text/RtfComplianceOptions.cs` and `Text/RtfCappedComplianceLogger.cs`.
 Per-violation counters and the first-suppressed-issue marker preserve the
@@ -8952,6 +8995,10 @@ MimeKit are checked outside timing, along with string/writer agreement.
 The `rtf` harness ports all thirteen converter workloads from MimeKit's
 `Benchmarks/Text/RtfConverterBenchmarks.cs` and adds seven
 `RtfTokenizer_ReadAllTokens` cases over the same generated RTF documents.
+The sans-I/O refactor adds seven `RtfTokenizerEngine_ReadAllTokens` cases,
+bringing each harness to 27 cases. These feed borrowed 4 KiB slices directly,
+explicitly finish input, and count/drop the same tokens without a `BufReader`
+allocation. The standalone harness runs these after the original 20 cases.
 There is no separate upstream tokenizer benchmark class. The generators preserve
 the upstream inline rationale and exact input bytes: Word-like formatting,
 Unicode/DBCS, encapsulated HTML, deep identical/formatted groups, an oversized
@@ -9016,10 +9063,75 @@ Keep compiler, CPU flags, features, buffering, and output policies fixed for
 before/after comparisons, and rerun the old revision on the same machine to
 control for environmental noise. The standalone harness is intentionally short;
 use `--criterion` on the metabench target for longer statistical timing.
-The RTF tokenizer remains I/O-coupled; its baseline prerequisite is now complete.
+The RTF tokenizer's sans-I/O refactor and fresh comparison are recorded below.
 The TNEF reader is not ported yet. It needs an initial implementation,
 representative benchmark workloads, and an I/O-coupled baseline before its
 planned sans-I/O refactor.
+
+#### RTF sans-I/O comparison
+
+The completed refactor was measured on October 30, 2026 against the preserved
+pre-change executable from `f4fe67d`, not against the historical rates above.
+Compiler, features, release settings, input sizes, buffering, and output
+policies were unchanged. Seven old/new pairs ran sequentially on logical CPU 2
+(affinity mask `0x4`), reversing execution order each pair. No build or second
+benchmark ran concurrently. Each table entry is the median of the seven
+per-process medians, each using the existing five samples of at least 100 ms
+after three warm-ups. The original 20 measured operations remain unchanged;
+the seven direct-engine operations run afterward.
+
+| Operation | Document | Before MiB/s | After MiB/s | Change |
+| --- | --- | ---: | ---: | ---: |
+| RtfTokenizer_ReadAllTokens | WordDocument | 84.2 | 113.0 | +34.2% |
+| RtfTokenizer_ReadAllTokens | UnicodeDocument | 53.1 | 68.2 | +28.4% |
+| RtfTokenizer_ReadAllTokens | EncapsulatedHtml | 88.5 | 121.6 | +37.4% |
+| RtfTokenizer_ReadAllTokens | DeepNesting | 46.0 | 82.6 | +79.6% |
+| RtfTokenizer_ReadAllTokens | DeepFormattedNesting | 28.9 | 40.3 | +39.4% |
+| RtfTokenizer_ReadAllTokens | LargeFontTable | 77.4 | 92.3 | +19.3% |
+| RtfTokenizer_ReadAllTokens | LargeBinary | 4,393.7 | 35,272.0 | +702.8% |
+| RtfToText | WordDocument | 25.0 | 27.3 | +9.2% |
+| RtfToText | UnicodeDocument | 30.7 | 34.0 | +10.7% |
+| RtfToText | EncapsulatedHtml | 37.0 | 41.2 | +11.4% |
+| RtfToText | DeepNesting | 18.8 | 25.7 | +36.7% |
+| RtfToText | DeepFormattedNesting | 21.5 | 24.7 | +14.9% |
+| RtfToText | LargeFontTable | 49.0 | 63.5 | +29.6% |
+| RtfToText | LargeBinary | 4,074.9 | 33,625.2 | +725.2% |
+| RtfToHtml_Render | WordDocument | 18.6 | 19.4 | +4.3% |
+| RtfToHtml_Render | UnicodeDocument | 27.5 | 29.7 | +8.0% |
+| RtfToHtml_Render | EncapsulatedHtml | 27.3 | 35.1 | +28.6% |
+| RtfToHtml_Render | DeepFormattedNesting | 21.1 | 23.8 | +12.8% |
+| RtfToHtml_Extract | EncapsulatedHtml | 26.3 | 25.4 | -3.4% |
+| HtmlToHtml | ExtractedHtml | 68.5 | 59.9 | -12.6% |
+
+None of the 19 RTF-containing cases crossed a 5% median-throughput regression
+screen. Tokenizer medians improved by 19-80% on nonbinary documents and about
+8x on the binary document. This is not a statistical confidence claim: the
+shared Windows host showed substantial variability. For example, the unchanged
+HTML-only control ranged from 62.8-99.3 MiB/s before and 40.0-85.4 MiB/s after;
+its median fell 12.6%. Small deltas, including the extraction/rewrite result,
+need longer measurements on a quiet host before drawing stronger conclusions.
+
+The direct-engine API has no pre-refactor counterpart. Its new baselines from
+the same seven runs are below; these include explicit input/EOF handling and
+owned-token destruction, but no reader-buffer allocation or input-staging copy.
+
+| Document | Engine MiB/s | Allocations | Allocated bytes |
+| --- | ---: | ---: | ---: |
+| WordDocument | 87.2 | 89,836 | 767,495 |
+| UnicodeDocument | 49.3 | 159,730 | 180,646 |
+| EncapsulatedHtml | 92.6 | 83,193 | 811,885 |
+| DeepNesting | 90.6 | 3 | 36 |
+| DeepFormattedNesting | 31.7 | 190,650 | 190,683 |
+| LargeFontTable | 86.2 | 103,513 | 642,909 |
+| LargeBinary | 51,399.0 | 8 | 63 |
+
+Allocation counts and cumulative allocated bytes for all 20 original operations
+exactly match the recorded pre-refactor allocation baseline. Each direct-engine
+case removes one 4096-byte reader allocation; owned token payloads still
+allocate as before. Optimizations keep positions out of intermediate scanner
+results, give group braces a short path, copy ASCII control-name runs in bulk,
+and use bulk newline searches while skipping binary data. Recovery rules,
+diagnostic budgets, token ownership, and bounded lexical storage are preserved.
 
 #### Address, codec/filter, and message benchmarks
 

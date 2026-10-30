@@ -30,6 +30,18 @@ fn read_all_tokens(case: &Workload) -> (usize, usize, bool) {
     workloads::read_all_tokens(case)
 }
 
+#[metabench::benchmark(READ_ENGINE, "rtf", "RtfTokenizerEngine_ReadAllTokens")]
+#[bench::WordDocument(&prepare("WordDocument"))]
+#[bench::UnicodeDocument(&prepare("UnicodeDocument"))]
+#[bench::EncapsulatedHtml(&prepare("EncapsulatedHtml"))]
+#[bench::DeepNesting(&prepare("DeepNesting"))]
+#[bench::DeepFormattedNesting(&prepare("DeepFormattedNesting"))]
+#[bench::LargeFontTable(&prepare("LargeFontTable"))]
+#[bench::LargeBinary(&prepare("LargeBinary"))]
+fn read_all_tokens_engine(case: &Workload) -> (usize, usize, bool) {
+    workloads::read_all_tokens_engine(case)
+}
+
 #[metabench::benchmark(TO_TEXT, "rtf", "RtfToText")]
 #[bench::WordDocument(&prepare("WordDocument"))]
 #[bench::UnicodeDocument(&prepare("UnicodeDocument"))]
@@ -71,6 +83,9 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         group.bench_function(BenchmarkId::new(READ.benchmark_name(), name), |b| {
             b.iter(|| read_all_tokens(&case));
         });
+        group.bench_function(BenchmarkId::new(READ_ENGINE.benchmark_name(), name), |b| {
+            b.iter(|| read_all_tokens_engine(&case));
+        });
         group.bench_function(BenchmarkId::new(TO_TEXT.benchmark_name(), name), |b| {
             b.iter(|| to_text(&case));
         });
@@ -95,5 +110,5 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
 
 metabench::main!(
     criterion = criterion_benchmarks,
-    benchmarks = [READ, TO_TEXT, TO_HTML, EXTRACT, REWRITE]
+    benchmarks = [READ, READ_ENGINE, TO_TEXT, TO_HTML, EXTRACT, REWRITE]
 );
