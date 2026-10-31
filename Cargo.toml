@@ -59,6 +59,15 @@ name = "message"
 harness = false
 
 [[bench]]
+name = "tnef"
+harness = false
+
+[[bench]]
+name = "tnef_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
 name = "base64_metabench"
 harness = false
 required-features = ["bench-metabench"]

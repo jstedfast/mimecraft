@@ -26,6 +26,7 @@ MimeKit. The crate is not configured for publication.
 - [Character sets](#character-sets)
 - [Content-Type and Content-Disposition](#content-type-and-content-disposition)
 - [Scope and compatibility](#scope-and-compatibility)
+- [TNEF attributes](#tnef-attributes)
 - [Acceleration](#acceleration)
 - [Development](#development)
 - [Regenerating HTML entities](#regenerating-html-entities)
@@ -39,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | The reader and TNEF-to-MIME conversion are not ported. An initial implementation and representative fixture-based benchmarks are prerequisites for a reader sans-I/O refactor; there is no Rust TNEF baseline yet. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Message/attachment models, detached embedded readers, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection, date, and recursive-reader benchmark baselines cover the implemented layers. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -49,9 +50,11 @@ Rust API, ownership, error-handling, and charset differences.
 
 The queued performance work is:
 
-1. Port the TNEF reader, add representative benchmark workloads, and record its
-   I/O-coupled baseline. The current upstream checkout has no TNEF benchmark class.
-2. Refactor that reader to sans-I/O only after its baseline is available.
+1. Extend the TNEF reader with the remaining value/model interpretations,
+   adding applicable benchmark coverage. The current upstream checkout has no
+   TNEF benchmark class; the raw-reader and property workloads are original.
+2. Refactor the TNEF reader to sans-I/O only against a preserved I/O-coupled
+   baseline covering the behavior being changed.
 3. Investigate header-collection preallocation at reader/parser call sites.
    This remains deferred; `HeaderList::with_capacity` and pre-sized indexing
    when constructing a list from a vector already exist.
@@ -8801,6 +8804,285 @@ Content-Type components, explicit size bounds, and Rust ownership instead of
 change events. Parameter edits preserve historical parse diagnostics separately
 from the current decoded values.
 
+## TNEF attributes
+
+`mimecraft::tnef::TnefReader<R: Read>` is an initial synchronous attribute reader,
+not a TNEF message model or converter. It ports attribute framing and raw-value
+behavior from MimeKit's `Tnef/TnefReader.cs`, `TnefReaderStream.cs`, tag/type/level
+definitions, and the additive checksum arithmetic from `TnefChecksum.cs`.
+Applicable rationale comments are retained, adapted to Rust buffering, borrowing,
+and bounded allocation. The safe checksum uses wider, bounded scalar sums that
+the compiler can vectorize; dedicated upstream SIMD checksum kernels are not
+ported.
+
+Construction performs no I/O. `read_next` exposes a full wire tag, level,
+declared length, and 64-bit header offset without allocating a value. Unknown
+tags and levels are retained. The reader owns 4 KiB of read-ahead; `position`
+counts consumed bytes rather than physical source reads, and `into_parts`
+returns the source plus unread lookahead for lossless replay.
+
+`open_value` returns an exclusively borrowed, bounded `Read` adapter.
+Dropping it performs no I/O; the next parent advance drains any remaining bytes
+and validates the two-byte checksum. Bytes returned before that advance are
+provisional, not already checksum-verified. Skipping still checksums every byte.
+`read_value_bytes` and `read_value_string` claim a value once. `read_value_i32`
+supports signed/unsigned 16-bit and 32-bit wire types, with repeatable cached
+scalar reads and MimeKit's logged zero result for malformed short integers.
+Message-class strings retain their special interpretation despite their Word
+tag. `read_value_datetime` provides cached, checked attribute dates; MAPI
+properties can be read through the borrowed property API described below.
+
+The initial charset is Windows-1252 unless a supported explicit codepage is
+configured. A usable nonzero OEM codepage applies before its value is consumed;
+zero leaves the charset unchanged, while unsupported OEM values report an issue
+and retain the prior charset. Existing mimecraft charset support determines
+which codepages are available. Strings strip trailing NUL bytes and use
+replacement decoding. A non-multivalued Long InternetCodepage property in
+message-level MAPI properties supplies the fallback when no usable OEM codepage
+has been seen. Unsupported, nonpositive, and UTF-16/32 fallback hints are ignored
+as in MimeKit. This affects subsequent String8 reads, not strings already
+returned; retrospective decoding of preceding bodies belongs to the unported
+message model.
+
+The `*_with_logger` methods accept a fallible closure or `TnefComplianceLogger`.
+They report signature/version/codepage/message-class errors, unknown or
+misleveled attributes, message-after-attachment ordering, impossible lengths,
+checksum mismatches, short interpreted values, invalid dates, truncation, and allocation
+limits. Reports include logical offsets and the current attribute/property tags
+when available. Property counts, lengths, types, and named-property kinds have
+their own diagnostics; parent checksum reports never retain stale property tags.
+The copied options can cap reports per violation; zero is unlimited, and calls
+without a logger do not consume the reporting budget. Logger/source errors
+retain the original `io::Error` and fault the reader; subsequent operations
+cannot resume partial state. Source `Interrupted` is retried before progress.
+Malformed signatures and impossible signed lengths end iteration; truncation
+is reported once and preserves already-available raw bytes. Repeated EOF calls
+perform no further source reads.
+
+Owned-value reads default to a 32 MiB per-value and 64 MiB aggregate logical
+byte limit. Streaming/skipping value payloads and fixed-width reads do not consume
+that budget; named-property strings are always collected and do consume it, even
+when the property value is skipped. Large declared lengths allocate at most 64 KiB before actual bytes
+arrive; missing bytes are refunded after truncation. These are collected-byte
+limits, not exact allocator-capacity or decoded-UTF-8 memory limits. Unlike
+MimeKit's empty-value limit fallback, a limit failure returns a typed error
+without claiming or consuming the value, permitting a streaming retry.
+Unsupported explicit initial codepages likewise return construction errors
+rather than silently choosing another charset.
+
+`tests/tnef.rs` adapts attribute-level cases from `TnefReaderTests`,
+`TnefReaderRobustnessTests`, `TnefAttributeLevelTests`, `TnefReaderStreamTests`,
+`TnefChecksumTests`, and `TnefStreamOffsetTests`. All 19 upstream `.tnef` fixtures
+are copied byte-for-byte under `tests/data/tnef`, covered by the existing
+`tests/data/LICENSE-MimeKit`. The upstream reference revision is
+`7f82940072e5b56b2f108744acb87cc2e1a6a5f8`.
+Their raw framing, value slices, and checksums
+are checked independently, with identical recovery across one-byte, seven-byte,
+and full refills, streaming, collection, and skipping. Additional coverage
+exercises every truncation of a mixed-attribute stream, checksum block/tail
+boundaries, partial stream drops, ownership claims, logger/source failures,
+resource limits, and preserved read-ahead. The upstream 2.6 GB offset test is
+ported as an explicit ignored streaming test, without allocating its payloads:
+
+```text
+cargo test --test tnef --test tnef_properties --test tnef_benchmarks
+cargo test --release --test tnef offsets_do_not_wrap_past_two_gigabytes -- --ignored
+```
+
+### MAPI properties and recipient rows
+
+`open_properties` claims a `MAPI_PROPERTIES`, `ATTACHMENT`, or `RECIPIENT_TABLE`
+attribute and returns `TnefPropertyReader`. The `_with_logger` variant borrows
+the logger for the same lifetime. Both construction and drop perform no I/O;
+dropping does not permit reopening or switching the attribute to raw reads.
+Parent advance skips the remainder and checks its checksum.
+
+`read_next_property` selects the first value automatically. Additional values
+use `read_next_value`; a zero-value property still has metadata but no selected
+value. Tables first require `read_next_row`. Advancing automatically skips
+unread values/properties, including DWORD padding. Invalid counts are bounded
+by the containing attribute; multivalued Null has zero values because its
+zero-width representation cannot bound a count. Unlocatable structures stop
+the inner reader, while the parent can still skip to the next attribute.
+
+`TnefPropertyTag` retains raw identifier/type bits without requiring a property
+catalog. Named properties retain their property-set GUID and numeric or Unicode
+name. Unknown name kinds are diagnosed and retained as `TnefName::Unknown`,
+rather than MimeKit's fabricated ID zero. An oversized name returns a limit
+error and stops inner traversal, unlike upstream's empty-name fallback.
+
+`read_value` returns native `TnefValue` variants: cached fixed-width values,
+String8/Unicode text, binary, or object bytes. `read_value_bytes` and `open_value`
+provide raw variable values without padding; value-limit errors permit a
+streaming retry. Object interface-GUID prefixes remain part of the bytes.
+Unicode ignores an odd final byte, strips complete trailing UTF-16 NUL units,
+and replaces invalid surrogates. Booleans use the low sixteen bits only.
+GUIDs retain Windows wire byte order, not network-order UUID bytes. Currency
+retains the exact integer in units of 1/10000; AppTime and SysTime retain their
+wire numbers. Explicit checked date conversion and eager date-range diagnostics
+are described below.
+
+`tests/tnef_properties.rs` adapts the applicable native-value, count, text,
+name/tag, codepage, and robustness cases from MimeKit's property-reader suites.
+Additional coverage exercises row/value skipping, partial stream drops,
+shared name/value budgets, source/logger failures, diagnostic context, missing
+padding, every physical truncation of a mixed-property stream, and huge declared
+values without upfront huge allocation. All 19 copied fixtures are traversed
+across one-byte, seven-byte, and full refills with collection, streaming, and
+skipping. Corpus comparisons check chunk/mode consistency, not independent
+upstream model/conversion parity; generated benchmark inputs independently check
+metadata, native values, raw bytes, and checksums against their source models.
+
+### Owned MAPI properties and sets
+
+`TnefProperty` snapshots retain the tag, optional name, original offset, and a
+read-only slice of native values after reader advancement or destruction.
+`value_count` reports values actually read, not a malformed declared count.
+`value()` returns the single value, or `None` for empty or multivalued properties;
+`Some(TnefValue::Null)` is distinct from absence. Dates, currency, GUIDs, and
+object data retain the native representations above; no implicit coercions or
+binary-to-string decoding helpers are added.
+
+`TnefPropertySet` preserves wire order and duplicates, with indexed access,
+iteration, slice access, and consuming vector conversion. `get(tag)` matches
+the first property identifier regardless of type, so a Unicode tag also finds
+a String8 property with the same ID; `get_by_id` makes this matching explicit.
+`get_named` matches the exact GUID and numeric or case-sensitive text name.
+The first match wins even without values. Named numerical property identifiers
+are local to their original stream; use the GUID/name descriptor across streams.
+
+`read_property` collects the current property before its variable values have
+been claimed or its cursor advanced beyond the first value. Cached fixed reads
+do not prevent collection. A nominally single-valued property collects only its
+first value, even when a malformed count advertises more. `read_property_set`
+collects properties after the current selection, or all if none was selected.
+For recipient tables it collects only the selected row; without one it is empty.
+`read_rows_as_property_sets` collects remaining rows, skipping unread properties
+of the current row, and returns an empty vector for non-table attributes.
+Parent advance still verifies the attribute checksum; owned values are not
+implicitly checksum-verified.
+
+Value, property, and row vectors grow with actual reads, never unchecked
+advertised counts. The existing logical-byte budgets remain shared across
+properties and rows, including wire name bytes but excluding cloned metadata,
+fixed values, and vector overhead. Collection is not transactional: an error
+discards the partial result without rewinding or refunding earlier collections.
+Unlike upstream's empty-success fallback, oversized values return a limit error
+and remain available for streaming/skipping. Malformed or truncated framing
+can instead return a partial snapshot with its original metadata and diagnostics.
+Source/logger failures remain terminal.
+
+`tests/tnef_properties/sets.rs` ports applicable `TnefPropertySetTests` cases:
+native multivalues, empty values, lifetime, ordered duplicate/name lookups,
+cursor claims, remaining-property/row selection, malformed single-value counts,
+partial multivalues, large nonseekable data, and truncated binary prefixes.
+It also checks shared limits across fifty 100 KiB values, recoverable collection
+errors, and allocation growth with bogus counts and 5,000 actual values.
+Existing native-scalar and source-failure tests also exercise snapshots/sets.
+All 19 fixtures compare owned collections against native cursor reads and
+diagnostics across one-byte, seven-byte, and full refills, without pretending
+to cover upstream embedded-message recursion or converted models.
+
+### TNEF date interpretation
+
+`TnefDateTime` represents Gregorian years 1 through 9999 with exact
+100-nanosecond ticks and checked calendar/time accessors. `TnefDateTimeKind`
+distinguishes UTC from unspecified time; equality includes the kind.
+FILETIME conversion preserves every tick since January 1, 1601 UTC, without
+machine-local conversion. OLE Automation conversion matches .NET's millisecond
+rounding and negative fractional-day interpretation, including rounded boundary
+cases. AppTime and legacy attribute dates remain unspecified, not assumed UTC.
+Existing checked calendar helpers are reused without adding a dependency.
+
+Attribute `read_value_datetime` and its logger variant decode the first seven
+16-bit fields, ignoring weekday as MimeKit does. Repeated reads cache either
+the date or its conversion error; the parent skips trailing bytes normally.
+Short declared values report `InvalidAttributeValue`; physical truncation reports
+`TruncatedStream`. Complete invalid calendar components report `InvalidDate`.
+Invalid/incomplete dates return explicit `TnefReadError::InvalidDate` errors,
+not MimeKit's minimum-date fallback, and do not fault the reader or reuse a
+previous attribute's date.
+
+MAPI fixed-value selection validates AppTime/SysTime even during skipping,
+reporting `InvalidDate` at the original value offset. Raw floating-point bits
+and integers remain available through native reads and owned snapshots.
+`TnefPropertyReader::read_value_datetime` converts the cached value without
+repeating diagnostics; `TnefValue::to_datetime` supplies standalone checked
+conversion without a logger. Conversion errors remain recoverable, whereas
+source/logger failures still fault the reader. Date reports share the existing
+per-violation limits and property context; fixed-width date reads consume no
+owned-byte budget.
+
+`tests/tnef_properties/dates.rs` adapts upstream coercion and robustness cases,
+including UTC FILETIME, invalid AppTime/SysTime, and short legacy dates.
+Additional coverage checks 25 exact .NET OLE Automation bit/tick vectors,
+Gregorian component boundaries across every supported year, 100-nanosecond
+precision, invalid/nonfinite values, repeated reads, raw-value preservation,
+claim rules, multivalues, report caps/offsets, and source/logger failures.
+The reference vectors include the lower-bound rounding edge that reaches
+0099-12-31 and rounded overflow beyond year 9999. Every truncation of a legacy
+date is exercised; all 19 fixtures compare dates and diagnostics across one-byte,
+seven-byte, and full refills. These are reader/conversion checks, not parity
+claims for unported message models.
+
+### Embedded TNEF readers
+
+`TnefPropertyReader::is_embedded_message` recognizes AttachData Object values
+by their IMessage interface IID, even when AttachMethod appears later in wire
+order. A nonzero different IID is not an embedded message. When the IID is
+absent/zero, a previously selected AttachMethod of EmbeddedMessage permits
+Object or Binary values. AttachRenderData resets the method for a new attachment.
+Object-IID lookahead does not claim or consume the prefix; native bytes and
+snapshots still retain it. Recognition does not validate the inner signature.
+
+`open_embedded_message` returns an exclusively borrowed `TnefEmbeddedReader`.
+Its type-erased bounded source permits recursive traversal without indefinitely
+nested generic source types, boxing the source, or buffering the whole payload.
+Each child has its own 4 KiB read-ahead. Opening and dropping perform no I/O;
+the first advance skips the 16-byte IID and reads the nested header. No child
+can read beyond its containing property into padding or following values.
+Parent advancement while the child is live is prevented by borrowing, not
+runtime generation checks. Dropping a partial child leaves the parent able to
+skip the remaining value/padding, but does not verify unread child checksums.
+Parent checksums remain provisional until the parent advances.
+
+Children inherit the current charset, copied options, and property reader's
+logger. Child codepage changes do not alter the parent. Diagnostic, attribute,
+property, and consumed-position offsets refer to the outermost stream;
+`depth()` and each diagnostic's `depth` identify the nesting level. Root depth
+is zero and `max_nesting_depth` defaults to 32. Exceeding it reports
+`NestingTooDeep` and returns `NestingLimitExceeded` without claiming the value.
+This explicitly replaces MimeKit's empty-reader fallback, allowing raw streaming
+or skipping instead. Invalid signatures and truncated nested streams retain
+the reader's normal diagnostics/recovery behavior rather than becoming models.
+
+Owned-byte and per-violation report budgets are shared across parents, siblings,
+and deeper descendants, including allowances already spent before opening the
+first child. Collected property names consume the shared byte budget even when
+values are skipped; IID lookahead and streaming do not. Shared budget/fault
+state and inherited logger handles are allocated lazily only when children are
+opened. Source/logger/arithmetic errors fault the entire borrowed tree, even
+after the child is dropped. Ordinary root readers remain Send/Sync when their
+sources are; borrowed property/embedded readers with inherited loggers are not.
+
+`tests/tnef_properties/embedded.rs` adapts `TnefNestingTests` and recursive
+property-set corpus traversal. Eighteen tests cover IID/type/method precedence,
+attachment resets, raw-prefix retention, absolute offsets, depth 1/32 boundaries,
+short IIDs and invalid signatures, shared byte/name/report limits, charset
+inheritance, source interruptions/failures, logger failures, claim rules,
+multivalues, and partial-child/padding recovery. Every physical truncation of a
+generated nested stream is compared across read sizes. All 19 fixtures recurse
+with identical attribute offsets/depths and diagnostics across one-byte,
+seven-byte, and full refills. A compile-fail doctest checks the parent borrow.
+These tests do not claim detached-reader or message-model parity.
+
+Detached embedded readers, numeric cross-type coercions,
+the full property-name catalog,
+attachment/message models, MIME conversion, writing, async, and sans-I/O are deferred.
+Existing conversion snapshots are not presented as reader reference outputs.
+The benchmark sections record separate raw, property, collection, date, and
+recursive-reader baselines.
+
 ## Acceleration
 
 The default `simd` feature selects AVX2 or SSSE3 on x86/x86-64 and NEON on
@@ -9120,9 +9402,8 @@ before/after comparisons, and rerun the old revision on the same machine to
 control for environmental noise. The standalone harness is intentionally short;
 use `--criterion` on the metabench target for longer statistical timing.
 The RTF tokenizer's sans-I/O refactor and fresh comparison are recorded below.
-The TNEF reader is not ported yet. It needs an initial implementation,
-representative benchmark workloads, and an I/O-coupled baseline before its
-planned sans-I/O refactor.
+The TNEF attribute and property readers now have separate I/O-coupled baselines
+recorded below; their sans-I/O refactor remains deferred.
 
 #### RTF sans-I/O comparison
 
@@ -9267,19 +9548,238 @@ compliance reporting). No library APIs are exposed solely for benchmarking,
 and full MIME-reader validation is not mislabeled as isolated validator work.
 The existing MIME benchmark target continues to omit upstream async and legacy
 parser variants. There is no TNEF benchmark class in this upstream checkout;
-representative workloads and a pre-sans-I/O baseline remain queued after the
-initial TNEF reader port.
+the raw-reader and property workloads below are original rather than an upstream benchmark
+port.
+
+#### TNEF raw attribute reader
+
+```text
+cargo bench --bench tnef
+cargo bench --features bench-metabench --bench tnef_metabench -- --allocations
+cargo bench --features bench-metabench --bench tnef_metabench -- --test
+```
+
+`benches/support/tnef.rs` supplies six workloads shared by the standalone,
+Criterion, allocation, and integration-test harnesses. `Body`, `Attachments`,
+and `Christmas` use the unchanged upstream fixtures (7,769, 98,184, and 821,421
+bytes). `ManySmall` generates 4,096 32-byte Owner values; `LargeValue` generates
+one 1 MiB Owner value. `ShortReads` reuses `Attachments` through a source capped
+at seven bytes per read.
+
+Each workload has `Skip`, `Stream`, and `Collect` operations, for 18 identities.
+All construct a fresh synchronous reader and verify checksums; streaming uses
+a reused 4 KiB stack buffer, and collection includes value allocation and
+destruction. The benchmark does not parse MAPI properties, decode strings,
+convert to MIME, log issues, or measure async/sans-I/O. Source bytes are cached
+in memory, not read from disk during timing. Independent framing/value/checksum
+checks run outside measurement. Throughput counts original TNEF bytes.
+
+The initial reference uses Rust 1.99.1 on the Intel Core Ultra 7 268V,
+Windows x86-64, default SIMD features, `target-cpu=x86-64-v3`, release fat LTO,
+and one codegen unit. Three serial processes were pinned to logical CPU 2
+(affinity mask `0x4`), without concurrent benchmark/build work from this session.
+Each performs three warm-ups and five samples of at least 100 ms per case.
+The table gives the median of three process medians in MiB/s:
+
+| Workload | Skip | Stream | Collect | Collect allocations | Collect allocated bytes |
+|---|---:|---:|---:|---:|---:|
+| Body | 14,701.3 | 11,023.1 | 3,929.0 | 8 | 7,675 |
+| Attachments | 23,255.6 | 22,929.3 | 12,440.2 | 19 | 208,783 |
+| Christmas | 32,558.1 | 30,533.2 | 10,843.4 | 29 | 2,026,601 |
+| ManySmall | 1,997.4 | 1,683.1 | 120.2 | 4,096 | 131,072 |
+| LargeValue | 33,583.4 | 31,246.9 | 1,926.8 | 5 | 2,031,616 |
+| ShortReads | 574.2 | 631.6 | 504.1 | 19 | 208,783 |
+
+All twelve Skip/Stream allocation cases recorded zero allocations and bytes.
+Collect counts include buffer growth/reallocation, not just retained value
+length; they are not peak-memory measurements. Allocation measurements use
+the separate metabench executable, not the standalone timing executable.
+
+These shared-host timings were noisy, especially `Collect/ManySmall`
+(95.6-424.6 MiB/s across process medians). They are an exploratory reference,
+not a stable performance threshold or a comparison with MimeKit. The preserved
+standalone executable, three raw logs, summary CSV, and allocation JSON are
+in the session artifact directory `files/tnef-attribute-baseline`.
+The standalone executable's SHA-256 is
+`473AA0E7C80169D72F686E55430F9293C9125950B2AF1D21AFE9BE46FB4EE486`.
+Use contemporaneous alternating runs of that executable and the future
+sans-I/O candidate before judging regressions; do not compare a future single
+run directly with this table. A relocated metabench executable additionally
+requires `CARGO_TARGET_DIR` pointing at the original Cargo target directory.
+
+#### TNEF MAPI property reader
+
+The same `tnef` and `tnef_metabench` commands also run 30 property identities
+from `benches/support/tnef_properties.rs`; the original 18 raw identities and
+workloads are unchanged. Metabench uses the separate `tnef-properties` group.
+The original eighteen reader identities are described here; twelve additional
+owned-collection identities are described below.
+`Fixed` generates 1,024 Long properties; `MultiValue` generates 256 properties
+with four Long values each; `Named` generates 128 Unicode-named Long properties.
+`Recipients` generates 256 rows with a Long and two Unicode strings each.
+`LargeBinary` contains one 1 MiB binary property. `ShortReads` repeats
+`Recipients` through a source limited to seven bytes per read.
+
+`Skip` navigates properties without collecting values; `Stream` reads raw
+variable values through a reused 4 KiB buffer; `Decode` collects native values
+and decodes strings. Fixed values are cached during navigation in every mode.
+Named metadata is parsed/allocated in every mode. All modes construct fresh
+readers, traverse properties/rows, and verify attribute checksums; input
+generation and correctness checks are outside measurement. These are reader
+workloads, not owned-model, conversion, embedded-reader, or async measurements.
+Throughput counts complete generated TNEF bytes.
+
+Using the same compiler, CPU flags, release profile, logical CPU 2 affinity,
+three serial processes, and five 100 ms samples per process as the raw baseline
+(with `bench-metabench` enabled), the medians of process medians were:
+
+| Workload | Skip MiB/s | Stream MiB/s | Decode MiB/s | Decode allocations | Decode allocated bytes |
+|---|---:|---:|---:|---:|---:|
+| Fixed | 226.5 | 180.1 | 182.7 | 0 | 0 |
+| MultiValue | 223.4 | 169.0 | 172.8 | 0 | 0 |
+| Named | 265.7 | 254.1 | 256.5 | 384 | 6,180 |
+| Recipients | 679.0 | 577.8 | 223.2 | 1,536 | 34,858 |
+| LargeBinary | 50,610.0 | 43,354.1 | 3,104.7 | 5 | 2,031,616 |
+| ShortReads | 379.2 | 301.2 | 157.9 | 1,536 | 34,858 |
+
+Skip/Stream allocate nothing except for `Named`, which has the same 384
+allocations/6,180 bytes in each of the original three modes. Counts include buffer growth and decoded
+strings, not peak memory. The original raw allocation counts are unchanged.
+Shared-host timing remains exploratory: for example, `Skip/ShortReads` ranged
+from 329.3 to 387.3 MiB/s. These are not comparisons with MimeKit or regression
+thresholds. Use contemporaneous alternating runs for a future sans-I/O change.
+
+Executables, three timing logs, the per-case min/median/max CSV, and allocation
+JSON are preserved in `files/tnef-property-baseline` in the session artifacts.
+The standalone executable's SHA-256 is
+`D4117F13EE329E92440A50361E730C5F25D867FF0052BCDD8F21D66FEE0DA475`.
+
+#### TNEF owned property collections
+
+The same six generated property workloads now also run `Property` and `Set`.
+`Property` collects and destroys each native snapshot during cursor traversal.
+`Set` retains the full property set, or all recipient rows and their sets, until
+collection completes. Both include value/name cloning where applicable and
+allocation/destruction of owned storage. Inputs, original Skip/Stream/Decode
+identities, and raw-attribute workloads are unchanged. Collection correctness
+checks compare tags, names, and all native values against the generator's
+independent source model outside measurement.
+
+Using the same compiler/flags/profile, logical CPU 2 affinity, and three serial
+processes with five 100 ms samples each, the median process medians were:
+
+| Workload | Property MiB/s | Set MiB/s | Property allocations | Property allocated bytes | Set allocations | Set allocated bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| Fixed | 89.3 | 80.3 | 1,024 | 32,768 | 1,033 | 196,288 |
+| MultiValue | 102.5 | 94.0 | 512 | 40,960 | 519 | 81,600 |
+| Named | 189.2 | 184.4 | 640 | 11,702 | 646 | 31,862 |
+| Recipients | 180.0 | 165.4 | 2,304 | 59,434 | 2,567 | 153,546 |
+| LargeBinary | 2,689.5 | 2,665.8 | 6 | 2,031,648 | 7 | 2,031,968 |
+| ShortReads | 134.0 | 126.2 | 2,304 | 59,434 | 2,567 | 153,546 |
+
+Allocation counts include incremental vector growth and cloned name metadata;
+bytes are cumulative allocations, not peak retained memory. These operations
+do more work than individual-value Decode, so this is an initial collection
+baseline, not a regression comparison. Shared-host variability remains visible:
+`Property/LargeBinary` ranged from 2,382.2 to 2,874.3 MiB/s. Future changes should
+use contemporaneous alternating runs, not a single comparison with these numbers.
+
+Executables, three timing logs, min/median/max CSV, smoke results, and allocation
+JSON are preserved in `files/tnef-property-sets-baseline` in session artifacts.
+The standalone executable's SHA-256 is
+`56B327F44F7986672BAAD1C061F2DFFE75D367756FA805E72A67E7BBEC1F4026`.
+Both earlier raw/property baseline executables and results are retained.
+
+#### TNEF date interpretation
+
+Five additional `tnef-dates/Read` identities share generated workloads in
+`benches/support/tnef_dates.rs`. `Legacy` reads 512 date attributes; `AppTime`
+and `SysTime` each read 1,024 scalar properties. `MultiValue` reads 256
+four-value properties alternating AppTime and SysTime; `ShortReads` uses the
+same input with seven-byte source reads. AppTime includes positive/negative
+fractional dates; SysTime includes single-tick increments.
+
+Every operation creates a fresh reader and includes date validation, typed
+conversion, checksums, and a logger rejecting unexpected diagnostics. Inputs
+and independent expected ticks/kinds are generated and checked outside timing.
+Throughput counts complete TNEF input bytes, not date-value bytes alone.
+These are initial date-reader baselines, not comparisons with MimeKit.
+
+With the same compiler/flags/profile and logical CPU 2 affinity as above,
+three serial processes each performed three warm-ups and five samples of at
+least 100 ms per case. Median process medians and separate allocation results:
+
+| Workload | Read MiB/s | Allocations | Allocated bytes |
+|---|---:|---:|---:|
+| Legacy | 814.4 | 0 | 0 |
+| AppTime | 243.1 | 0 | 0 |
+| SysTime | 306.5 | 0 | 0 |
+| MultiValue | 293.2 | 0 | 0 |
+| ShortReads | 246.8 | 0 | 0 |
+
+All 53 smoke identities passed. The previous 48 identities retained identical
+allocation counts/bytes. Shared-host timings remain exploratory: `Legacy`
+ranged from 717.6 to 816.7 MiB/s across process medians. Use contemporaneous
+alternating runs for future regression comparisons, not these figures alone.
+
+Executables, three timing logs, min/median/max CSV, smoke results, and allocation
+JSON are preserved in session artifacts under `files/tnef-date-baseline`.
+The standalone executable's SHA-256 is
+`BC75AE1753B08E4CE52B55AB1C77D0FB8A955A7DE7D2847B9FCF1A508F0B1783`.
+All earlier raw/property/collection baseline executables and results are retained.
+
+#### TNEF embedded readers
+
+Four `tnef-embedded/Read` identities use generated inputs from
+`benches/support/tnef_embedded.rs`. `Single` opens one child with a 32 KiB body;
+`Deep` nests it eight levels. `Siblings` opens sixteen children with 2 KiB bodies
+in one property-bearing attribute. `ShortReads` repeats `Deep` with source reads
+capped at seven bytes. All cases stream 32 KiB of body data through fixed
+4 KiB buffers. Message/attribute counts and body lengths/sums are checked against
+the generator's independent source model outside measurement.
+
+Each operation constructs fresh readers, recursively opens children, streams
+bodies, verifies checksums at every depth, and destroys readers/shared state.
+An inherited logger rejects unexpected diagnostics. Input generation is excluded;
+throughput counts the complete outer TNEF input, not nested bytes repeatedly.
+These are new recursive-reader workloads, not comparisons with MimeKit or the
+nonrecursive operations.
+
+Using the same compiler/flags/profile, logical CPU 2 affinity, three serial
+processes, and five samples of at least 100 ms after three warm-ups, the median
+process medians and separate allocation measurements were:
+
+| Workload | Read MiB/s | Allocations | Allocated bytes |
+|---|---:|---:|---:|
+| Single | 13,329.9 | 2 | 256 |
+| Deep | 4,671.7 | 9 | 536 |
+| Siblings | 6,372.2 | 2 | 256 |
+| ShortReads | 115.7 | 9 | 536 |
+
+Allocations are shared budget/fault state and logger handles, not collected body
+storage; counts/bytes are cumulative, not peak memory. All 57 smoke identities
+passed, and the previous 53 allocation identities retained identical counts and
+bytes. Shared-host timing remains exploratory: `Single` ranged from 12,695.7 to
+13,536.3 MiB/s. Use contemporaneous alternating runs for future comparisons.
+
+Executables, three timing logs, min/median/max CSV, smoke results, and allocation
+JSON are preserved in session artifacts under `files/tnef-embedded-baseline`.
+The standalone executable's SHA-256 is
+`0DC8265BB9B8B29164082C0881768279054DCD7F8A89EEE3A4BE5E99E141F355`.
+All preceding raw/property/collection/date baseline artifacts remain preserved
+for the deferred sans-I/O work.
 
 #### Optional metabench targets
 
-The `base64`, `mime_reader`, `html`, `rtf`, `headers`, `filters`, and `message`
+The `base64`, `mime_reader`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
 targets remain available without any benchmark framework. Separate targets
 with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 27 Base64, 27 MIME, twelve HTML, twenty RTF,
-84 address/RFC 2047, 31 codec/filter, and three message-preparation cases.
+84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
+30 TNEF-property, five TNEF-date, and four embedded-TNEF cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

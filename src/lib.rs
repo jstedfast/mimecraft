@@ -439,6 +439,7 @@ pub mod text;
 mod text_body;
 mod text_part;
 mod text_rfc822_headers;
+pub mod tnef;
 mod unicode_normalization;
 mod unstructured_header_format;
 pub mod utils;
