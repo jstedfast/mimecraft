@@ -156,6 +156,26 @@ fn assert_splits(wire: &[u8], format: MimeEventFormat, options: MimeEntityParseO
 }
 
 #[test]
+fn repeated_parameters_and_disposition_survive_every_split() {
+    let wires: &[&[u8]] = &[
+        b"X-Prefix: \xc3\xa9\r\nContent-Type \t: text/plain; charset=utf-8;\r\n\
+\t(comment; charset=x)\r\n\t(\xc3\xa9) CHARSET=us-ascii; charset=iso-8859-1\r\n\r\nbody\r\n",
+        b"Content-Type: text/plain\r\nContent-Type: text/plain; name=a; name=b\r\n\
+Content-Disposition: attachment; filename=a\r\n\
+Content-Disposition: inline; filename=b; filename=c\r\n\
+Content-Disposition: attachment\r\n\r\nbody\r\n",
+        b"Content-Type: multipart/mixed; boundary=a; boundary*0=b; boundary*1=c\r\n\
+Content-Disposition: attachment; filename * (x) 0 (x) * =''a; FILENAME*0=b\r\n\r\n\
+--a\r\nContent-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\nbody\r\n--a--",
+    ];
+    for wire in wires {
+        for format in [MimeEventFormat::Entity, MimeEventFormat::Message] {
+            assert_splits(wire, format, MimeEntityParseOptions::default());
+        }
+    }
+}
+
+#[test]
 fn nested_recovery_positions_and_diagnostics_are_independent_of_chunk_boundaries() {
     let wires: &[&[u8]] = &[
         b"Subject: root\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n\

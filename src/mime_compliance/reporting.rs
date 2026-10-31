@@ -6,7 +6,8 @@ use std::io;
 use super::encoding::EncodingValidator;
 use super::{
     Budget, MimeComplianceIssue, MimeComplianceLogger, MimeComplianceOptions,
-    MimeCompliancePositionKind as PositionKind, MimeComplianceViolation as Violation,
+    MimeCompliancePositionKind as PositionKind, MimeComplianceValidators as Validators,
+    MimeComplianceViolation as Violation,
 };
 use crate::{ContentEncoding, Header, HeaderId, MimeEntityKind, MimeEvent, MimePosition};
 
@@ -240,6 +241,7 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
         let mut seen = 0u32;
         let mut resent = 0u32;
         let mut content_type = None;
+        let mut content_disposition = false;
         let mut encoding = None;
         let mut mime_version = false;
         let mut end_column = 1;
@@ -357,6 +359,25 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
             if header.is_invalid() {
                 continue;
             }
+            if matches!(
+                header.id(),
+                HeaderId::ContentType | HeaderId::ContentDisposition
+            ) && self
+                .options
+                .enabled_validators
+                .contains(Validators::PARAMETERS)
+            {
+                let value = header.raw_value();
+                let (position, column) = header_byte_position(raw, start, raw.len() - value.len());
+                super::parameters::validate(
+                    value,
+                    header.id(),
+                    position,
+                    column,
+                    self.options.context,
+                    self,
+                )?;
+            }
             if message {
                 let repeated = repeated_header(header.id());
                 let index = repeated.map(|v| v as u32 - Violation::RepeatedDate as u32);
@@ -376,6 +397,17 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                 }
             }
             match header.id() {
+                HeaderId::ContentDisposition => {
+                    if content_disposition {
+                        self.issue(
+                            Violation::RepeatedContentDisposition,
+                            start,
+                            1,
+                            PositionKind::ElementStart,
+                        )?;
+                    }
+                    content_disposition = true;
+                }
                 HeaderId::ContentType => {
                     if content_type.is_some() {
                         self.issue(

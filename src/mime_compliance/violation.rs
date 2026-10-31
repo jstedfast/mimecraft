@@ -5,8 +5,9 @@ use super::{MimeComplianceCategories, MimeComplianceContext, MimeComplianceSever
 
 /// A MIME compliance defect, or notification that reporting was capped.
 ///
-/// Numeric values match MimeKit and are append-only so persisted diagnostics
-/// keep their meaning. Rust does not need MimeKit's uninitialized `None` sentinel.
+/// Numeric values match MimeKit's unreleased enum, including its renumbering in
+/// commit `3e32122`. They are not yet stable persisted identifiers.
+/// Rust does not need MimeKit's uninitialized `None` sentinel.
 /// The enum includes checks not yet implemented by the reader; see
 /// [`crate::MimeReader::read_message_with_logger`] for reporting coverage.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -37,169 +38,177 @@ pub enum MimeComplianceViolation {
     BlankHeaderContinuationLine = 11,
     /// A MIME part contained multiple Content-Type headers.
     RepeatedContentType = 12,
+    /// A MIME part contained multiple Content-Disposition headers.
+    RepeatedContentDisposition = 13,
     /// A MIME part contained multiple Content-Transfer-Encoding headers.
-    RepeatedContentTransferEncoding = 13,
+    RepeatedContentTransferEncoding = 14,
     /// The message contained more than one Date header field.
-    RepeatedDate = 14,
+    RepeatedDate = 15,
     /// The message contained more than one From header field.
-    RepeatedFrom = 15,
+    RepeatedFrom = 16,
     /// The message contained more than one Sender header field.
-    RepeatedSender = 16,
+    RepeatedSender = 17,
     /// The message contained more than one Reply-To header field.
-    RepeatedReplyTo = 17,
+    RepeatedReplyTo = 18,
     /// The message contained more than one To header field.
-    RepeatedTo = 18,
+    RepeatedTo = 19,
     /// The message contained more than one Cc header field.
-    RepeatedCc = 19,
+    RepeatedCc = 20,
     /// The message contained more than one Bcc header field.
-    RepeatedBcc = 20,
+    RepeatedBcc = 21,
     /// The message contained more than one Message-Id header field.
-    RepeatedMessageId = 21,
+    RepeatedMessageId = 22,
     /// The message contained more than one In-Reply-To header field.
-    RepeatedInReplyTo = 22,
+    RepeatedInReplyTo = 23,
     /// The message contained more than one References header field.
-    RepeatedReferences = 23,
+    RepeatedReferences = 24,
     /// The message contained more than one Subject header field.
-    RepeatedSubject = 24,
+    RepeatedSubject = 25,
     /// The message contained more than one Return-Path header field.
-    RepeatedReturnPath = 25,
+    RepeatedReturnPath = 26,
     /// A block of resent header fields contained more than one Resent-Date header field.
-    RepeatedResentDate = 26,
+    RepeatedResentDate = 27,
     /// A block of resent header fields contained more than one Resent-From header field.
-    RepeatedResentFrom = 27,
+    RepeatedResentFrom = 28,
     /// A block of resent header fields contained more than one Resent-Sender header field.
-    RepeatedResentSender = 28,
+    RepeatedResentSender = 29,
     /// A block of resent header fields contained more than one Resent-To header field.
-    RepeatedResentTo = 29,
+    RepeatedResentTo = 30,
     /// A block of resent header fields contained more than one Resent-Cc header field.
-    RepeatedResentCc = 30,
+    RepeatedResentCc = 31,
     /// A block of resent header fields contained more than one Resent-Bcc header field.
-    RepeatedResentBcc = 31,
+    RepeatedResentBcc = 32,
     /// A block of resent header fields contained more than one Resent-Message-Id header field.
-    RepeatedResentMessageId = 32,
+    RepeatedResentMessageId = 33,
     /// The message did not contain a Date header field.
-    MissingDate = 33,
+    MissingDate = 34,
     /// The message did not contain a From header field.
-    MissingFrom = 34,
+    MissingFrom = 35,
     /// The message did not contain a Message-Id header field.
-    MissingMessageId = 35,
+    MissingMessageId = 36,
     /// The message contained MIME header fields but no MIME-Version header field.
-    MissingMimeVersion = 36,
+    MissingMimeVersion = 37,
     /// A Content-Type header value was not valid.
-    InvalidContentType = 37,
+    InvalidContentType = 38,
     /// A Content-Transfer-Encoding header value was not valid.
-    InvalidContentTransferEncoding = 38,
+    InvalidContentTransferEncoding = 39,
     /// A Content-Transfer-Encoding header for a message/rfc822 part contained an illegal value.
-    IllegalMessageRfc822ContentTransferEncoding = 39,
+    IllegalMessageRfc822ContentTransferEncoding = 40,
     /// A Content-Transfer-Encoding header for a multipart contained an illegal value.
-    IllegalMultipartContentTransferEncoding = 40,
+    IllegalMultipartContentTransferEncoding = 41,
     /// A boundary parameter was missing from a multipart Content-Type header.
-    MissingMultipartBoundaryParameter = 41,
+    MissingMultipartBoundaryParameter = 42,
     /// A boundary parameter in a multipart Content-Type header was not valid.
-    InvalidMultipartBoundaryParameter = 42,
+    InvalidMultipartBoundaryParameter = 43,
+    /// A Content-Type header contained repeated boundary parameter declarations.
+    RepeatedBoundaryParameter = 44,
+    /// A Content-Type name or Content-Disposition filename parameter was repeated.
+    RepeatedFilenameParameter = 45,
+    /// A MIME parameter other than a boundary or filename parameter was repeated.
+    RepeatedParameter = 46,
     /// An address contained more angle brackets than the one pair that delimits an angle-addr.
-    ExcessiveAngleBracketsInAddress = 43,
+    ExcessiveAngleBracketsInAddress = 47,
     /// An address had an opening angle bracket without a closing one, or a closing bracket without an opening one.
-    UnbalancedAngleBracketsInAddress = 44,
+    UnbalancedAngleBracketsInAddress = 48,
     /// An address contained a quoted-string that was never closed.
-    UnbalancedQuotesInAddress = 45,
+    UnbalancedQuotesInAddress = 49,
     /// An address contained an unbalanced parenthesis in a comment.
-    UnbalancedParenthesesInAddress = 46,
+    UnbalancedParenthesesInAddress = 50,
     /// The display-name of an address contained a special character that should have been quoted.
-    UnquotedDisplayName = 47,
+    UnquotedDisplayName = 51,
     /// The display-name of a mailbox was itself shaped like an address.
-    AddressInDisplayName = 48,
+    AddressInDisplayName = 52,
     /// The unquoted display-name of a mailbox was itself shaped like an address.
-    UnquotedAddressInDisplayName = 49,
+    UnquotedAddressInDisplayName = 53,
     /// The display-name of an address group was itself shaped like an address.
-    AddressInGroupDisplayName = 50,
+    AddressInGroupDisplayName = 54,
     /// The unquoted display-name of an address group was itself shaped like an address.
-    UnquotedAddressInGroupDisplayName = 51,
+    UnquotedAddressInGroupDisplayName = 55,
     /// The local-part of an address was not a valid dot-atom or quoted-string.
-    InvalidLocalPart = 52,
+    InvalidLocalPart = 56,
     /// Two addresses in an address list were not separated by a comma.
-    MissingAddressSeparator = 53,
+    MissingAddressSeparator = 57,
     /// An address list contained two addresses whose boundary was ambiguous.
-    AmbiguousMailboxBoundary = 54,
+    AmbiguousMailboxBoundary = 58,
     /// An address list contained a comma that did not separate two addresses.
-    ExtraneousCommaInAddressList = 55,
+    ExtraneousCommaInAddressList = 59,
     /// An address used the obsolete source route syntax.
-    ObsoleteRouteAddress = 56,
+    ObsoleteRouteAddress = 60,
     /// An address consisted of a local-part with no domain.
-    AddressWithoutDomain = 57,
+    AddressWithoutDomain = 61,
     /// The domain of an address used the obsolete syntax that allows comments and whitespace between its parts.
-    ObsoleteDomainSyntax = 58,
+    ObsoleteDomainSyntax = 62,
     /// The domain of an address was not a valid dot-atom.
-    InvalidDomain = 59,
+    InvalidDomain = 63,
     /// The domain of an address ended with a dot.
-    TrailingDotInDomain = 60,
+    TrailingDotInDomain = 64,
     /// A domain-literal contained whitespace.
-    WhitespaceInDomainLiteral = 61,
+    WhitespaceInDomainLiteral = 65,
     /// A domain-literal contained a character that the domain-literal syntax does not permit.
-    InvalidCharacterInDomainLiteral = 62,
+    InvalidCharacterInDomainLiteral = 66,
     /// An address contained 8-bit bytes that were not valid UTF-8.
-    Invalid8BitAddress = 63,
+    Invalid8BitAddress = 67,
     /// An address group was not terminated with a semi-colon.
-    MissingGroupTerminator = 64,
+    MissingGroupTerminator = 68,
     /// An address did not conform to the address syntax defined by rfc5322.
-    NonConformantAddress = 65,
+    NonConformantAddress = 69,
     /// An address contained a null byte.
-    NullByteInAddress = 66,
+    NullByteInAddress = 70,
     /// The display-name of an address or group contained a null byte.
-    NullByteInDisplayName = 67,
+    NullByteInDisplayName = 71,
     /// A line break appeared inside a local-part or domain.
-    LineBreakInAddress = 68,
+    LineBreakInAddress = 72,
     /// An address contained a control character.
-    ControlCharacterInAddress = 69,
+    ControlCharacterInAddress = 73,
     /// The local-part of an address contained an ISO-2022 shift or escape sequence.
-    Iso2022SequenceInLocalPart = 70,
+    Iso2022SequenceInLocalPart = 74,
     /// An address group had an empty name.
-    EmptyGroupName = 71,
+    EmptyGroupName = 75,
     /// An address group was nested inside another address group.
-    NestedAddressGroup = 72,
+    NestedAddressGroup = 76,
     /// An empty line separating the headers from the body was missing.
-    MissingBodySeparator = 73,
+    MissingBodySeparator = 77,
     /// A multipart boundary was missing.
-    MissingMultipartBoundary = 74,
+    MissingMultipartBoundary = 78,
     /// The MIME structure was nested more deeply than the parser allows.
-    MimeDepthLimitExceeded = 75,
+    MimeDepthLimitExceeded = 79,
     /// The base64 encoded content of a MIME part ended with an incomplete quantum.
-    IncompleteBase64Quantum = 76,
+    IncompleteBase64Quantum = 80,
     /// The base64 encoded content of a MIME part contained invalid characters.
-    InvalidBase64Character = 77,
+    InvalidBase64Character = 81,
     /// The base64 encoded content of a MIME part contained invalid padding.
-    InvalidBase64Padding = 78,
+    InvalidBase64Padding = 82,
     /// The base64 encoded content of a MIME part contained characters after the padding.
-    Base64CharactersAfterPadding = 79,
+    Base64CharactersAfterPadding = 83,
     /// The base64 encoded content of a MIME part contained an obsolete comment.
-    ObsoleteBase64Comment = 80,
+    ObsoleteBase64Comment = 84,
     /// The quoted-printable encoded content of a MIME part contained an invalid hex sequence after an '=' character.
-    InvalidQuotedPrintableEncoding = 81,
+    InvalidQuotedPrintableEncoding = 85,
     /// The quoted-printable encoded content of a MIME part contained an invalid soft-break sequence.
-    InvalidQuotedPrintableSoftBreak = 82,
+    InvalidQuotedPrintableSoftBreak = 86,
     /// The uuencoded content of a MIME part contained non-whitespace content before the begin marker.
-    InvalidUUEncodePretext = 83,
+    InvalidUUEncodePretext = 87,
     /// The uuencoded content of a MIME part had an invalid file mode in the begin marker.
-    InvalidUUEncodeFileMode = 84,
+    InvalidUUEncodeFileMode = 88,
     /// The uuencoded content of a MIME part contained invalid characters or was otherwise malformed.
-    InvalidUUEncodedContent = 85,
+    InvalidUUEncodedContent = 89,
     /// The uuencoded content of a MIME part had an invalid encoded line length.
-    InvalidUUEncodedLineLength = 86,
+    InvalidUUEncodedLineLength = 90,
     /// The uuencoded content of a MIME part contained an incomplete encoded line.
-    IncompleteUUEncodedLine = 87,
+    IncompleteUUEncodedLine = 91,
     /// The uuencoded content of a MIME part had extra data beyond the end of a uuencoded line.
-    InvalidUUEncodedLineExtraData = 88,
+    InvalidUUEncodedLineExtraData = 92,
     /// The uuencoded content of a MIME part contained non-whitespace content after the end marker.
-    InvalidUUEncodeEndMarker = 89,
+    InvalidUUEncodeEndMarker = 93,
     /// The uuencoded content of a MIME part did not properly end.
-    IncompleteUUEncodedContent = 90,
+    IncompleteUUEncodedContent = 94,
     /// Too many compliance issues were detected and the remainder were suppressed.
     TooManyComplianceIssues = 2147483647,
 }
 
 impl MimeComplianceViolation {
     /// All supported diagnostic identifiers, including the truncation marker.
-    pub const ALL: [Self; 91] = [
+    pub const ALL: [Self; 95] = [
         Self::BareCarriageReturnInHeader,
         Self::BareLinefeedInHeader,
         Self::BareLinefeedInBody,
@@ -212,6 +221,7 @@ impl MimeComplianceViolation {
         Self::IncompleteHeader,
         Self::BlankHeaderContinuationLine,
         Self::RepeatedContentType,
+        Self::RepeatedContentDisposition,
         Self::RepeatedContentTransferEncoding,
         Self::RepeatedDate,
         Self::RepeatedFrom,
@@ -242,6 +252,9 @@ impl MimeComplianceViolation {
         Self::IllegalMultipartContentTransferEncoding,
         Self::MissingMultipartBoundaryParameter,
         Self::InvalidMultipartBoundaryParameter,
+        Self::RepeatedBoundaryParameter,
+        Self::RepeatedFilenameParameter,
+        Self::RepeatedParameter,
         Self::ExcessiveAngleBracketsInAddress,
         Self::UnbalancedAngleBracketsInAddress,
         Self::UnbalancedQuotesInAddress,
@@ -324,6 +337,7 @@ impl MimeComplianceViolation {
             // instance while the mail client renders another, so the message a filter judges to be
             // safe is not the message the recipient is shown.
             Self::RepeatedContentType
+            | Self::RepeatedBoundaryParameter
             | Self::RepeatedContentTransferEncoding
             | Self::UnexpectedNullBytesInHeader
             | Self::UnexpectedNullBytesInBody
@@ -343,7 +357,10 @@ impl MimeComplianceViolation {
             // authentication mechanism the way a repeated originator field can, but a filter and a
             // mail client can still be made to disagree about who a message was addressed to or
             // what it claims to be about.
-            Self::InvalidHeader
+            Self::RepeatedContentDisposition
+            | Self::RepeatedFilenameParameter
+            | Self::RepeatedParameter
+            | Self::InvalidHeader
             | Self::IncompleteHeader
             | Self::BlankHeaderContinuationLine
             | Self::InvalidContentType
@@ -487,7 +504,12 @@ impl MimeComplianceViolation {
             Self::IncompleteHeader => interop,
             // Note: When the Content-Type cannot be parsed, parsers fall back to different defaults,
             // which is a classic way of getting a scanner to skip content that a client will render.
-            Self::InvalidContentType | Self::RepeatedContentType => interop | security,
+            Self::InvalidContentType
+            | Self::RepeatedContentType
+            | Self::RepeatedContentDisposition
+            | Self::RepeatedBoundaryParameter
+            | Self::RepeatedFilenameParameter
+            | Self::RepeatedParameter => interop | security,
             // Note: As above, but an unrecognized or duplicated encoding also means the content may
             // be decoded incorrectly (or not at all), so content can be lost as well.
             Self::InvalidContentTransferEncoding | Self::RepeatedContentTransferEncoding => {
@@ -675,6 +697,18 @@ impl MimeComplianceViolation {
                 "A folded MIME part or message header contained a continuation line made up entirely of whitespace."
             }
             Self::RepeatedContentType => "A MIME part contained multiple Content-Type headers.",
+            Self::RepeatedContentDisposition => {
+                "A MIME part contained multiple Content-Disposition headers."
+            }
+            Self::RepeatedBoundaryParameter => {
+                "A Content-Type header contained repeated boundary parameter declarations."
+            }
+            Self::RepeatedFilenameParameter => {
+                "A Content-Type name or Content-Disposition filename parameter was repeated."
+            }
+            Self::RepeatedParameter => {
+                "A MIME parameter other than a boundary or filename parameter was repeated."
+            }
             Self::RepeatedContentTransferEncoding => {
                 "A MIME part contained multiple Content-Transfer-Encoding headers."
             }
@@ -907,6 +941,18 @@ impl MimeComplianceViolation {
             }
             Self::RepeatedContentType => {
                 "The MIME specifications require that each MIME part contain only one Content-Type header. Multiple Content-Type headers can lead to ambiguity and inconsistent behavior among different MIME parser implementations which may choose to use different Content-Type headers as their \"source of truth\"."
+            }
+            Self::RepeatedContentDisposition => {
+                "Repeated Content-Disposition headers can cause MIME parsers to disagree about a part's filename or whether it should be displayed inline or treated as an attachment."
+            }
+            Self::RepeatedBoundaryParameter => {
+                "Competing boundary values can cause MIME parsers to discover different body parts. Ordinary and extended values compete, as do repeated RFC 2231 continuation indices. Distinct segments of a single continued value are not repetitions."
+            }
+            Self::RepeatedFilenameParameter => {
+                "Repeated filename declarations can cause MIME parsers to assign different names or extensions to the same content. Repeated RFC 2231 continuation indices are also reported. One ordinary fallback together with one extended or continued representation is tolerated. This does not imply that their decoded values agree."
+            }
+            Self::RepeatedParameter => {
+                "Parameter names are compared without regard to case. Competing ordinary, extended, or continued representations and repeated continuation indices are reported, even when their values are identical. Distinct segments of one continued value are not repetitions."
             }
             Self::RepeatedContentTransferEncoding => {
                 "The MIME specifications require that each MIME part contain only one Content-Transfer-Encoding header. Multiple Content-Transfer-Encoding headers can lead to ambiguity and inconsistent behavior among different MIME parser implementations which may choose to use different Content-Transfer-Encoding headers as their \"source of truth\"."

@@ -5,6 +5,7 @@
 use std::{fmt, io, ops};
 
 mod encoding;
+mod parameters;
 mod reporting;
 mod violation;
 
@@ -177,8 +178,10 @@ impl MimeComplianceValidators {
     pub const QUOTED_PRINTABLE: Self = Self(2);
     /// Validate UU begin/end markers, file mode, and encoded lines.
     pub const UU_ENCODE: Self = Self(4);
+    /// Validate repeated Content-Type and Content-Disposition parameters.
+    pub const PARAMETERS: Self = Self(16);
     /// All currently implemented validators.
-    pub const ALL: Self = Self(7);
+    pub const ALL: Self = Self(7 | 16);
 
     /// Returns the underlying validator bits.
     pub const fn bits(self) -> u8 {
@@ -283,7 +286,7 @@ struct Budget {
     limit: usize,
     // One counter per defect: a small dense range needs no dictionary.
     // TooManyComplianceIssues is outside this range, never counted or suppressed.
-    counts: [usize; 91],
+    counts: [usize; MimeComplianceViolation::ALL.len()],
     reported_truncation: bool,
 }
 
@@ -291,7 +294,7 @@ impl Budget {
     fn new(limit: usize) -> Self {
         Self {
             limit,
-            counts: [0; 91],
+            counts: [0; MimeComplianceViolation::ALL.len()],
             reported_truncation: false,
         }
     }

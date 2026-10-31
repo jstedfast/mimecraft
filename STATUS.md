@@ -1899,7 +1899,7 @@ Logger errors propagate unchanged, stop further events, and return no partial
 owned model. No strict-mode switch is introduced. Use `set_compliance_options`
 with `MimeComplianceOptions` to select transport/storage severity and a
 per-violation report cap (zero means unlimited). `enabled_validators` selects
-`MimeComplianceValidators::BASE64`, `QUOTED_PRINTABLE`, and `UU_ENCODE`;
+`MimeComplianceValidators::BASE64`, `QUOTED_PRINTABLE`, `UU_ENCODE`, and `PARAMETERS`;
 combine flags with `|`, use `ALL` (the default), or `NONE` to keep only
 structural and raw-byte checks. Disabling a validator changes reporting, not
 parsing or recovery. Budgets reset per operation,
@@ -1909,7 +1909,9 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported. Issues carry original offsets, one-based lines and
+and remarks are ported through MimeKit commit `3e32122`. Numeric identifiers
+match its unreleased enum, including that commit's renumbering, and are not
+yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
 currently covers raw-header syntax and line format, repeated/missing message
 fields, MIME metadata, framing/depth failures, and body line format/null/high
@@ -1921,6 +1923,19 @@ event. The newline before a MIME or mbox boundary is validated even though it
 is excluded from content callbacks; the marker itself is not encoded content.
 Diagnostics retain MimeKit's per-line suppression of repeated malformed-byte
 findings, in addition to the configurable per-violation quotas.
+
+Parameter validation inspects every raw Content-Type and Content-Disposition
+header independently of decoded-value precedence. It reports repeated boundary,
+filename, and other parameter declarations, including duplicate RFC 2231
+continuation indices, at exact byte positions. Distinct continuation segments
+are allowed; Content-Type `name` and Content-Disposition `filename` also allow
+one ordinary fallback beside one extended or continued representation.
+Repeated Content-Disposition headers are structural checks, enabled even with
+`NONE`, and reset per header block. Reporting does not change selected headers,
+decoded parameters, message bodies, or serialization. Upstream declaration,
+position, malformed-input, budget, and bounded-scan regressions cover synchronous
+and chunked input; sans-I/O checks also cover input splits. `PARAMETERS` keeps
+MimeKit's bit value 16; `ALL` includes implemented bits only (23).
 
 Quoted-printable literal runs use bulk byte searches; UU scanning skips whole
 runs where classification is no longer needed. Base64 validation currently uses
