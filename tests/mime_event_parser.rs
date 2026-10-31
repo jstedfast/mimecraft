@@ -13,9 +13,15 @@ mod content_type_syntax;
 #[path = "support/rfc2231_parameters.rs"]
 mod rfc2231_parameters;
 
+#[path = "support/encoded_word_parameters.rs"]
+mod encoded_word_parameters;
+
 #[test]
 fn encoded_parameter_reporting_survives_every_split() {
-    for &(parameters, _) in rfc2231_parameters::CASES {
+    for &(parameters, _) in rfc2231_parameters::CASES
+        .iter()
+        .chain(encoded_word_parameters::CASES)
+    {
         for header in [
             format!("Content-Disposition: attachment; {parameters}"),
             format!(
@@ -31,15 +37,24 @@ fn encoded_parameter_reporting_survives_every_split() {
             );
         }
     }
-    for &(parameters, _, _) in rfc2231_parameters::PRESERVATION_CASES {
-        let text = format!(
-            "Content-Type: text/plain\r\nContent-Disposition: attachment; {parameters}\r\n\r\nbody\r\n"
-        );
-        assert_splits(
-            text.as_bytes(),
-            MimeEventFormat::Message,
-            Default::default(),
-        );
+    for &(parameters, _, _, _) in rfc2231_parameters::PRESERVATION_CASES {
+        for content_type in [false, true] {
+            let text = if content_type {
+                format!(
+                    "Content-Type: text/plain; {}\r\nContent-Disposition: attachment; filename=a\r\n\r\nbody\r\n",
+                    parameters.replace("filename", "name")
+                )
+            } else {
+                format!(
+                    "Content-Type: text/plain\r\nContent-Disposition: attachment; {parameters}\r\n\r\nbody\r\n"
+                )
+            };
+            assert_splits(
+                text.as_bytes(),
+                MimeEventFormat::Message,
+                Default::default(),
+            );
+        }
     }
 }
 
@@ -213,10 +228,13 @@ fn assert_splits(wire: &[u8], format: MimeEventFormat, options: MimeEntityParseO
 #[test]
 fn repeated_parameters_and_disposition_survive_every_split() {
     let wires: &[&[u8]] = &[
+        b"X-Prefix: \xc3\xa9\r\nContent-Type: text/plain;\r\n\
+\t(\xc3\xa9) name*2=\"=?utf-8?Q?first?=\";\r\n\tname*2=\"=?utf-8?Q?second?=\";\r\n\
+\tbad*=\"utf-8''=?utf-8?Q?third?=\"\r\n\r\nbody\r\n",
         b"X-Prefix: \xc3\xa9\r\nContent-Type: text/plain; x*2*=%GG;\r\n\
 \t(\xc3\xa9) name*=no-prefix;\r\n\tx*2*=%Q0; broken; other*=''bad%\r\n\r\nbody\r\n",
-        b"Content-Type: text/plain\r\nContent-Type: text/html; name*=bad\r\n\
-Content-Disposition: attachment; filename=a\r\nContent-Disposition: inline; filename*=utf-8''%GG\r\n\r\nbody\r\n",
+        b"Content-Type: text/plain\r\nContent-Type: text/html; name*=bad; title=\"=?utf-8?Q?ignored?=\"\r\n\
+Content-Disposition: attachment; filename=a\r\nContent-Disposition: inline; filename*=utf-8''%GG; info=\"=?utf-8?Q?ignored?=\"\r\n\r\nbody\r\n",
         b"X-Prefix: \xc3\xa9\r\nContent-Type: text/plain; z*2=x;\r\n\
 \t(\xc3\xa9) name;\r\n\tz*2=y; filename=;\r\n\tsize=\"unterminated\r\n\r\nbody\r\n",
         b"Content-Type: text/plain\r\nContent-Type: text/html; name\r\n\
@@ -762,6 +780,10 @@ fn callbacks_and_logger_failures_are_terminal_and_preserve_errors() {
         (
             b"Content-Type: text/plain; name*=bad\r\n\r\nbody",
             Some(MimeComplianceViolation::InvalidRfc2231Parameter),
+        ),
+        (
+            b"Content-Type: text/plain; name=\"=?utf-8?Q?file?=\"\r\n\r\nbody",
+            Some(MimeComplianceViolation::EncodedWordInParameter),
         ),
     ] {
         for split in 0..=wire.len() {

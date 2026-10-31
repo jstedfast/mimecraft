@@ -13,8 +13,8 @@ use super::{
 use crate::{
     HeaderId, MimePosition,
     parse_utils::{
-        is_attribute, is_whitespace, skip_comment, skip_comments_and_whitespace, skip_quoted,
-        skip_whitespace,
+        is_attribute, is_token, is_whitespace, skip_comment, skip_comments_and_whitespace,
+        skip_quoted, skip_whitespace,
     },
 };
 
@@ -236,6 +236,68 @@ fn validate_encoded_value(mut value: &[u8], initial: bool) -> bool {
     true
 }
 
+fn is_encoded_word_token(byte: u8) -> bool {
+    is_token(byte) && byte != b'.'
+}
+
+fn contains_encoded_word(mut value: &[u8]) -> bool {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum State {
+        Text,
+        Equals,
+        CharsetStart,
+        Charset,
+        Encoding,
+        Separator,
+        PayloadStart,
+        Payload,
+        Question,
+    }
+
+    let quoted = value.len() >= 2 && value[0] == b'"' && value[value.len() - 1] == b'"';
+    if quoted {
+        value = &value[1..value.len() - 1];
+    }
+    let mut state = State::Text;
+    let mut payload_ends_with_equals = false;
+    let mut bytes = value.iter().copied();
+    while let Some(mut byte) = bytes.next() {
+        if quoted
+            && byte == b'\\'
+            && let Some(escaped) = bytes.next()
+        {
+            byte = escaped;
+        }
+        state = match state {
+            State::Equals if byte == b'?' => State::CharsetStart,
+            State::Charset if byte == b'?' => State::Encoding,
+            State::CharsetStart | State::Charset
+                if is_encoded_word_token(byte) && (state == State::Charset || byte != b'*') =>
+            {
+                State::Charset
+            }
+            State::Encoding if matches!(byte, b'B' | b'b' | b'Q' | b'q') => State::Separator,
+            State::Separator if byte == b'?' => State::PayloadStart,
+            State::Payload if byte == b'?' => State::Question,
+            State::PayloadStart | State::Payload if byte > 32 && byte < 127 && byte != b'?' => {
+                payload_ends_with_equals = byte == b'=';
+                State::Payload
+            }
+            State::Question if byte == b'=' => return true,
+            // An unterminated word may contain the start of another word.
+            // Resume at its charset without rescanning the preceding payload.
+            State::Question
+                if payload_ends_with_equals && byte != b'*' && is_encoded_word_token(byte) =>
+            {
+                State::Charset
+            }
+            _ if byte == b'=' => State::Equals,
+            _ => State::Text,
+        };
+    }
+    false
+}
+
 pub(super) fn validate(
     text: &[u8],
     header: HeaderId,
@@ -354,6 +416,13 @@ pub(super) fn validate(
                 MimeCompliancePositionKind::ElementStart,
             ))?;
         }
+        if value.is_some_and(contains_encoded_word) {
+            logger.log(create_issue(
+                Violation::EncodedWordInParameter,
+                declaration.start,
+                MimeCompliancePositionKind::ElementStart,
+            ))?;
+        }
         if !more {
             break;
         }
@@ -396,6 +465,127 @@ mod tests {
         });
         result.unwrap();
         (issues, allocated, elapsed)
+    }
+
+    #[test]
+    fn encoded_word_calls_preserve_slice_offsets_and_clear_state() {
+        let value = "text/plain;\r\n name=\"=\\?utf-8?Q?file.txt?=\"";
+        let bytes = format!("xx{value}yy");
+        let incomplete = "text/plain; name==?utf-8?Q?file?";
+        let completed = format!("{incomplete}=");
+        for _ in 0..2 {
+            for (text, count) in [
+                (&bytes.as_bytes()[2..2 + value.len()], 1),
+                (&completed.as_bytes()[..incomplete.len()], 0),
+                (completed.as_bytes(), 1),
+            ] {
+                let mut issues = Vec::new();
+                validate(
+                    text,
+                    HeaderId::ContentType,
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                    &mut |issue| {
+                        issues.push(issue);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(issues.len(), count);
+                if count != 0 {
+                    let issue = issues[0];
+                    let offset = std::str::from_utf8(text).unwrap().find("name=").unwrap() as u64;
+                    assert_eq!(issue.violation, Violation::EncodedWordInParameter);
+                    assert_eq!(issue.stream_offset, 100 + offset);
+                    assert_eq!(
+                        issue.line_number,
+                        if text == value.as_bytes() { 6 } else { 5 }
+                    );
+                    assert_eq!(
+                        issue.column_number,
+                        if text == value.as_bytes() {
+                            2
+                        } else {
+                            7 + offset
+                        }
+                    );
+                    assert_eq!(issue.context, MimeComplianceContext::Storage);
+                    assert_eq!(
+                        issue.position_kind,
+                        MimeCompliancePositionKind::ElementStart
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn many_encoded_word_parameters_are_bounded() {
+        const COUNT: usize = 16_384;
+        let parameter = "x=\"=?utf-8?Q?file?=\"";
+        let text = format!("text/plain{}", format!(";\r\n {parameter}").repeat(COUNT));
+        let (issues, allocated, elapsed) = measure_validation(text.as_bytes());
+        assert_eq!(issues.len(), COUNT * 2 - 1);
+        let words: Vec<_> = issues
+            .iter()
+            .filter(|i| i.violation == Violation::EncodedWordInParameter)
+            .collect();
+        assert_eq!(words.len(), COUNT);
+        assert!(
+            words
+                .iter()
+                .all(|i| i.position_kind == MimeCompliancePositionKind::ElementStart)
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| i.violation == Violation::RepeatedParameter)
+                .count(),
+            COUNT - 1
+        );
+        let last = issues.last().unwrap();
+        assert_eq!(last.line_number, COUNT as u64 + 1);
+        assert_eq!(last.column_number, 2);
+        assert_eq!(last.stream_offset, (text.len() - parameter.len()) as u64);
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert!(allocated < COUNT * 256 + 65536, "{allocated} bytes");
+    }
+
+    #[test]
+    fn encoded_word_scan_is_bounded() {
+        for fragment in ["plain", "=?", "=?utf-8?Q?payload"] {
+            for complete in [false, true] {
+                let mut text = String::from("text/plain; name=\"");
+                while text.len() < 1024 * 1024 {
+                    text.push_str(fragment);
+                }
+                if complete {
+                    text.push_str("=?utf-8?Q?end?=");
+                }
+                text.push('"');
+                let (issues, allocated, elapsed) = measure_validation(text.as_bytes());
+                assert_eq!(issues.len(), usize::from(complete));
+                if complete {
+                    assert_eq!(issues[0].violation, Violation::EncodedWordInParameter);
+                    assert_eq!(
+                        issues[0].position_kind,
+                        MimeCompliancePositionKind::ElementStart
+                    );
+                }
+                assert!(
+                    elapsed < Duration::from_secs(5),
+                    "fragment={fragment}, complete={complete}: {elapsed:?}"
+                );
+                assert!(
+                    allocated < 65536,
+                    "fragment={fragment}, complete={complete}: {allocated} bytes"
+                );
+            }
+        }
     }
 
     #[test]

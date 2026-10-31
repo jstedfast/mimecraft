@@ -58,33 +58,65 @@ pub const CASES: &[(&str, usize)] = &[
 
 // Preserve recovery for malformed encodings encountered in
 // https://github.com/noxxi/mime-is-broken.
-pub const PRESERVATION_CASES: &[(&str, &str, usize)] = &[
+pub const PRESERVATION_CASES: &[(&str, &str, usize, usize)] = &[
     (
         "filename*0*=utf-8''caf%C3; filename*1*=%A9.txt",
         "caf\u{e9}.txt",
+        0,
         0,
     ),
     (
         "filename*0*=utf-8''caf%C; filename*1*=3%A9.txt",
         "caf\u{e9}.txt",
         1,
+        0,
     ),
     (
         "filename*1*=3%A9.txt; filename*0*=utf-8''caf%C",
         "caf\u{e9}.txt",
         1,
+        0,
     ),
     (
         "filename*0*=\"utf-8''caf%\"; filename*1*=\"C3%A9.txt\"",
         "caf\u{e9}.txt",
         1,
+        0,
     ),
-    ("filename*=''file%GG.txt", "file%GG.txt", 1),
-    ("filename*=utf-8'file.txt", "utf-8'file.txt", 1),
+    ("filename*=''file%GG.txt", "file%GG.txt", 1, 0),
+    ("filename*=utf-8'file.txt", "utf-8'file.txt", 1, 0),
     (
         "filename*=x-unsupported-charset''caf%E9.txt",
         "caf\u{e9}.txt",
         0,
+        0,
     ),
-    ("filename*0=file; filename*1*=%2Etxt", "file.txt", 0),
+    ("filename*0=file; filename*1*=%2Etxt", "file.txt", 0, 0),
+    (
+        "filename=\"=?utf-8?Q?caf=C3=A9.txt?=\"",
+        "caf\u{e9}.txt",
+        0,
+        1,
+    ),
+    ("filename=\"=?utf-8?B?ZmlsZS50eHQ=?=\"", "file.txt", 0, 1),
+    (
+        "filename=\"=?utf-8?Q?file?=\r\n\t=?utf-8?Q?.txt?=\"",
+        "file.txt",
+        0,
+        1,
+    ),
+    ("filename=\"=\\?utf-8?Q?file=2Etxt?\\=\"", "file.txt", 0, 1),
+    ("filename=\"=?x-unknown?Q?file.txt?=\"", "file.txt", 0, 1),
+    (
+        "filename*0=\"=?utf-8?Q?file?=\"; filename*1=.txt",
+        "=?utf-8?Q?file?=.txt",
+        0,
+        1,
+    ),
+    (
+        "filename*=utf-8''%3D%3Futf-8%3FQ%3Ffile%3F%3D",
+        "=?utf-8?Q?file?=",
+        0,
+        0,
+    ),
 ];

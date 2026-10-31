@@ -1909,7 +1909,7 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `b137b4dd`. Numeric identifiers
+and remarks are ported through MimeKit commit `b7b8585b`. Numeric identifiers
 match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
@@ -1946,6 +1946,12 @@ percent-encoded octets within each segment. Outer quotes and empty encoded
 noninitial segments are tolerated. Charset availability, language registration,
 and decoded character validity are not checked. These diagnostics do not change
 recovery, including percent escapes that the decoder assembles across segments.
+`EncodedWordInParameter` reports recognizable RFC 2047 B/Q encoded-word syntax
+once per declaration (`ElementStart`), including quoted-pair escapes. It can
+accompany `InvalidRfc2231Parameter`; malformed declaration syntax takes precedence.
+The scanner does not validate word lengths, charset availability or payload
+encoding, nor decode or assemble RFC 2231 values. It scans raw bytes once,
+without allocating unquoted copies or rescanning incomplete word prefixes.
 Missing RFC 2231 continuation segments are reported once per parameter, at the
 first continuation declaration (`ElementStart`), after scanning the header.
 Indices may appear out of order but must cover consecutive values starting at

@@ -6,7 +6,7 @@ use super::{MimeComplianceCategories, MimeComplianceContext, MimeComplianceSever
 /// A MIME compliance defect, or notification that reporting was capped.
 ///
 /// Numeric values match MimeKit's unreleased enum, including its renumbering in
-/// commit `b137b4dd`. They are not yet stable persisted identifiers.
+/// commit `b7b8585b`. They are not yet stable persisted identifiers.
 /// Rust does not need MimeKit's uninitialized `None` sentinel.
 /// The enum includes checks not yet implemented by the reader; see
 /// [`crate::MimeReader::read_message_with_logger`] for reporting coverage.
@@ -104,117 +104,119 @@ pub enum MimeComplianceViolation {
     InvalidParameter = 44,
     /// An RFC 2231 encoded parameter value was malformed.
     InvalidRfc2231Parameter = 45,
+    /// A MIME parameter value contained RFC 2047 encoded-word syntax.
+    EncodedWordInParameter = 46,
     /// A Content-Type header contained repeated boundary parameter declarations.
-    RepeatedBoundaryParameter = 46,
+    RepeatedBoundaryParameter = 47,
     /// A Content-Type name or Content-Disposition filename parameter was repeated.
-    RepeatedFilenameParameter = 47,
+    RepeatedFilenameParameter = 48,
     /// A MIME parameter other than a boundary or filename parameter was repeated.
-    RepeatedParameter = 48,
+    RepeatedParameter = 49,
     /// An RFC 2231 parameter continuation was missing one or more segments.
-    MissingParameterSegment = 49,
+    MissingParameterSegment = 50,
     /// An address contained more angle brackets than the one pair that delimits an angle-addr.
-    ExcessiveAngleBracketsInAddress = 50,
+    ExcessiveAngleBracketsInAddress = 51,
     /// An address had an opening angle bracket without a closing one, or a closing bracket without an opening one.
-    UnbalancedAngleBracketsInAddress = 51,
+    UnbalancedAngleBracketsInAddress = 52,
     /// An address contained a quoted-string that was never closed.
-    UnbalancedQuotesInAddress = 52,
+    UnbalancedQuotesInAddress = 53,
     /// An address contained an unbalanced parenthesis in a comment.
-    UnbalancedParenthesesInAddress = 53,
+    UnbalancedParenthesesInAddress = 54,
     /// The display-name of an address contained a special character that should have been quoted.
-    UnquotedDisplayName = 54,
+    UnquotedDisplayName = 55,
     /// The display-name of a mailbox was itself shaped like an address.
-    AddressInDisplayName = 55,
+    AddressInDisplayName = 56,
     /// The unquoted display-name of a mailbox was itself shaped like an address.
-    UnquotedAddressInDisplayName = 56,
+    UnquotedAddressInDisplayName = 57,
     /// The display-name of an address group was itself shaped like an address.
-    AddressInGroupDisplayName = 57,
+    AddressInGroupDisplayName = 58,
     /// The unquoted display-name of an address group was itself shaped like an address.
-    UnquotedAddressInGroupDisplayName = 58,
+    UnquotedAddressInGroupDisplayName = 59,
     /// The local-part of an address was not a valid dot-atom or quoted-string.
-    InvalidLocalPart = 59,
+    InvalidLocalPart = 60,
     /// Two addresses in an address list were not separated by a comma.
-    MissingAddressSeparator = 60,
+    MissingAddressSeparator = 61,
     /// An address list contained two addresses whose boundary was ambiguous.
-    AmbiguousMailboxBoundary = 61,
+    AmbiguousMailboxBoundary = 62,
     /// An address list contained a comma that did not separate two addresses.
-    ExtraneousCommaInAddressList = 62,
+    ExtraneousCommaInAddressList = 63,
     /// An address used the obsolete source route syntax.
-    ObsoleteRouteAddress = 63,
+    ObsoleteRouteAddress = 64,
     /// An address consisted of a local-part with no domain.
-    AddressWithoutDomain = 64,
+    AddressWithoutDomain = 65,
     /// The domain of an address used the obsolete syntax that allows comments and whitespace between its parts.
-    ObsoleteDomainSyntax = 65,
+    ObsoleteDomainSyntax = 66,
     /// The domain of an address was not a valid dot-atom.
-    InvalidDomain = 66,
+    InvalidDomain = 67,
     /// The domain of an address ended with a dot.
-    TrailingDotInDomain = 67,
+    TrailingDotInDomain = 68,
     /// A domain-literal contained whitespace.
-    WhitespaceInDomainLiteral = 68,
+    WhitespaceInDomainLiteral = 69,
     /// A domain-literal contained a character that the domain-literal syntax does not permit.
-    InvalidCharacterInDomainLiteral = 69,
+    InvalidCharacterInDomainLiteral = 70,
     /// An address contained 8-bit bytes that were not valid UTF-8.
-    Invalid8BitAddress = 70,
+    Invalid8BitAddress = 71,
     /// An address group was not terminated with a semi-colon.
-    MissingGroupTerminator = 71,
+    MissingGroupTerminator = 72,
     /// An address did not conform to the address syntax defined by rfc5322.
-    NonConformantAddress = 72,
+    NonConformantAddress = 73,
     /// An address contained a null byte.
-    NullByteInAddress = 73,
+    NullByteInAddress = 74,
     /// The display-name of an address or group contained a null byte.
-    NullByteInDisplayName = 74,
+    NullByteInDisplayName = 75,
     /// A line break appeared inside a local-part or domain.
-    LineBreakInAddress = 75,
+    LineBreakInAddress = 76,
     /// An address contained a control character.
-    ControlCharacterInAddress = 76,
+    ControlCharacterInAddress = 77,
     /// The local-part of an address contained an ISO-2022 shift or escape sequence.
-    Iso2022SequenceInLocalPart = 77,
+    Iso2022SequenceInLocalPart = 78,
     /// An address group had an empty name.
-    EmptyGroupName = 78,
+    EmptyGroupName = 79,
     /// An address group was nested inside another address group.
-    NestedAddressGroup = 79,
+    NestedAddressGroup = 80,
     /// An empty line separating the headers from the body was missing.
-    MissingBodySeparator = 80,
+    MissingBodySeparator = 81,
     /// A multipart boundary was missing.
-    MissingMultipartBoundary = 81,
+    MissingMultipartBoundary = 82,
     /// The MIME structure was nested more deeply than the parser allows.
-    MimeDepthLimitExceeded = 82,
+    MimeDepthLimitExceeded = 83,
     /// The base64 encoded content of a MIME part ended with an incomplete quantum.
-    IncompleteBase64Quantum = 83,
+    IncompleteBase64Quantum = 84,
     /// The base64 encoded content of a MIME part contained invalid characters.
-    InvalidBase64Character = 84,
+    InvalidBase64Character = 85,
     /// The base64 encoded content of a MIME part contained invalid padding.
-    InvalidBase64Padding = 85,
+    InvalidBase64Padding = 86,
     /// The base64 encoded content of a MIME part contained characters after the padding.
-    Base64CharactersAfterPadding = 86,
+    Base64CharactersAfterPadding = 87,
     /// The base64 encoded content of a MIME part contained an obsolete comment.
-    ObsoleteBase64Comment = 87,
+    ObsoleteBase64Comment = 88,
     /// The quoted-printable encoded content of a MIME part contained an invalid hex sequence after an '=' character.
-    InvalidQuotedPrintableEncoding = 88,
+    InvalidQuotedPrintableEncoding = 89,
     /// The quoted-printable encoded content of a MIME part contained an invalid soft-break sequence.
-    InvalidQuotedPrintableSoftBreak = 89,
+    InvalidQuotedPrintableSoftBreak = 90,
     /// The uuencoded content of a MIME part contained non-whitespace content before the begin marker.
-    InvalidUUEncodePretext = 90,
+    InvalidUUEncodePretext = 91,
     /// The uuencoded content of a MIME part had an invalid file mode in the begin marker.
-    InvalidUUEncodeFileMode = 91,
+    InvalidUUEncodeFileMode = 92,
     /// The uuencoded content of a MIME part contained invalid characters or was otherwise malformed.
-    InvalidUUEncodedContent = 92,
+    InvalidUUEncodedContent = 93,
     /// The uuencoded content of a MIME part had an invalid encoded line length.
-    InvalidUUEncodedLineLength = 93,
+    InvalidUUEncodedLineLength = 94,
     /// The uuencoded content of a MIME part contained an incomplete encoded line.
-    IncompleteUUEncodedLine = 94,
+    IncompleteUUEncodedLine = 95,
     /// The uuencoded content of a MIME part had extra data beyond the end of a uuencoded line.
-    InvalidUUEncodedLineExtraData = 95,
+    InvalidUUEncodedLineExtraData = 96,
     /// The uuencoded content of a MIME part contained non-whitespace content after the end marker.
-    InvalidUUEncodeEndMarker = 96,
+    InvalidUUEncodeEndMarker = 97,
     /// The uuencoded content of a MIME part did not properly end.
-    IncompleteUUEncodedContent = 97,
+    IncompleteUUEncodedContent = 98,
     /// Too many compliance issues were detected and the remainder were suppressed.
     TooManyComplianceIssues = 2147483647,
 }
 
 impl MimeComplianceViolation {
     /// All supported diagnostic identifiers, including the truncation marker.
-    pub const ALL: [Self; 98] = [
+    pub const ALL: [Self; 99] = [
         Self::BareCarriageReturnInHeader,
         Self::BareLinefeedInHeader,
         Self::BareLinefeedInBody,
@@ -260,6 +262,7 @@ impl MimeComplianceViolation {
         Self::InvalidMultipartBoundaryParameter,
         Self::InvalidParameter,
         Self::InvalidRfc2231Parameter,
+        Self::EncodedWordInParameter,
         Self::RepeatedBoundaryParameter,
         Self::RepeatedFilenameParameter,
         Self::RepeatedParameter,
@@ -372,6 +375,7 @@ impl MimeComplianceViolation {
             | Self::MissingParameterSegment
             | Self::InvalidParameter
             | Self::InvalidRfc2231Parameter
+            | Self::EncodedWordInParameter
             | Self::InvalidHeader
             | Self::IncompleteHeader
             | Self::BlankHeaderContinuationLine
@@ -524,7 +528,8 @@ impl MimeComplianceViolation {
             | Self::RepeatedParameter
             | Self::MissingParameterSegment
             | Self::InvalidParameter
-            | Self::InvalidRfc2231Parameter => interop | security,
+            | Self::InvalidRfc2231Parameter
+            | Self::EncodedWordInParameter => interop | security,
             // Note: As above, but an unrecognized or duplicated encoding also means the content may
             // be decoded incorrectly (or not at all), so content can be lost as well.
             Self::InvalidContentTransferEncoding | Self::RepeatedContentTransferEncoding => {
@@ -729,6 +734,9 @@ impl MimeComplianceViolation {
             }
             Self::InvalidParameter => "A MIME parameter declaration was malformed.",
             Self::InvalidRfc2231Parameter => "An RFC 2231 encoded parameter value was malformed.",
+            Self::EncodedWordInParameter => {
+                "A MIME parameter value contained RFC 2047 encoded-word syntax."
+            }
             Self::RepeatedContentTransferEncoding => {
                 "A MIME part contained multiple Content-Transfer-Encoding headers."
             }
@@ -982,6 +990,9 @@ impl MimeComplianceViolation {
             }
             Self::InvalidRfc2231Parameter => {
                 "Encoded initial values require charset and language delimiters, even when either field is empty. Encoded data must contain attribute characters or complete percent-encoded octets within each segment. The issue is reported once per malformed declaration, at its start. Outer quotes are tolerated, and charset availability, language-tag registration, and decoded character validity are not checked."
+            }
+            Self::EncodedWordInParameter => {
+                "RFC 2047 encoded-words are not permitted in Content-Type or Content-Disposition parameters. Clients that decode them can interpret a filename differently from clients that retain the literal text. Recognizable B/Q encoded-word syntax is reported once per declaration, at its start. Quoted-pair escapes are handled, but encoded-word lengths, charsets and payload encodings are not validated. RFC 2231 values are not decoded or assembled."
             }
             Self::RepeatedContentTransferEncoding => {
                 "The MIME specifications require that each MIME part contain only one Content-Transfer-Encoding header. Multiple Content-Transfer-Encoding headers can lead to ambiguity and inconsistent behavior among different MIME parser implementations which may choose to use different Content-Transfer-Encoding headers as their \"source of truth\"."
