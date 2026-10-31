@@ -1909,7 +1909,7 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `c21dbd41`. Numeric identifiers
+and remarks are ported through MimeKit commit `b137b4dd`. Numeric identifiers
 match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
@@ -1938,8 +1938,14 @@ one ordinary fallback beside one extended or continued representation.
 `InvalidParameter` reports malformed declarations or fragments at their start
 (`ElementStart`), including missing names, equals signs or values and unclosed
 quotes or comments. Empty slots and quoted empty values remain valid. These
-optional checks follow tolerant tokenization, not strict grammar, and do not
-validate encoded RFC 2231 value contents or change recovery and decoding.
+optional syntax checks follow tolerant tokenization, not strict grammar.
+`InvalidRfc2231Parameter` separately reports malformed encoded values once per
+declaration (`ElementStart`): initial values require both charset/language
+delimiters, and encoded data must contain attribute characters or complete
+percent-encoded octets within each segment. Outer quotes and empty encoded
+noninitial segments are tolerated. Charset availability, language registration,
+and decoded character validity are not checked. These diagnostics do not change
+recovery, including percent escapes that the decoder assembles across segments.
 Missing RFC 2231 continuation segments are reported once per parameter, at the
 first continuation declaration (`ElementStart`), after scanning the header.
 Indices may appear out of order but must cover consecutive values starting at

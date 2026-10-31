@@ -4,11 +4,15 @@
 use std::io::{self, BufReader, Cursor};
 
 use mimecraft::{
-    MimeComplianceContext as Context, MimeComplianceIssue as Issue,
+    ContentDisposition, MimeComplianceContext as Context, MimeComplianceIssue as Issue,
     MimeComplianceOptions as Options, MimeCompliancePositionKind as PositionKind,
     MimeComplianceValidators as Validators, MimeComplianceViolation as Violation, MimeEntity,
     MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeEventParser, MimeParser, MimeReader,
+    ParameterComplianceMode, ParameterParseOptions,
 };
+
+#[path = "support/rfc2231_parameters.rs"]
+mod rfc2231_parameters;
 
 const BOUNDARY: Violation = Violation::RepeatedBoundaryParameter;
 const FILENAME: Violation = Violation::RepeatedFilenameParameter;
@@ -16,15 +20,225 @@ const PARAMETER: Violation = Violation::RepeatedParameter;
 const DISPOSITION: Violation = Violation::RepeatedContentDisposition;
 const MISSING: Violation = Violation::MissingParameterSegment;
 const INVALID: Violation = Violation::InvalidParameter;
+const INVALID_ENCODED: Violation = Violation::InvalidRfc2231Parameter;
 
 fn assert_invalid(issues: &[Issue], count: usize) {
-    let invalid: Vec<_> = issues.iter().filter(|i| i.violation == INVALID).collect();
-    assert_eq!(invalid.len(), count);
+    assert_element_start(issues, INVALID, count);
+}
+
+fn assert_invalid_encoded(issues: &[Issue], count: usize) {
+    assert_element_start(issues, INVALID_ENCODED, count);
+}
+
+fn assert_element_start(issues: &[Issue], violation: Violation, count: usize) {
+    let invalid: Vec<_> = issues.iter().filter(|i| i.violation == violation).collect();
+    assert_eq!(invalid.len(), count, "{violation:?}");
     assert!(
         invalid
             .iter()
             .all(|i| i.position_kind == PositionKind::ElementStart)
     );
+}
+
+#[test]
+fn upstream_encoded_parameter_cases() {
+    assert_eq!(rfc2231_parameters::CASES.len(), 50);
+    for &(parameters, count) in rfc2231_parameters::CASES {
+        for header in [
+            format!("Content-Disposition: attachment; {parameters}"),
+            format!(
+                "Content-Type: text/plain; {}",
+                parameters.replace("filename", "name")
+            ),
+        ] {
+            let text = format!("{header}\r\n\r\nbody\r\n");
+            let issues = read(&text, 4096, Options::default());
+            assert_invalid_encoded(&issues, count);
+            assert_invalid(&issues, 0);
+            for capacity in [1, 7] {
+                assert_eq!(
+                    read(&text, capacity, Options::default()),
+                    issues,
+                    "{header}"
+                );
+            }
+            assert_eq!(feed(&text, Options::default()), issues, "{header}");
+        }
+    }
+}
+
+#[test]
+fn malformed_syntax_precedes_encoded_value_validation() {
+    for parameters in [
+        "filename*=",
+        "filename*0*=",
+        "filename*=(comment)",
+        "filename*0*=(comment); size=1",
+        "filename*1*=\"unterminated",
+        "filename*1*=(unclosed",
+        "filename*=''bad% (unclosed",
+        "filename*1=",
+        "filename*1=; size=1",
+    ] {
+        let text = format!("Content-Disposition: attachment; {parameters}\r\n\r\nbody");
+        let issues = read(&text, 1, Options::default());
+        assert_invalid(&issues, 1);
+        assert_invalid_encoded(&issues, 0);
+        assert_eq!(feed(&text, Options::default()), issues);
+    }
+}
+
+const MALFORMED_ENCODED: &str = "X-Prefix: \u{e9}\r\nContent-Type: text/plain; x*2*=%GG;\r\n\
+\t(\u{e9}) name*=no-prefix;\r\n\tx*2*=%Q0; broken; other*=''bad%\r\n\r\nbody\r\n";
+const IGNORED_ENCODED: &str = "Content-Type: text/plain\r\n\
+Content-Type: text/html; name*=bad\r\n\
+Content-Disposition: attachment; filename=a\r\n\
+Content-Disposition: inline; filename*=utf-8''%GG\r\n\r\nbody\r\n";
+
+#[test]
+fn malformed_encoded_positions_preserve_other_parameter_diagnostics() {
+    for capacity in [1, 4096] {
+        let issues = read(MALFORMED_ENCODED, capacity, Options::default());
+        assert_invalid_encoded(&issues, 4);
+        let invalid: Vec<_> = issues
+            .iter()
+            .filter(|i| i.violation == INVALID_ENCODED)
+            .collect();
+        for (marker, issue) in ["x*2*=%GG", "name*=", "x*2*=%Q0", "other*="]
+            .iter()
+            .zip(invalid)
+        {
+            assert_position(MALFORMED_ENCODED, marker, issue, PositionKind::ElementStart);
+        }
+        for (violation, marker, kind) in [
+            (MISSING, "x*2*=%GG", PositionKind::ElementStart),
+            (PARAMETER, "x*2*=%Q0", PositionKind::Exact),
+            (INVALID, "broken;", PositionKind::ElementStart),
+        ] {
+            let selected: Vec<_> = issues.iter().filter(|i| i.violation == violation).collect();
+            assert_eq!(selected.len(), 1);
+            assert_position(MALFORMED_ENCODED, marker, selected[0], kind);
+        }
+        assert_eq!(feed(MALFORMED_ENCODED, Options::default()), issues);
+    }
+}
+
+#[test]
+fn ignored_headers_still_report_malformed_encoded_parameters_when_enabled() {
+    for enabled_validators in [
+        Validators::PARAMETERS,
+        Validators::BASE64 | Validators::QUOTED_PRINTABLE | Validators::UU_ENCODE,
+    ] {
+        let options = Options {
+            enabled_validators,
+            ..Default::default()
+        };
+        for capacity in [1, 4096] {
+            let issues = read(IGNORED_ENCODED, capacity, options);
+            if enabled_validators.contains(Validators::PARAMETERS) {
+                assert_invalid_encoded(&issues, 2);
+                let invalid: Vec<_> = issues
+                    .iter()
+                    .filter(|i| i.violation == INVALID_ENCODED)
+                    .collect();
+                assert_position(
+                    IGNORED_ENCODED,
+                    "name*=",
+                    invalid[0],
+                    PositionKind::ElementStart,
+                );
+                assert_position(
+                    IGNORED_ENCODED,
+                    "filename*=",
+                    invalid[1],
+                    PositionKind::ElementStart,
+                );
+            } else {
+                assert_invalid_encoded(&issues, 0);
+            }
+            assert_eq!(feed(IGNORED_ENCODED, options), issues);
+        }
+    }
+}
+
+#[test]
+fn encoded_reporting_preserves_recovered_filenames_body_and_serialization() {
+    assert_eq!(rfc2231_parameters::PRESERVATION_CASES.len(), 8);
+    for &(parameters, filename, count) in rfc2231_parameters::PRESERVATION_CASES {
+        let text = format!(
+            "Content-Type: text/plain\r\nContent-Disposition: attachment; {parameters}\r\n\r\nbody\r\n"
+        );
+        let mut expected = None;
+        for capacity in [1, 4096] {
+            for mode in [
+                ParameterComplianceMode::Strict,
+                ParameterComplianceMode::Loose,
+            ] {
+                for logging in [false, true] {
+                    for enabled_validators in [
+                        Validators::ALL,
+                        Validators::BASE64 | Validators::QUOTED_PRINTABLE | Validators::UU_ENCODE,
+                    ] {
+                        let mut parser = MimeParser::new(BufReader::with_capacity(
+                            capacity,
+                            Cursor::new(text.as_bytes()),
+                        ));
+                        parser.set_compliance_options(Options {
+                            enabled_validators,
+                            ..Default::default()
+                        });
+                        let mut issues = Vec::new();
+                        let mut message = if logging {
+                            parser
+                                .parse_message_with_logger(&mut |issue| {
+                                    issues.push(issue);
+                                    Ok(())
+                                })
+                                .unwrap()
+                        } else {
+                            parser.parse_message().unwrap()
+                        };
+                        let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+                            panic!("expected text part")
+                        };
+                        assert_eq!(part.content_type().unwrap().unwrap().name(), None);
+                        assert_eq!(
+                            part.content_disposition().unwrap().unwrap().file_name(),
+                            Some(filename)
+                        );
+                        // Rust applies explicit parameter options at typed access, not reader recovery.
+                        let disposition = ContentDisposition::parse_with_options(
+                            part.headers()
+                                .get("Content-Disposition")
+                                .unwrap()
+                                .raw_value(),
+                            &ParameterParseOptions {
+                                compliance_mode: mode,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(disposition.file_name(), Some(filename));
+                        let mut decoded = Vec::new();
+                        part.content_mut().decode_to(&mut decoded).unwrap();
+                        assert_eq!(decoded, b"body\r\n");
+                        let mut actual = Vec::new();
+                        message.write_to(&mut actual).unwrap();
+                        assert_eq!(&actual, expected.get_or_insert_with(|| actual.clone()));
+                        assert_invalid(&issues, 0);
+                        assert_invalid_encoded(
+                            &issues,
+                            if logging && enabled_validators.contains(Validators::PARAMETERS) {
+                                count
+                            } else {
+                                0
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -513,7 +727,7 @@ const NESTED: &str = "Content-Type: multipart/mixed; boundary=b\r\nContent-Dispo
 --b\r\nContent-Type: message/rfc822\r\nContent-Disposition: inline\r\n\r\n\
 Content-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\ntwo\r\n--b--\r\n";
 const LIMITED: &str = "Content-Type: text/plain; x=1; x=2; x=3; x=4; boundary=a; boundary=b\r\n\
-Content-Disposition: attachment; filename=a; filename=b; filename=c; a*1=x; b*3=y; bad; broken=\r\n\
+Content-Disposition: attachment; filename=a; filename=b; filename=c; a*1=x; b*3=y; enc*=bad; other*=bad; bad; broken=\r\n\
 Content-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\nbody\r\n";
 const CONTINUED: &str = "Content-Type: text/plain\r\n\
 Content-Disposition: attachment; filename*0=file.; filename*2=txt\r\n\r\nbody\r\n";
@@ -837,7 +1051,7 @@ fn disposition_state_and_parameter_budgets_reset_between_mbox_messages() {
 #[test]
 fn header_length_limit_precedes_parameter_validation() {
     let text = format!(
-        "Content-Type: text/plain; broken; x*1=1; x*1=2; x={}\r\n\r\n",
+        "Content-Type: text/plain; broken; bad*=missing; x*1=1; x*1=2; x={}\r\n\r\n",
         "a".repeat(256)
     );
     for capacity in [1, 4096] {
@@ -860,6 +1074,7 @@ fn header_length_limit_precedes_parameter_validation() {
         assert_parameters(&issues, &[]);
         assert!(!issues.iter().any(|i| i.violation == MISSING));
         assert_invalid(&issues, 0);
+        assert_invalid_encoded(&issues, 0);
     }
 }
 
@@ -878,6 +1093,7 @@ fn new_violations_have_separate_reporting_budgets() {
         DISPOSITION,
         MISSING,
         INVALID,
+        INVALID_ENCODED,
         Violation::TooManyComplianceIssues,
     ] {
         assert_eq!(
@@ -897,6 +1113,7 @@ fn reporting_preserves_selected_headers_body_and_serialization() {
         (CONTINUED, "file.txt", 0),
         (INVALID_HEADERS, "a", 1),
         (IGNORED_MALFORMED, "a", 2),
+        (IGNORED_ENCODED, "a", 0),
     ] {
         let mut expected = None;
         for logging in [false, true] {
@@ -957,6 +1174,17 @@ fn reporting_preserves_selected_headers_body_and_serialization() {
                             && text == CONTINUED
                     ),
                 );
+                assert_invalid_encoded(
+                    &issues,
+                    if logging
+                        && enabled_validators.contains(Validators::PARAMETERS)
+                        && text == IGNORED_ENCODED
+                    {
+                        2
+                    } else {
+                        0
+                    },
+                );
             }
         }
     }
@@ -971,6 +1199,7 @@ fn logger_errors_from_each_new_violation_and_the_budget_marker_propagate() {
         DISPOSITION,
         MISSING,
         INVALID,
+        INVALID_ENCODED,
         Violation::TooManyComplianceIssues,
     ] {
         let mut reader = MimeReader::new(LIMITED.as_bytes());

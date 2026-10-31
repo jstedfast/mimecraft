@@ -1,71 +1,15 @@
 // Adapted from MimeKit's MimeComplianceParameterTests.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    cell::Cell,
-    fmt::Write,
-    time::{Duration, Instant},
-};
+use std::{fmt::Write, time::Duration};
 
 use mimecraft::{
     MimeComplianceIssue, MimeComplianceOptions, MimeCompliancePositionKind,
     MimeComplianceViolation as Violation, MimeEntityParseOptions, MimeReader,
 };
 
-struct MeasuredAllocator;
-
-thread_local! {
-    static ALLOCATED: Cell<Option<usize>> = const { Cell::new(None) };
-}
-
-fn record(size: usize) {
-    // TLS may be unavailable during thread teardown, outside any measurement.
-    let _ = ALLOCATED.try_with(|allocated| {
-        if let Some(bytes) = allocated.get() {
-            allocated.set(Some(bytes + size));
-        }
-    });
-}
-
-// SAFETY: All allocation operations preserve System's pointer/layout contract.
-// Accounting is thread-local, does not allocate, and never touches the memory.
-unsafe impl GlobalAlloc for MeasuredAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: The caller supplies a valid allocation layout.
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            record(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: The caller supplies a valid allocation layout.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            record(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        // SAFETY: The caller supplies a System allocation and its original layout.
-        let pointer = unsafe { System.realloc(pointer, layout, size) };
-        if !pointer.is_null() {
-            record(size);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: The pointer and layout are forwarded unchanged to their allocator.
-        unsafe { System.dealloc(pointer, layout) };
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
+#[path = "support/allocation_tracking.rs"]
+mod allocation_tracking;
 
 fn measure_headers(text: &str) -> (Vec<MimeComplianceIssue>, usize, Duration) {
     let mut reader = MimeReader::with_options(
@@ -83,17 +27,15 @@ fn measure_headers(text: &str) -> (Vec<MimeComplianceIssue>, usize, Duration) {
     let mut issues = Vec::new();
     // Unlike the upstream private-validator measurement, this also includes
     // raw header parsing and reporting setup, under the same allocation cap.
-    let start = Instant::now();
-    ALLOCATED.with(|allocated| allocated.set(Some(0)));
-    let result = reader.read_headers_with_logger(
-        &mut |issue: MimeComplianceIssue| {
-            issues.push(issue);
-            Ok(())
-        },
-        |_| Ok(()),
-    );
-    let allocated = ALLOCATED.with(|allocated| allocated.replace(None).unwrap());
-    let elapsed = start.elapsed();
+    let (result, allocated, elapsed) = allocation_tracking::measure(|| {
+        reader.read_headers_with_logger(
+            &mut |issue: MimeComplianceIssue| {
+                issues.push(issue);
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+    });
     result.unwrap();
     (issues, allocated, elapsed)
 }

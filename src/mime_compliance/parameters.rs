@@ -13,7 +13,8 @@ use super::{
 use crate::{
     HeaderId, MimePosition,
     parse_utils::{
-        is_attribute, skip_comment, skip_comments_and_whitespace, skip_quoted, skip_whitespace,
+        is_attribute, is_whitespace, skip_comment, skip_comments_and_whitespace, skip_quoted,
+        skip_whitespace,
     },
 };
 
@@ -156,34 +157,83 @@ impl<'a> Scanner<'a> {
         })
     }
 
-    fn skip_value(&mut self) -> (bool, bool) {
-        if !self.cfws() || self.index == self.text.len() {
-            return (false, true);
+    fn skip_value(&mut self, allow_empty: bool) -> (bool, Option<&'a [u8]>) {
+        if !self.cfws() {
+            return (false, None);
         }
-        let invalid = if self.text[self.index] == b'"' {
+        let start = self.index;
+        if self.index == self.text.len() {
+            return (false, allow_empty.then_some(&self.text[start..start]));
+        }
+        let end = if self.text[self.index] == b'"' {
             if skip_quoted(self.text, &mut self.index).is_err() {
-                return (false, true);
+                return (false, None);
             }
-            false
+            self.index
         } else {
-            let start = self.index;
             while self.index < self.text.len() && !matches!(self.text[self.index], b';' | b'(') {
                 self.index += 1;
             }
-            self.index == start
+            let mut end = self.index;
+            while end > start && is_whitespace(self.text[end - 1]) {
+                end -= 1;
+            }
+            end
         };
+        let value = (end != start || allow_empty).then_some(&self.text[start..end]);
         if !self.cfws() {
-            return (false, true);
+            return (false, None);
         }
         if self.index == self.text.len() {
-            return (false, invalid);
+            return (false, value);
         }
         // Loose parsing also accepts a missing separator after a quote or comment.
         if self.text[self.index] == b';' {
             self.index += 1;
         }
-        (self.index < self.text.len(), invalid)
+        (self.index < self.text.len(), value)
     }
+}
+
+fn validate_encoded_value(mut value: &[u8], initial: bool) -> bool {
+    // Match the decoder's tolerance for quoted extended values.
+    if value.len() >= 2 && value[0] == b'"' && value[value.len() - 1] == b'"' {
+        value = &value[1..value.len() - 1];
+    }
+    let mut index = 0;
+    if initial {
+        for _ in 0..2 {
+            while index < value.len() && value[index] != b'\'' {
+                if value[index] <= 32 || value[index] >= 127 {
+                    return false;
+                }
+                index += 1;
+            }
+            if index == value.len() {
+                return false;
+            }
+            index += 1;
+        }
+    }
+    // RFC 2231 section 7 requires complete ext-octets in each segment,
+    // even though a multibyte character may span several segments.
+    while index < value.len() {
+        if value[index] == b'%' {
+            if value.len() - index < 3
+                || !value[index + 1].is_ascii_hexdigit()
+                || !value[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            if !is_attribute(value[index]) {
+                return false;
+            }
+            index += 1;
+        }
+    }
+    true
 }
 
 pub(super) fn validate(
@@ -288,10 +338,18 @@ pub(super) fn validate(
                 MimeCompliancePositionKind::Exact,
             ))?;
         }
-        let (more, invalid) = scanner.skip_value();
-        if invalid {
+        let initial = declaration.segment.is_none_or(|segment| segment == 0);
+        let (more, value) = scanner.skip_value(declaration.encoded && !initial);
+        let violation = match value {
+            None => Some(Violation::InvalidParameter),
+            Some(value) if declaration.encoded && !validate_encoded_value(value, initial) => {
+                Some(Violation::InvalidRfc2231Parameter)
+            }
+            _ => None,
+        };
+        if let Some(violation) = violation {
             logger.log(create_issue(
-                Violation::InvalidParameter,
+                violation,
                 declaration.start,
                 MimeCompliancePositionKind::ElementStart,
             ))?;
@@ -313,8 +371,156 @@ pub(super) fn validate(
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/allocation_tracking.rs"]
+mod allocation_tracking;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn measure_validation(text: &[u8]) -> (Vec<MimeComplianceIssue>, usize, Duration) {
+        let mut issues = Vec::new();
+        let (result, allocated, elapsed) = allocation_tracking::measure(|| {
+            validate(
+                text,
+                HeaderId::ContentType,
+                MimePosition { offset: 0, line: 1 },
+                1,
+                MimeComplianceContext::Transport,
+                &mut |issue| {
+                    issues.push(issue);
+                    Ok(())
+                },
+            )
+        });
+        result.unwrap();
+        (issues, allocated, elapsed)
+    }
+
+    #[test]
+    fn encoded_calls_preserve_slice_offsets_and_clear_state() {
+        let value = "text/plain;\r\n name*=utf-8''file%2";
+        let bytes = format!("xx{value}0yy");
+        for _ in 0..2 {
+            for text in [
+                &bytes.as_bytes()[2..2 + value.len()],
+                b"text/plain; name*0*=utf-8''%C3; name*1*=%A9",
+            ] {
+                let mut issues = Vec::new();
+                validate(
+                    text,
+                    HeaderId::ContentType,
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                    &mut |issue| {
+                        issues.push(issue);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                if text == value.as_bytes() {
+                    assert_eq!(issues.len(), 1);
+                    let issue = issues[0];
+                    assert_eq!(issue.violation, Violation::InvalidRfc2231Parameter);
+                    assert_eq!(
+                        issue.stream_offset,
+                        100 + value.find("name*=").unwrap() as u64
+                    );
+                    assert_eq!(issue.line_number, 6);
+                    assert_eq!(issue.column_number, 2);
+                    assert_eq!(issue.context, MimeComplianceContext::Storage);
+                    assert_eq!(
+                        issue.position_kind,
+                        MimeCompliancePositionKind::ElementStart
+                    );
+                } else {
+                    assert!(issues.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn many_malformed_encoded_values_are_bounded() {
+        const COUNT: usize = 16_384;
+        let parameter = "x*=utf-8''%GG";
+        let text = format!("text/plain{}", format!(";\r\n {parameter}").repeat(COUNT));
+        let (issues, allocated, elapsed) = measure_validation(text.as_bytes());
+        assert_eq!(issues.len(), COUNT * 2 - 1);
+        let invalid: Vec<_> = issues
+            .iter()
+            .filter(|i| i.violation == Violation::InvalidRfc2231Parameter)
+            .collect();
+        assert_eq!(invalid.len(), COUNT);
+        assert!(
+            invalid
+                .iter()
+                .all(|i| i.position_kind == MimeCompliancePositionKind::ElementStart)
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| i.violation == Violation::RepeatedParameter)
+                .count(),
+            COUNT - 1
+        );
+        let last = issues.last().unwrap();
+        assert_eq!(last.line_number, COUNT as u64 + 1);
+        assert_eq!(last.column_number, 2);
+        assert_eq!(last.stream_offset, (text.len() - parameter.len()) as u64);
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert!(allocated < COUNT * 256 + 65536, "{allocated} bytes");
+    }
+
+    #[test]
+    fn encoded_value_scan_is_bounded() {
+        for prefix in [false, true] {
+            let text = format!(
+                "text/plain; name*={}{}%2",
+                if prefix { "utf-8''" } else { "" },
+                "a".repeat(1024 * 1024)
+            );
+            let (issues, allocated, elapsed) = measure_validation(text.as_bytes());
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].violation, Violation::InvalidRfc2231Parameter);
+            assert_eq!(
+                issues[0].position_kind,
+                MimeCompliancePositionKind::ElementStart
+            );
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "prefix={prefix}: {elapsed:?}"
+            );
+            assert!(allocated < 65536, "prefix={prefix}: {allocated} bytes");
+        }
+    }
+
+    #[test]
+    fn encoded_value_validation_checks_raw_bytes_without_decoding() {
+        for value in [
+            b"utf-\x7f''file".as_slice(),
+            b"utf-\xff''file",
+            b"utf-8'e\t n'file",
+            b"utf-8''file\x00",
+            b"utf-8''file\x7f",
+            b"utf-8''file\xff",
+            b"\"utf-8''file\\\"name\"",
+            b"\"utf-8''file;name\"",
+        ] {
+            assert!(!validate_encoded_value(value, true), "{value:?}");
+        }
+        for value in [
+            b"utf-8''%00%7F%FF".as_slice(),
+            b"x-unknown'not-registered'%ff",
+        ] {
+            assert!(validate_encoded_value(value, true), "{value:?}");
+        }
+    }
 
     #[test]
     fn repeated_calls_preserve_slice_offsets_and_initial_column() {

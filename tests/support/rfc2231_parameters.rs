@@ -1,0 +1,90 @@
+// Adapted from MimeKit's MimeComplianceParameterTests.cs.
+// Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
+
+// Regression cases inspired by https://github.com/noxxi/mime-is-broken
+// and RFC 2231 sections 4 and 7.
+pub const CASES: &[(&str, usize)] = &[
+    ("filename*=utf-8''file%20name.txt", 0),
+    ("filename*=''file.txt", 0),
+    ("filename*='en'file.txt", 0),
+    ("filename*=utf-8'en-US'file.txt", 0),
+    ("filename*=''", 0),
+    ("filename*=x-unsupported-charset''file.txt", 0),
+    ("filename*=ISO_8859-1:1987''file.txt", 0),
+    ("filename*=x-%charset''file.txt", 0),
+    ("filename*=\"''file%2Etxt\"", 0),
+    ("filename*=utf-8''caf%c3%a9", 0),
+    ("filename*=utf-8''%00%FF", 0),
+    ("filename*0*=utf-8''%C3; filename*1*=%A9.txt", 0),
+    ("filename*1*=%A9.txt; filename*0*=utf-8''%C3", 0),
+    ("filename*0*=''file; filename*1=.txt; filename*2*=%21", 0),
+    ("filename*0=file; filename*1*=%2Etxt", 0),
+    ("filename*1*=%2Etxt", 0),
+    ("filename*0*=''; filename*1*=file.txt", 0),
+    ("filename*0*=''file; filename*1*=\"\"", 0),
+    ("filename*0*=''file; filename*1*=", 0),
+    ("filename*0*=''file; filename*1*=; filename*2*=.txt", 0),
+    ("filename*0*=''file; filename*1*=(comment)", 0),
+    ("filename*=''file (comment; ignored=%GG)", 0),
+    ("filename*=''file\r\n\t(comment)", 0),
+    ("filename=%GG; other*0=%; other*1=GG", 0),
+    ("filename*=file.txt", 1),
+    ("filename*=utf-8'file.txt", 1),
+    ("filename*='file.txt", 1),
+    ("filename*=\"\"", 1),
+    ("filename*=utf 8''file.txt", 1),
+    ("filename*=utf-8'en US'file.txt", 1),
+    ("filename*=utf-8''file%", 1),
+    ("filename*=utf-8''file%2", 1),
+    ("filename*=utf-8''file%GG", 1),
+    ("filename*=utf-8''file%2G%G2", 1),
+    ("filename*=utf-8''file%%20", 1),
+    ("filename*=utf-8''file name.txt", 1),
+    ("filename*=utf-8''file\r\n\tname.txt", 1),
+    ("filename*=utf-8''caf\u{e9}", 1),
+    ("filename*=utf-8''file*name", 1),
+    ("filename*=utf-8''file'name", 1),
+    ("filename*=\"utf-8''file%GG\"", 1),
+    ("filename*0*=file; filename*1*=%2Etxt", 1),
+    ("filename*0*=''file; filename*1*=utf-8''txt", 1),
+    ("filename*0*=''file%; filename*1*=20name", 1),
+    ("filename*1*=0name; filename*0*=''file%2", 1),
+    ("filename*0*=utf-8''caf%C; filename*1*=3%A9.txt", 1),
+    ("filename*0*=''file%; filename*1=20name", 1),
+    ("filename*0*=''file%; filename*2*=20name", 1),
+    ("filename*=''file%; filename*=''other%GG", 2),
+    ("filename*=bad; other*=bad", 2),
+];
+
+// Preserve recovery for malformed encodings encountered in
+// https://github.com/noxxi/mime-is-broken.
+pub const PRESERVATION_CASES: &[(&str, &str, usize)] = &[
+    (
+        "filename*0*=utf-8''caf%C3; filename*1*=%A9.txt",
+        "caf\u{e9}.txt",
+        0,
+    ),
+    (
+        "filename*0*=utf-8''caf%C; filename*1*=3%A9.txt",
+        "caf\u{e9}.txt",
+        1,
+    ),
+    (
+        "filename*1*=3%A9.txt; filename*0*=utf-8''caf%C",
+        "caf\u{e9}.txt",
+        1,
+    ),
+    (
+        "filename*0*=\"utf-8''caf%\"; filename*1*=\"C3%A9.txt\"",
+        "caf\u{e9}.txt",
+        1,
+    ),
+    ("filename*=''file%GG.txt", "file%GG.txt", 1),
+    ("filename*=utf-8'file.txt", "utf-8'file.txt", 1),
+    (
+        "filename*=x-unsupported-charset''caf%E9.txt",
+        "caf\u{e9}.txt",
+        0,
+    ),
+    ("filename*0=file; filename*1*=%2Etxt", "file.txt", 0),
+];

@@ -178,8 +178,8 @@ impl MimeComplianceValidators {
     pub const QUOTED_PRINTABLE: Self = Self(2);
     /// Validate UU begin/end markers, file mode, and encoded lines.
     pub const UU_ENCODE: Self = Self(4);
-    /// Validate malformed or repeated parameters and missing RFC 2231 continuation segments
-    /// in Content-Type and Content-Disposition headers.
+    /// Validate malformed or repeated parameters, malformed RFC 2231 encoded values,
+    /// and missing continuation segments in Content-Type and Content-Disposition headers.
     pub const PARAMETERS: Self = Self(16);
     /// All currently implemented validators.
     pub const ALL: Self = Self(7 | 16);

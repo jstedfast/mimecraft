@@ -369,7 +369,8 @@
 //! ```
 
 #![deny(unsafe_code)]
-#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]
+// Unit tests narrowly allow a System allocator shim to measure allocation limits.
+#![cfg_attr(all(not(feature = "simd"), not(test)), forbid(unsafe_code))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 

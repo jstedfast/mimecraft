@@ -10,6 +10,39 @@ use mimecraft::{
 #[path = "support/content_type_syntax.rs"]
 mod content_type_syntax;
 
+#[path = "support/rfc2231_parameters.rs"]
+mod rfc2231_parameters;
+
+#[test]
+fn encoded_parameter_reporting_survives_every_split() {
+    for &(parameters, _) in rfc2231_parameters::CASES {
+        for header in [
+            format!("Content-Disposition: attachment; {parameters}"),
+            format!(
+                "Content-Type: text/plain; {}",
+                parameters.replace("filename", "name")
+            ),
+        ] {
+            let text = format!("{header}\r\n\r\nbody\r\n");
+            assert_splits(
+                text.as_bytes(),
+                MimeEventFormat::Message,
+                Default::default(),
+            );
+        }
+    }
+    for &(parameters, _, _) in rfc2231_parameters::PRESERVATION_CASES {
+        let text = format!(
+            "Content-Type: text/plain\r\nContent-Disposition: attachment; {parameters}\r\n\r\nbody\r\n"
+        );
+        assert_splits(
+            text.as_bytes(),
+            MimeEventFormat::Message,
+            Default::default(),
+        );
+    }
+}
+
 #[test]
 fn content_type_syntax_reporting_survives_every_split() {
     for &(value, _, _, _) in content_type_syntax::CASES {
@@ -180,6 +213,10 @@ fn assert_splits(wire: &[u8], format: MimeEventFormat, options: MimeEntityParseO
 #[test]
 fn repeated_parameters_and_disposition_survive_every_split() {
     let wires: &[&[u8]] = &[
+        b"X-Prefix: \xc3\xa9\r\nContent-Type: text/plain; x*2*=%GG;\r\n\
+\t(\xc3\xa9) name*=no-prefix;\r\n\tx*2*=%Q0; broken; other*=''bad%\r\n\r\nbody\r\n",
+        b"Content-Type: text/plain\r\nContent-Type: text/html; name*=bad\r\n\
+Content-Disposition: attachment; filename=a\r\nContent-Disposition: inline; filename*=utf-8''%GG\r\n\r\nbody\r\n",
         b"X-Prefix: \xc3\xa9\r\nContent-Type: text/plain; z*2=x;\r\n\
 \t(\xc3\xa9) name;\r\n\tz*2=y; filename=;\r\n\tsize=\"unterminated\r\n\r\nbody\r\n",
         b"Content-Type: text/plain\r\nContent-Type: text/html; name\r\n\
@@ -721,6 +758,10 @@ fn callbacks_and_logger_failures_are_terminal_and_preserve_errors() {
         (
             b"Content-Type: text/plain; broken\r\n\r\nbody",
             Some(MimeComplianceViolation::InvalidParameter),
+        ),
+        (
+            b"Content-Type: text/plain; name*=bad\r\n\r\nbody",
+            Some(MimeComplianceViolation::InvalidRfc2231Parameter),
         ),
     ] {
         for split in 0..=wire.len() {
