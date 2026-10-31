@@ -1909,8 +1909,8 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `21860252`. Numeric identifiers
-match its unreleased enum, including that commit's renumbering, and are not
+and remarks are ported through MimeKit commit `8cca4762`. Numeric identifiers
+match its unreleased enum, including the renumbering in `21860252`, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
 currently covers raw-header syntax and line format, repeated/missing message
@@ -1923,6 +1923,11 @@ event. The newline before a MIME or mbox boundary is validated even though it
 is excluded from content callbacks; the marker itself is not encoded content.
 Diagnostics retain MimeKit's per-line suppression of repeated malformed-byte
 findings, in addition to the configurable per-violation quotas.
+
+`InvalidContentType` also reports unexpected text after a recognizable media
+type and before any parameter separator. This structural check remains enabled
+with `NONE`; parameter syntax failures alone do not trigger it. Tolerant reader
+recovery and raw serialization are unchanged, and typed getters remain strict.
 
 Parameter validation inspects every raw Content-Type and Content-Disposition
 header independently of decoded-value precedence. It reports repeated boundary,

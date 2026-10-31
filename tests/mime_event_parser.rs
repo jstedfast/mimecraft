@@ -7,6 +7,28 @@ use mimecraft::{
     MimeEventFormat, MimeEventParser, MimePosition, MimeReader,
 };
 
+#[path = "support/content_type_syntax.rs"]
+mod content_type_syntax;
+
+#[test]
+fn content_type_syntax_reporting_survives_every_split() {
+    for &(value, _, _, _) in content_type_syntax::CASES {
+        let text = format!("Subject: syntax\r\nContent-Type: {value}\r\n\r\nbody\r\n");
+        assert_splits(
+            text.as_bytes(),
+            MimeEventFormat::Message,
+            MimeEntityParseOptions::default(),
+        );
+    }
+    let nested = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n\
+--b\r\nContent-Type: text/plain junk\r\n\r\nbody\r\n--b--\r\n";
+    assert_splits(
+        nested,
+        MimeEventFormat::Message,
+        MimeEntityParseOptions::default(),
+    );
+}
+
 #[derive(Debug, PartialEq)]
 enum Recorded {
     Event(String),

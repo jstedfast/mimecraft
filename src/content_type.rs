@@ -175,7 +175,11 @@ impl ContentType {
     // header remains intact; the boolean requests an InvalidContentType report.
     pub(crate) fn parse_for_reader(input: &[u8]) -> (Self, bool) {
         let (mut content_type, index, invalid) = match Self::parse_mime_type(input) {
-            Ok((content_type, index)) => (content_type, index, false),
+            Ok((content_type, index)) => {
+                // Distinguish malformed media types from failures in the parameter list.
+                let invalid = input.get(index).is_some_and(|&byte| byte != b';');
+                (content_type, index, invalid)
+            }
             Err(error) => {
                 let index = input[error.offset()..]
                     .iter()
@@ -383,5 +387,27 @@ impl FromStr for ContentType {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("../tests/support/content_type_syntax.rs");
+
+    #[test]
+    fn reader_distinguishes_invalid_media_types_from_parameter_failures() {
+        assert_eq!(CASES.len(), 18);
+        for &(value, invalid, mime_type, charset) in CASES {
+            let (parsed, reported) = ContentType::parse_for_reader(value.as_bytes());
+            assert_eq!(reported, invalid, "{value:?}");
+            assert_eq!(parsed.mime_type(), mime_type, "{value:?}");
+            assert_eq!(parsed.charset(), charset, "{value:?}");
+            assert_eq!(
+                parsed.parameters().len(),
+                usize::from(charset.is_some()),
+                "{value:?}"
+            );
+        }
     }
 }

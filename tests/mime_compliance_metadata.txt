@@ -36,7 +36,7 @@
 35	MissingFrom	Major	Major	5	0e04e235bc2d64c1	7f517ed66544fc12
 36	MissingMessageId	Minor	Minor	1	fd88d8d0c390b3de	9ff5e520414f9e79
 37	MissingMimeVersion	Minor	Minor	1	cbc17eac7e1e9b46	70aca7986ccbfa37
-38	InvalidContentType	Major	Major	5	8a5c62f48ce72c0c	77086cea7f634b39
+38	InvalidContentType	Major	Major	5	8a5c62f48ce72c0c	a626050f4f7c3251
 39	InvalidContentTransferEncoding	Major	Major	7	fbcc3be515e7c6d7	803e8d3c112ea7ae
 40	IllegalMessageRfc822ContentTransferEncoding	Major	Major	5	0201bf4f85d9186f	806ad000389bdb3e
 41	IllegalMultipartContentTransferEncoding	Major	Major	5	47f31a177a17dde3	a0e5ddb03feaaf11

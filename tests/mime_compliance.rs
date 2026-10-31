@@ -11,6 +11,150 @@ use mimecraft::{
     MimeEntityParseOptions, MimeEvent, MimeParser, MimeReader,
 };
 
+#[path = "support/content_type_syntax.rs"]
+mod content_type_syntax;
+
+#[test]
+fn content_type_syntax_reporting_preserves_recovery_and_serialization() {
+    use mimecraft::{
+        ContentType, MimeComplianceValidators as Validators, MimeEntity, ParameterComplianceMode,
+        ParameterParseOptions,
+    };
+
+    const PREFIX: &str = "Subject: content-type syntax\r\n";
+    for &(value, invalid, _, _) in content_type_syntax::CASES {
+        let raw_value = format!(" {value}\r\n");
+        let text = format!("{PREFIX}Content-Type:{raw_value}\r\nbody\r\n");
+        for capacity in [1, 7, 4096] {
+            for enabled_validators in [Validators::NONE, Validators::ALL] {
+                for logging in [false, true] {
+                    let mut parser = MimeParser::new(BufReader::with_capacity(
+                        capacity,
+                        Cursor::new(text.as_bytes()),
+                    ));
+                    parser.set_compliance_options(MimeComplianceOptions {
+                        enabled_validators,
+                        ..Default::default()
+                    });
+                    let mut issues = Vec::new();
+                    let mut message = if logging {
+                        parser
+                            .parse_message_with_logger(&mut |issue| {
+                                issues.push(issue);
+                                Ok(())
+                            })
+                            .unwrap()
+                    } else {
+                        parser.parse_message().unwrap()
+                    };
+                    let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+                        panic!("expected a leaf part")
+                    };
+                    assert_eq!(
+                        part.headers().get("Content-Type").unwrap().raw_value(),
+                        raw_value.as_bytes()
+                    );
+                    // Rust applies parameter modes at typed access, not reader recovery.
+                    // Its typed getters remain strict even when the reader recovers a type.
+                    for compliance_mode in [
+                        ParameterComplianceMode::Loose,
+                        ParameterComplianceMode::Strict,
+                    ] {
+                        let options = ParameterParseOptions {
+                            compliance_mode,
+                            ..Default::default()
+                        };
+                        assert_eq!(
+                            part.content_type_with_options(&options),
+                            ContentType::parse_with_options(raw_value.as_bytes(), &options)
+                                .map(Some)
+                        );
+                    }
+                    let mut decoded = Vec::new();
+                    part.content_mut().decode_to(&mut decoded).unwrap();
+                    assert_eq!(decoded, b"body\r\n");
+                    let invalid_types: Vec<_> = issues
+                        .iter()
+                        .filter(|i| i.violation == Violation::InvalidContentType)
+                        .collect();
+                    assert_eq!(
+                        invalid_types.len(),
+                        usize::from(invalid && logging),
+                        "{value:?}"
+                    );
+                    if invalid && logging {
+                        assert_eq!(invalid_types[0].stream_offset, PREFIX.len() as u64);
+                        assert_eq!(invalid_types[0].line_number, 2);
+                        assert_eq!(invalid_types[0].column_number, 1);
+                        assert_eq!(invalid_types[0].position_kind, PositionKind::ElementStart);
+                    }
+                    let mut serialized = Vec::new();
+                    message.write_to(&mut serialized).unwrap();
+                    assert_eq!(serialized, text.as_bytes());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn trailing_content_type_text_reports_only_for_the_selected_header() {
+    for (headers, invalid) in [
+        (
+            "Content-Type: text/plain\r\nContent-Type: text/plain junk\r\n",
+            0,
+        ),
+        (
+            "Content-Type: text/plain junk\r\nContent-Type: text/html junk\r\n",
+            1,
+        ),
+    ] {
+        let text = format!("{headers}\r\nbody\r\n");
+        let (result, issues) = read(text.as_bytes(), 1);
+        result.unwrap();
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| i.violation == Violation::InvalidContentType)
+                .count(),
+            invalid
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| i.violation == Violation::RepeatedContentType)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn logger_can_reject_trailing_content_type_text_with_validators_disabled() {
+    let mut reader = MimeReader::new(b"Content-Type: text/plain junk\r\n\r\nbody".as_slice());
+    reader.set_compliance_options(MimeComplianceOptions {
+        enabled_validators: mimecraft::MimeComplianceValidators::NONE,
+        ..Default::default()
+    });
+    let mut reported = 0;
+    let error = reader
+        .read_entity_with_logger(
+            &mut |issue: Issue| {
+                assert_eq!(issue.violation, Violation::InvalidContentType);
+                reported += 1;
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "invalid media type",
+                ))
+            },
+            |_| panic!("rejected headers must not emit entity events"),
+        )
+        .unwrap_err();
+    assert_eq!(reported, 1);
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(error.to_string(), "invalid media type");
+}
+
 fn issue(violation: Violation) -> Issue {
     Issue {
         context: Context::Transport,

@@ -1038,7 +1038,7 @@ impl MimeComplianceViolation {
                 "The MIME specifications require a message that uses MIME to declare itself as such with a MIME-Version header field. Without one, the message is strictly a plain Internet message and a conforming agent may ignore its Content-Type and Content-Transfer-Encoding header fields, although in practice most agents honor them anyway."
             }
             Self::InvalidContentType => {
-                "This indicates that the Content-Type header was not properly formatted and could not be parsed. Since MIME parsers rely on the Content-Type header to decide how to interpret the content of a MIME part, an invalid Content-Type header can lead to ambiguity and inconsistent behavior among different MIME parser implementations."
+                "This indicates that the Content-Type media type was not properly formatted, including unexpected text after a recognizable type/subtype and before any parameter separator. Since MIME parsers rely on the Content-Type header to decide how to interpret the content of a MIME part, an invalid Content-Type header can lead to ambiguity and inconsistent behavior among different MIME parser implementations."
             }
             Self::InvalidContentTransferEncoding => {
                 "This indicates that the Content-Transfer-Encoding header did not contain a valid value and could not be parsed."
