@@ -289,6 +289,8 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
     /// Unread properties of the current row are skipped. Non-table attributes
     /// return an empty vector without advancing. Rows grow as they are read;
     /// declared counts are never used for upfront allocation.
+    /// Each set can be moved into a [`crate::tnef::TnefRecipient`] to access
+    /// checked recipient fields without cloning its properties.
     ///
     /// # Errors
     ///

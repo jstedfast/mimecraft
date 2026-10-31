@@ -2,32 +2,7 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use super::{EncoderOptionsError, InvalidLineLength, NewLineFormat};
-
-// Generate the same reflected CRC-32 table as MimeKit at compile time. Both
-// codecs retain the uncomplemented running state, initialized to all ones.
-static CRC32_TABLE: [u32; 256] = {
-    let mut table = [0; 256];
-    let mut index = 0;
-    while index < table.len() {
-        let mut crc = index as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[index] = crc;
-        index += 1;
-    }
-    table
-};
-
-fn update_crc(crc: u32, byte: u8) -> u32 {
-    CRC32_TABLE[((crc ^ u32::from(byte)) & 255) as usize] ^ (crc >> 8)
-}
+use crate::crc32::update as update_crc;
 
 /// An incremental yEnc payload encoder with CRC-32 tracking.
 ///

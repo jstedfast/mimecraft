@@ -20,6 +20,49 @@ mod embedded_workloads;
 #[path = "support/tnef_conversions.rs"]
 mod conversion_workloads;
 
+#[path = "support/tnef_recipients.rs"]
+mod recipient_workloads;
+
+#[path = "support/rtf_compressed.rs"]
+mod rtf_compressed_workloads;
+
+fn prepare_rtf_compressed(name: &'static str) -> rtf_compressed_workloads::Workload {
+    let case = rtf_compressed_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(RTF_COMPRESSED, "rtf-compressed", "Decode")]
+#[bench::Literals(&prepare_rtf_compressed("Literals"))]
+#[bench::References(&prepare_rtf_compressed("References"))]
+#[bench::Uncompressed(&prepare_rtf_compressed("Uncompressed"))]
+#[bench::ShortChunks(&prepare_rtf_compressed("ShortChunks"))]
+fn rtf_compressed(case: &rtf_compressed_workloads::Workload) -> rtf_compressed_workloads::Summary {
+    rtf_compressed_workloads::read(case)
+}
+
+fn prepare_recipients(name: &'static str) -> recipient_workloads::Workload {
+    let case = recipient_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(RECIPIENT_LOAD, "tnef-recipients", "Load")]
+#[bench::Direct(&prepare_recipients("Direct"))]
+#[bench::Fallbacks(&prepare_recipients("Fallbacks"))]
+#[bench::BinaryText(&prepare_recipients("BinaryText"))]
+fn recipient_load(case: &recipient_workloads::Workload) -> recipient_workloads::Summary {
+    recipient_workloads::read(case, recipient_workloads::Mode::Load)
+}
+
+#[metabench::benchmark(RECIPIENT_ACCESS, "tnef-recipients", "Access")]
+#[bench::Direct(&prepare_recipients("Direct"))]
+#[bench::Fallbacks(&prepare_recipients("Fallbacks"))]
+#[bench::BinaryText(&prepare_recipients("BinaryText"))]
+fn recipient_access(case: &recipient_workloads::Workload) -> recipient_workloads::Summary {
+    recipient_workloads::read(case, recipient_workloads::Mode::Access)
+}
+
 fn prepare_conversions(name: &'static str) -> conversion_workloads::Workload {
     let case = conversion_workloads::workload(name);
     case.check();
@@ -217,6 +260,26 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         });
     }
     group.finish();
+    let mut group = criterion.benchmark_group("tnef-recipients");
+    for name in recipient_workloads::CASES {
+        let case = prepare_recipients(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        for mode in recipient_workloads::MODES {
+            group.bench_function(BenchmarkId::new(mode.name(), name), |b| {
+                b.iter(|| recipient_workloads::read(&case, mode));
+            });
+        }
+    }
+    group.finish();
+    let mut group = criterion.benchmark_group("rtf-compressed");
+    for name in rtf_compressed_workloads::CASES {
+        let case = prepare_rtf_compressed(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        group.bench_function(BenchmarkId::new("Decode", name), |b| {
+            b.iter(|| rtf_compressed_workloads::read(&case));
+        });
+    }
+    group.finish();
 }
 
 metabench::main!(
@@ -232,6 +295,9 @@ metabench::main!(
         PROPERTY_SET,
         DATES,
         EMBEDDED,
-        CONVERSIONS
+        CONVERSIONS,
+        RECIPIENT_LOAD,
+        RECIPIENT_ACCESS,
+        RTF_COMPRESSED
     ]
 );

@@ -15,6 +15,35 @@ mod embedded_workloads;
 #[path = "../benches/support/tnef_conversions.rs"]
 mod conversion_workloads;
 
+#[path = "../benches/support/tnef_recipients.rs"]
+mod recipient_workloads;
+
+#[path = "../benches/support/rtf_compressed.rs"]
+mod rtf_compressed_workloads;
+
+#[test]
+fn compressed_rtf_workloads_match_reference_encoder() {
+    for name in rtf_compressed_workloads::CASES {
+        let case = rtf_compressed_workloads::workload(name);
+        case.check();
+        assert!(!case.name.is_empty());
+        assert!(!case.input.is_empty());
+    }
+}
+
+#[test]
+fn recipient_tnef_workloads_match_generated_fields() {
+    for name in recipient_workloads::CASES {
+        let case = recipient_workloads::workload(name);
+        case.check();
+        assert!(!case.name.is_empty());
+        assert!(!case.input.is_empty());
+    }
+    for mode in recipient_workloads::MODES {
+        assert!(!mode.name().is_empty());
+    }
+}
+
 #[test]
 fn owned_tnef_access_workloads_match_generated_values() {
     for name in conversion_workloads::CASES {

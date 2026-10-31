@@ -18,6 +18,8 @@ mod conversions;
 mod dates;
 #[path = "tnef_properties/embedded.rs"]
 mod embedded;
+#[path = "tnef_properties/recipients.rs"]
+mod recipients;
 #[path = "tnef_properties/sets.rs"]
 mod sets;
 #[path = "tnef_properties/tags.rs"]

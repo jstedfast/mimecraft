@@ -20,6 +20,12 @@ mod embedded_workloads;
 #[path = "support/tnef_conversions.rs"]
 mod conversion_workloads;
 
+#[path = "support/tnef_recipients.rs"]
+mod recipient_workloads;
+
+#[path = "support/rtf_compressed.rs"]
+mod rtf_compressed_workloads;
+
 fn measure(name: &str, size: usize, mut read: impl FnMut()) {
     for _ in 0..3 {
         read();
@@ -151,6 +157,49 @@ fn main() {
             case.input_length,
             || {
                 black_box(conversion_workloads::read(case));
+            },
+        );
+    }
+    println!("Recipients: 256 owned rows, type flags, name/address fallbacks, and binary text.");
+    println!("Load includes parsing, checksums, model allocation/drop, and all four accessors.");
+    println!(
+        "Access uses preloaded rows; its wire-byte throughput is equivalent, NOT parser throughput."
+    );
+    let cases: Vec<_> = recipient_workloads::CASES
+        .into_iter()
+        .map(recipient_workloads::workload)
+        .collect();
+    for case in &cases {
+        case.check();
+    }
+    for case in &cases {
+        for mode in recipient_workloads::MODES {
+            measure(
+                &format!("Recipients/{}/{}", mode.name(), case.name),
+                case.input.len(),
+                || {
+                    black_box(recipient_workloads::read(case, mode));
+                },
+            );
+        }
+    }
+    println!("Compressed RTF: literals, dictionary overlap/wrap, MELA, and one-byte input.");
+    println!(
+        "Includes fresh inline dictionary, bounded-chunk output buffers, CRC validation and drop."
+    );
+    let cases: Vec<_> = rtf_compressed_workloads::CASES
+        .into_iter()
+        .map(rtf_compressed_workloads::workload)
+        .collect();
+    for case in &cases {
+        case.check();
+    }
+    for case in &cases {
+        measure(
+            &format!("RtfCompressed/Decode/{}", case.name),
+            case.input.len(),
+            || {
+                black_box(rtf_compressed_workloads::read(case));
             },
         );
     }

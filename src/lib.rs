@@ -386,6 +386,7 @@ mod content_disposition;
 mod content_encoding;
 mod content_header;
 mod content_type;
+mod crc32;
 mod date_time_offset;
 mod domain_list;
 mod encoding_constraint;

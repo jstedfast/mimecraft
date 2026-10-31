@@ -6,6 +6,8 @@
 //! Raw attribute values, checksums, and framing diagnostics are supported.
 //! MAPI properties and recipient rows support forward-only, bounded value reads
 //! and owned snapshots and ordered sets with explicit typed conversions.
+//! Owned recipient models preserve their complete rows and expose checked fields.
+//! Compressed RTF decoding is available as an incremental filter with explicit validation.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -18,6 +20,8 @@ mod property_set;
 mod property_tags;
 mod property_types;
 mod reader;
+mod recipient;
+mod rtf_compressed;
 mod value_conversion;
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
 pub use property_set::{TnefProperty, TnefPropertySet};
@@ -26,6 +30,8 @@ pub use property_types::{
 };
 pub use reader::{TnefEmbeddedReader, TnefEmbeddedSource};
 pub use reader::{TnefPropertyReader, TnefPropertyValueReader, TnefReader, TnefValueReader};
+pub use recipient::{TnefRecipient, TnefRecipientType};
+pub use rtf_compressed::{RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError};
 pub use value_conversion::TnefValueConversionError;
 
 /// The object to which an attribute belongs, preserving unrecognized bytes.

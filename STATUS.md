@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Message/attachment models, detached embedded readers, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection/accessor, date, and recursive-reader benchmark baselines cover the implemented layers. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Incremental compressed-RTF decoding is available with explicit validation. Message/attachment models, detached embedded readers, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection/accessor, recipient-model, date, recursive-reader, and compressed-RTF benchmarks cover the implemented layers. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9043,6 +9043,100 @@ and recoverable date errors without repeated diagnostics. Existing named
 lookup tests also exercise typed access. Five original prepared-snapshot
 benchmark cases cover this layer separately from parsing/collection.
 
+### Owned TNEF recipients
+
+`TnefRecipient` ports MimeKit's recipient model over an owned
+`TnefPropertySet`. Convert a selected row or each set returned by
+`read_rows_as_property_sets` with `TnefRecipient::from`. This moves the set
+without allocating, copying payloads, or validating fields. `properties()`
+retains the complete ordered row, duplicates, raw type flags, and named values;
+`into_properties()` returns it without cloning. Models are cloneable,
+`Send + Sync`, and independent of the reader's lifetime. Existing cursor
+selection, logical-byte budgets, partial-result diagnostics, and deferred
+attribute-checksum validation remain unchanged.
+
+`recipient_type()` uses the existing integer conversion, masks the high four
+bits that may indicate resent recipients ([MS-OXOMSG] 2.2.3.1), and defaults
+to To only when the property is absent. `TnefRecipientType` represents
+Originator, To, Cc, Bcc, and unknown integers. Standalone integer conversions
+round-trip all values without masking; only the model getter interprets flags.
+
+`display_name()` tries RecipientDisplayName, TransmitableDisplayName, then
+DisplayName, in that priority order regardless of wire order.
+`email_address()` prefers SmtpAddress over EmailAddress; `address_type()` reads
+Addrtype, which still describes EmailAddress even when SmtpAddress wins.
+There is no trimming, SMTP conversion, address parsing, or invented address
+type. ID-based lookups accept both String8 and Unicode. Text getters return
+`Result<Option<Cow<str>>, TnefValueConversionError>`, borrowing native strings
+or decoding Binary with the property's captured charset.
+
+Unlike upstream's null-on-conversion-failure behavior, only absent identifiers
+permit fallback. Empty strings are values; empty, multivalued, null, incompatible,
+or out-of-range properties return their existing explicit conversion errors.
+A failing first duplicate is not bypassed by a later valid property.
+Neither wrapping nor field access mutates the stored properties or reader state.
+This increment provides recipient models, not the complete `TnefMessage` loader
+or recipient-to-MIME/address conversion.
+
+Ten tests in `tests/tnef_properties/recipients.rs` include MimeKit's
+`TnefMessageTests.TestRecipients` Alice/Bob rows and its resent-flag comment,
+adapted to the available row reader rather than claiming full-message loading.
+Additional coverage checks one-byte/seven-byte/full reads, all known and unknown
+types, high-bit masks, absent defaults, field priority and duplicates,
+untrimmed/empty text, Exchange address types with SMTP overrides, explicit
+conversion failures, captured codepages, borrowed text, moved storage, named
+properties, and cloned lifetime. A rustdoc example demonstrates table-to-model
+collection. Six original benchmark operations cover loading plus field access
+and prepared-model access separately.
+
+### Compressed RTF
+
+`tnef::RtfCompressedToRtf` implements MimeKit's [MS-OXRTFCP] decompression as a
+safe, incremental `MimeFilter`, supporting LZFu dictionary compression and MELA
+uncompressed content. It handles split headers and two-byte reference tokens,
+initializer references, overlapping copies, and wraparound reads/writes.
+`RtfCompressionMode` preserves unknown COMPTYPE values. The fixed inline 4 KiB
+dictionary and header allocate nothing; only the caller's output vector may
+grow, based on bytes actually decoded rather than untrusted size estimates.
+The CRC helper is shared with yEnc, retaining each format's distinct initial
+state and final-complement rules. No unsafe code or dependencies were added.
+
+Call `validate()` explicitly after supplying all input. The infallible filter
+trait, `FilteredReader`, and `FilteredWriter` cannot automatically surface
+decompression errors; output remains provisional until validation succeeds.
+`RtfDecompressionError` distinguishes incomplete headers, invalid COMPSIZE,
+unknown modes, incomplete content, and CRC mismatches. `is_valid_crc32()` is
+false until recognized framing is complete, stronger than upstream's running
+checksum equality test. MELA requires a zero stored CRC and does not checksum
+its content.
+
+Decoding retains MimeKit's tolerant boundaries: COMPSIZE includes the twelve
+remaining header bytes, an end marker stops early, and subsequent bytes are
+discarded without checksumming. RAWSIZE is not enforced or used for allocation.
+An end marker is not required at the declared CONTENTS boundary, and a partial
+token there is discarded; validation is not strict RTF syntax validation.
+COMPSIZE below twelve decodes as empty but explicitly fails validation.
+Unknown modes discard content and fail validation rather than passing arbitrary
+bytes through as RTF. `finish()` emits nothing and allows later input to resume
+an incomplete stream. Reset clears the entire dictionary, not only its
+initializer, preventing malformed references from exposing previous content.
+Cloning snapshots all state without shared mutable storage.
+
+Nineteen tests in `tests/rtf_compressed.rs` adapt both upstream compressed-RTF
+test classes, their reference builder, and robustness suites. Coverage includes
+the two published specification vectors, every header/token split, checksum
+and size boundaries, dictionary overlap/wrap, reset/clone, filter-trait and I/O
+adapters, truncation at every offset, hostile header fields, 5,000 bit-flipped
+streams, 2,000 noise bodies, 750 small-chunk mutations, and 500 unknown modes.
+The reference encoder uses an independent bitwise CRC. Randomized tests retain
+upstream's productive-output thresholds and expansion bounds; chunked mutation
+results are compared byte-for-byte. Tests run with default and scalar features,
+alongside yEnc regressions for the shared CRC extraction.
+
+This is a decompression foundation, not a TNEF body model or message loader.
+It does not automatically render RTF, extract HTML, or convert TNEF to MIME.
+Four original benchmark cases cover decoding separately from those later layers.
+
 ### TNEF date interpretation
 
 `TnefDateTime` represents Gregorian years 1 through 9999 with exact
@@ -9882,6 +9976,114 @@ and a summary CSV. The standalone executable's SHA-256 is
 Earlier binaries remain preserved for contemporaneous alternating comparisons
 during the deferred sans-I/O work.
 
+#### TNEF recipient models
+
+`benches/support/tnef_recipients.rs` adds three generated 256-row cases to
+both TNEF harnesses, each with Load and Access operations. Direct uses the
+highest-priority name/address properties and mixed String8/Unicode text.
+Fallbacks covers all three name priorities, lower-priority properties earlier
+on the wire, EmailAddress fallback, and empty rows. BinaryText stores all text
+fields as Windows-1252 Binary, including non-ASCII display names. Present type
+properties include resent flags and known/unknown recipient types.
+
+Load includes a fresh reader, parsing, checksums with an unexpected-issue
+rejecting logger, owned row/model collection, all four convenience getters,
+consumption of returned text, and destruction. Access performs the same getters
+and text consumption on models prepared outside measurement. Its displayed
+wire-byte throughput is only an equivalent unit, not parser throughput.
+Generation and individual field checks against an independent source model
+are outside timing/allocation measurement. `tests/tnef_benchmarks.rs` checks
+all six operations.
+
+The allocation pass on 2026-10-31 recorded:
+
+| Case | Operation | Allocations | Allocated bytes |
+|---|---|---:|---:|
+| Direct | Load | 3,162 | 183,284 |
+| Direct | Access | 0 | 0 |
+| Fallbacks | Load | 3,034 | 250,390 |
+| Fallbacks | Access | 0 | 0 |
+| BinaryText | Load | 2,311 | 167,546 |
+| BinaryText | Access | 256 | 11,958 |
+
+These counts are for the whole 256-row batch, not one recipient. Wrapping an
+existing row introduces no allocation or snapshot-size increase. Direct and
+fallback field access allocate nothing. BinaryText access allocates only for
+the non-ASCII names; ASCII binary addresses/types can be borrowed. Decoding is
+not cached. Load includes all parser/vector/string allocations, and byte totals
+measure cumulative allocation rather than peak or retained memory.
+
+All 68 benchmark smoke identities passed. All 62 pre-existing identities retain
+the same allocation counts and cumulative byte totals as the preserved
+owned-property-accessor baseline.
+
+Three serial release processes were pinned to logical CPU 2 (`0x4`), each with
+three warmups and five samples of at least 100 ms per operation, on the same
+Windows x86-64 host/compiler configuration described above. Timing was highly
+variable, especially in the second process: Load/Fallbacks ranged from 5.0 to
+4,018.4 batches/s across process medians, and Access/Direct from 552.0 to
+79,542.0. These samples are not a stable timing baseline and support no speed
+comparison or regression claim. Raw timings and min/median/max summaries are
+retained for inspection; meaningful timing comparisons require a quieter run.
+
+Session artifacts in `files/tnef-recipient-baseline` preserve the timing and
+allocation executables, all 68 smoke cases, allocation JSON/Markdown, three
+timing logs, and `summary.csv`. The standalone executable's SHA-256 is
+`D3C4536B2C74016634E7902FF8783CE97A6C5CAF691E9C2F2EB2F7D7BF43BCC4`.
+Earlier baseline binaries remain preserved for the deferred sans-I/O work.
+
+#### Compressed-RTF decoding
+
+`benches/support/rtf_compressed.rs` adds four original Decode cases to the
+standalone TNEF and metabench/Criterion harnesses. MimeKit has no corresponding
+benchmark class. Literals emits 51,200 bytes; References uses overlapping,
+wrapping references to emit 102,010 bytes. ShortChunks uses the same reference
+stream one input byte at a time; other cases use 4 KiB input chunks.
+Uncompressed copies a 61,440-byte MELA payload.
+
+Each operation includes fresh filter construction, a 4 KiB output buffer,
+decoding, CRC validation, consuming every output byte, and destruction. The
+output buffer is cleared and reused between chunks. Generation, independent
+reference encoding/CRC, and full output comparisons are outside measurement.
+Throughput counts compressed input bytes including the header, not output
+bytes. These are decoder measurements, not TNEF parsing or RTF rendering.
+
+The allocation pass recorded:
+
+| Case | Allocations | Cumulative allocated bytes |
+|---|---:|---:|
+| Literals | 1 | 4,096 |
+| References | 5 | 126,976 |
+| ShortChunks | 1 | 4,096 |
+| Uncompressed | 1 | 4,096 |
+
+These are caller-output allocations; the inline dictionary itself does not
+allocate. References needs buffer growth because a single compressed input
+chunk expands beyond the initial capacity. Its byte total includes successive
+vector reallocations, not peak or retained memory. All 72 smoke identities
+passed, and all 68 preceding identities retain their allocation counts and
+cumulative byte totals from the preserved recipient baseline.
+
+Three serial Criterion processes pinned to logical CPU 2 (`0x4`) used ten
+samples, a 200 ms warmup, and 500 ms target measurement per case, on the same
+Windows x86-64 host/compiler configuration described above. The following are
+medians and ranges of the three Criterion slope estimates, in microseconds
+per document:
+
+| Case | Median | Min-max |
+|---|---:|---:|
+| Literals | 161.67 | 148.96-162.92 |
+| References | 168.77 | 166.31-182.02 |
+| ShortChunks | 189.00 | 183.96-196.24 |
+| Uncompressed | 3.28 | 2.89-3.49 |
+
+These short, exploratory runs are not a speed comparison or regression claim.
+Session artifacts in `files/tnef-rtf-compressed-baseline` preserve both release
+executables, smoke results, allocation JSON/Markdown, and all three timing
+logs/reports. The standalone binary's SHA-256 is
+`96DC082C4DA8CD2151105F301AB31AEEED8812E8570CE22734F34EBC6EB5B978`.
+Earlier baselines remain preserved.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -9892,7 +10094,8 @@ are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 27 Base64, 27 MIME, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
-30 TNEF-property, five TNEF-date, four embedded-TNEF, and five owned-TNEF-access cases.
+30 TNEF-property, five TNEF-date, four embedded-TNEF, five owned-TNEF-access,
+six recipient-model cases, and four compressed-RTF cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs
