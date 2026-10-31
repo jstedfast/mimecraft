@@ -73,6 +73,94 @@ fn assert_storage_round_trip(
 
 const DELIMITER_NEW_LINE_HEADERS: &str = "From: mimekit@example.com\nTo: mimekit@example.com\nSubject: delimiter new-line test\nMIME-Version: 1.0\n";
 
+fn commented_parameter_message(boundary: &str, delimiter: &str) -> String {
+    format!(
+        "From: sender@example.com\r\n\
+         Date: Sat, 31 Oct 2026 10:00:00 -0400\r\nMIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; {boundary}\r\n\r\n\
+         --{delimiter}\r\nContent-Type: application/octet-stream; name=file.zip(comment)\r\n\
+         Content-Disposition: attachment; filename*=''file%2Ezip(comment)\r\n\
+         Content-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--{delimiter}--\r\n"
+    )
+}
+
+fn assert_commented_parameter_message<R: Read + Seek>(
+    mut message: MimeMessage<R>,
+    boundary: &str,
+    has_child: bool,
+) {
+    let MimeEntity::Multipart(multipart) = message.body_mut().unwrap() else {
+        panic!("expected multipart body")
+    };
+    assert_eq!(multipart.boundary().unwrap().as_deref(), Some(boundary));
+    assert_eq!(multipart.children().len(), usize::from(has_child));
+    if has_child {
+        let MimeEntity::Part(part) = &mut multipart.children_mut()[0] else {
+            panic!("expected attachment")
+        };
+        assert_eq!(
+            part.content_type().unwrap().unwrap().name(),
+            Some("file.zip")
+        );
+        assert_eq!(
+            part.content_disposition().unwrap().unwrap().file_name(),
+            Some("file.zip"),
+        );
+        let mut decoded = Vec::new();
+        part.content_mut().decode_to(&mut decoded).unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+}
+
+fn check_commented_parameter_message(input: &str, boundary: &str, has_child: bool) {
+    let message = parse_recovery_message(MimeParser::from_slice(input.as_bytes()), input, false);
+    assert_commented_parameter_message(message, boundary, has_child);
+    for chunk in [1, 2, 7, 4096] {
+        let parser = MimeParser::new(BufReader::with_capacity(chunk, input.as_bytes()));
+        let message = parse_recovery_message(parser, input, false);
+        assert_commented_parameter_message(message, boundary, has_child);
+        for storage in [MimeContentStorage::Memory, MimeContentStorage::Source] {
+            let parser = MimeParser::with_storage(
+                ShortSource {
+                    inner: Cursor::new(input.as_bytes()),
+                    chunk,
+                },
+                storage,
+            )
+            .unwrap();
+            let message = parse_recovery_message(parser, input, false);
+            assert_commented_parameter_message(message, boundary, has_child);
+        }
+    }
+}
+
+// Regression cases inspired by https://github.com/noxxi/mime-is-broken.
+#[test]
+fn commented_and_encoded_boundaries() {
+    for boundary in [
+        "boundary*=''audit",
+        "boundary*='en'audit",
+        "boundary*0*=''; boundary*1*=audit",
+        "boundary=audit(comment)",
+        "boundary=audit\r\n\t(nested (comment); ignored=yes)",
+    ] {
+        let input = commented_parameter_message(boundary, "audit");
+        check_commented_parameter_message(&input, "audit", true);
+    }
+}
+
+// Literal-parenthesis boundary variants from mime-is-broken require quoting.
+#[test]
+fn literal_parentheses_boundary() {
+    for (parameter, boundary, has_child) in [
+        ("boundary=\"audit(comment)\"", "audit(comment)", true),
+        ("boundary=audit(comment)", "audit", false),
+    ] {
+        let input = commented_parameter_message(parameter, "audit(comment)");
+        check_commented_parameter_message(&input, boundary, has_child);
+    }
+}
+
 const DELIMITER_NEW_LINE_MESSAGES: &[&str] = &[
     // A nested multipart that is truncated by the outer boundary.
     "Content-Type: multipart/mixed; boundary=\"outer\"\n\n--outer\nContent-Type: multipart/alternative; boundary=\"inner\"\n\n--inner\nContent-Type: text/plain\n\ninner\n--outer\nContent-Type: text/plain\n\nlast\n--outer--\n",

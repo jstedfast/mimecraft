@@ -7405,6 +7405,9 @@ sections do not interpret encoded words.
 
 `parse_with_options` accepts `ParameterParseOptions`. Default loose syntax
 accepts unquoted spaces/folding and missing semicolons after quoted values.
+Comments terminate unquoted values, including folded values, in both modes.
+Literal parentheses must be quoted or percent-encoded in extended parameters;
+they are no longer treated as part of loose unquoted filenames or boundaries.
 Strict syntax requires token or quoted values and separators, but still uses
 tolerant payload decoding and continuation recovery. Unterminated comments or
 quotes fail in either mode, following MimeKit's throwing parse path. Errors
@@ -7420,12 +7423,22 @@ Adjacent encoded sections share percent-decoder state and charset conversion,
 allowing escapes and multibyte characters to span sections. Incorrectly quoted
 extended values have only their outer quotes removed, not quoted-pair escapes.
 
-Missing or unsupported RFC 2231 charsets use Latin-1, **not** UTF-8-first
+Missing, empty, or unsupported RFC 2231 charsets use Latin-1, **not** UTF-8-first
 guessing. An incomplete declaration remains part of the payload; a complete
-unsupported declaration is stripped. The preferred fallback charset applies
-only to raw text and RFC 2047 decoding. Invalid declared-charset bytes use U+FFFD
-replacement, rather than MimeKit's RFC 2231 `"?"` replacement. Other charset
+empty or unsupported declaration is stripped, including its language field.
+An empty charset retains the `MissingCharset` diagnostic. The preferred fallback
+charset applies only to raw text and RFC 2047 decoding. Invalid declared-charset
+bytes use U+FFFD replacement, rather than MimeKit's RFC 2231 `"?"` replacement. Other charset
 mapping differences are those documented above.
+
+These behaviors include MimeKit commit
+`fc9814dfbac4c8c87f0aa22aa4cfef507c10e99f`. Its mime-is-broken-inspired
+parameter and multipart regressions cover empty charset/language prefixes,
+continuations, nested/escaped/folded comments, unterminated comments, and
+quoted versus unquoted literal-parenthesis boundaries. Message regressions
+exercise short reads, buffered parsing, and memory/source/slice storage,
+checking attachment metadata and decoded payloads. Async parser APIs remain
+unported.
 
 `issues()` reports recovered separators, duplicates, section gaps, charset
 fallback/replacement, and discarded incomplete percent escapes. Spans are

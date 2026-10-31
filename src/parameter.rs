@@ -416,7 +416,8 @@ impl ParameterList {
     /// Ordinary quoted values are unescaped and CR/LF removed. Incorrectly
     /// quoted extended values have only their outer quotes removed. Loose
     /// unquoted values retain internal spaces/tabs, discard CR/LF, and trim
-    /// trailing whitespace.
+    /// trailing whitespace. Comments terminate unquoted values in both modes;
+    /// literal parentheses must be quoted or encoded.
     /// Empty entries between semicolons are ignored. `name=;` is accepted but
     /// `name=` at end of input is incomplete, matching MimeKit.
     ///
@@ -634,7 +635,7 @@ pub enum ParameterIssueKind {
     DuplicateContinuation,
     /// The sorted sections did not start at zero or contained a gap.
     NonContiguousContinuation,
-    /// An absent/incomplete RFC 2231 declaration defaulted to Latin-1.
+    /// An absent, empty, or incomplete RFC 2231 charset defaulted to Latin-1.
     MissingCharset,
     /// An unsupported charset label required fallback.
     UnsupportedCharset {
@@ -837,7 +838,7 @@ fn parse_pair<'a>(
     } else {
         // Some senders leave filenames with spaces and folded lines unquoted.
         // See MimeKit issues #106 (Google Docs) and #159 (folded values).
-        while *index < input.len() && input[*index] != b';' {
+        while *index < input.len() && !matches!(input[*index], b';' | b'(') {
             *index += 1;
         }
         let bytes = &input[value_start..*index];
@@ -993,34 +994,35 @@ fn extended_charset<'a>(
     range: Range<usize>,
     issues: &mut Vec<ParameterIssue>,
 ) -> (Charset, &'a [u8]) {
-    if let Some(first) = bytes
-        .iter()
-        .position(|&byte| byte == b'\'')
-        .filter(|&i| i > 0)
+    let mut payload = bytes;
+    if let Some(first) = bytes.iter().position(|&byte| byte == b'\'')
         && let Some(second) = bytes[first + 1..].iter().position(|&byte| byte == b'\'')
     {
-        let payload = &bytes[first + second + 2..];
-        let charset = std::str::from_utf8(&bytes[..first])
-            .ok()
-            .and_then(|label| Charset::from_label(label).ok());
-        if let Some(charset) = charset {
-            return (charset, payload);
+        payload = &bytes[first + second + 2..];
+        if first > 0 {
+            let charset = std::str::from_utf8(&bytes[..first])
+                .ok()
+                .and_then(|label| Charset::from_label(label).ok());
+            if let Some(charset) = charset {
+                return (charset, payload);
+            }
+            issues.push(ParameterIssue {
+                range,
+                kind: ParameterIssueKind::UnsupportedCharset {
+                    selected: Charset::LATIN1,
+                },
+            });
+            return (Charset::LATIN1, payload);
         }
-        issues.push(ParameterIssue {
-            range,
-            kind: ParameterIssueKind::UnsupportedCharset {
-                selected: Charset::LATIN1,
-            },
-        });
-        return (Charset::LATIN1, payload);
     }
     // A missing declaration ought to imply ASCII, but broken mail contains
     // high bytes here. Latin-1 preserves them instead of replacing them.
+    // An empty charset still consumes the charset/language prefix.
     issues.push(ParameterIssue {
         range,
         kind: ParameterIssueKind::MissingCharset,
     });
-    (Charset::LATIN1, bytes)
+    (Charset::LATIN1, payload)
 }
 
 fn decode_extended(

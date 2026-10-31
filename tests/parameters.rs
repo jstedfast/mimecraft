@@ -121,7 +121,7 @@ fn canonical_unquoted_and_missing_separator_recovery() {
         ),
         ("name=--boundary_0_8ab0e518\n ", "--boundary_0_8ab0e518"),
         ("name=a\r\nb\r\n\tc", "ab\tc"),
-        ("name=a(comment)", "a(comment)"),
+        ("name=a(comment)", "a"),
     ] {
         assert_value(text, "name", expected);
     }
@@ -189,6 +189,104 @@ fn canonical_rfc2231_examples() {
         let list = parse(b"name*=iso-8859-1''Kristoffer%20Br%E5nemyr", mode);
         assert_eq!(list.get("name"), Some("Kristoffer Br\u{e5}nemyr"));
         assert!(list.issues().is_empty());
+    }
+}
+
+fn assert_parameter_value(text: &str, expected: &str, mode: ParameterComplianceMode) {
+    for suffix in ["", "; next=ok"] {
+        let input = format!("prefix{text}{suffix}");
+        let list = parse(&input.as_bytes()[6..], mode);
+        assert_eq!(list.get("name"), Some(expected), "{text}");
+        assert_eq!(list.len(), if suffix.is_empty() { 1 } else { 2 }, "{text}");
+        if !suffix.is_empty() {
+            assert_eq!(list.get("next"), Some("ok"), "{text}");
+        }
+    }
+}
+
+// Regression cases inspired by https://github.com/noxxi/mime-is-broken.
+#[test]
+fn rfc2231_empty_charset() {
+    for (text, expected) in [
+        ("name*=''file.zip", "file.zip"),
+        ("name*='en'file%2Ezip", "file.zip"),
+        ("name*=''caf%E9%27s%20file.zip", "caf\u{e9}'s file.zip"),
+        ("name*=''", ""),
+        ("name*='en'", ""),
+        ("name*0*=''file; name*1*=%2Ezip", "file.zip"),
+        ("name*0*='en'file; name*1=.zip", "file.zip"),
+        ("name*0*=''; name*1*=file%2Ezip", "file.zip"),
+        (
+            "name*0*='en'caf%E9; name*1*=%27s%20file.zip",
+            "caf\u{e9}'s file.zip",
+        ),
+        ("name*=\"''file%2Ezip\"", "file.zip"),
+        ("name*='file%2Ezip", "'file.zip"),
+    ] {
+        for mode in [
+            ParameterComplianceMode::Loose,
+            ParameterComplianceMode::Strict,
+        ] {
+            assert_parameter_value(text, expected, mode);
+            let list = parse(text.as_bytes(), mode);
+            assert_eq!(list.issues().len(), 1);
+            assert_eq!(list.issues()[0].kind, ParameterIssueKind::MissingCharset);
+            assert_eq!(list.as_slice()[0].charset(), Some(Charset::LATIN1));
+        }
+    }
+    // An empty declaration still uses Latin-1, not the preferred raw-text
+    // charset or UTF-8 guessing. Consume both apostrophes and the language.
+    let options = ParameterParseOptions {
+        fallback_charset: Some(Charset::UTF8),
+        ..Default::default()
+    };
+    for input in [b"name*=''caf%C3%A9".as_slice(), b"name*='en'caf%C3%A9"] {
+        let list = ParameterList::parse_with_options(input, &options).unwrap();
+        assert_eq!(list.get("name"), Some("caf\u{c3}\u{a9}"));
+        assert_eq!(list.issues()[0].range, 6..input.len());
+    }
+}
+
+// Regression cases inspired by https://github.com/noxxi/mime-is-broken.
+#[test]
+fn parameter_comments() {
+    for (text, expected) in [
+        ("name=value(comment)", "value"),
+        ("name=value (comment) (another)", "value"),
+        ("name=value(nested (comment); ignored=yes)", "value"),
+        ("name=value(escaped \\) comment)", "value"),
+        ("name=value(comment\r\n\tcontinued)", "value"),
+        ("name=value\r\n\t(comment)", "value"),
+        ("name=\"value(literal)\"(comment)", "value(literal)"),
+        (
+            "name*=us-ascii''value%28literal%29(comment)",
+            "value(literal)",
+        ),
+        ("name*0=value(comment); name*1=.zip(other)", "value.zip"),
+        (
+            "name*0*=''value(comment); name*1*=%2Ezip(other)",
+            "value.zip",
+        ),
+    ] {
+        for mode in [
+            ParameterComplianceMode::Loose,
+            ParameterComplianceMode::Strict,
+        ] {
+            assert_parameter_value(text, expected, mode);
+        }
+    }
+}
+
+// Cover the mime-is-broken comment issue without losing loose parsing extensions.
+#[test]
+fn loose_parameter_comments() {
+    for (text, expected) in [
+        ("name=Test Name.pdf (comment)", "Test Name.pdf"),
+        ("name=Test\r\n\tName.pdf(comment)", "Test\tName.pdf"),
+        ("name=Test Name.pdf\r\n\t(comment)", "Test Name.pdf"),
+        ("name=Test\r\n\tName.pdf\r\n\t(comment)", "Test\tName.pdf"),
+    ] {
+        assert_parameter_value(text, expected, ParameterComplianceMode::Loose);
     }
 }
 
@@ -297,8 +395,8 @@ fn missing_and_unsupported_rfc2231_charsets_use_latin1() {
             "us-ascii'This is some encoded ascii text",
         ),
         ("name*=%C3%A9", "\u{c3}\u{a9}"),
-        ("name*=''caf%C3%A9", "''caf\u{c3}\u{a9}"),
-        ("name*='en'caf%C3%A9", "'en'caf\u{c3}\u{a9}"),
+        ("name*=''caf%C3%A9", "caf\u{c3}\u{a9}"),
+        ("name*='en'caf%C3%A9", "caf\u{c3}\u{a9}"),
         ("name*=\"\"", ""),
     ] {
         let list = ParameterList::parse(input.as_bytes()).unwrap();
@@ -569,18 +667,22 @@ fn syntax_failures_are_explicit_and_offsets_are_relative() {
         "name*0(comment",
         "name*0*(comment",
         "name=(comment",
+        "name=value(comment",
+        "name=value\r\n\t(comment",
     ] {
-        let error = ParameterList::parse(input.as_bytes()).unwrap_err();
-        assert_eq!(error.kind(), ParameterParseErrorKind::IncompleteComment);
-        assert_eq!(error.offset(), input.find('(').unwrap());
+        for mode in [
+            ParameterComplianceMode::Loose,
+            ParameterComplianceMode::Strict,
+        ] {
+            let options = ParameterParseOptions {
+                compliance_mode: mode,
+                ..Default::default()
+            };
+            let error = ParameterList::parse_with_options(input.as_bytes(), &options).unwrap_err();
+            assert_eq!(error.kind(), ParameterParseErrorKind::IncompleteComment);
+            assert_eq!(error.offset(), input.find('(').unwrap());
+        }
     }
-    let strict = ParameterParseOptions {
-        compliance_mode: ParameterComplianceMode::Strict,
-        ..Default::default()
-    };
-    let error = ParameterList::parse_with_options(b"name=value(comment", &strict).unwrap_err();
-    assert_eq!(error.kind(), ParameterParseErrorKind::IncompleteComment);
-    assert_eq!(error.offset(), 10);
     for input in [b"\xff=x".as_slice(), b"bad/name=x", b"name%=x", b"name'=x"] {
         assert!(ParameterList::parse(input).is_err());
     }
