@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     io,
 };
 
@@ -17,19 +17,31 @@ use crate::{
 
 #[derive(Default)]
 struct ParameterState {
-    segments: Option<HashSet<u32>>,
+    // A balanced tree guarantees bounded insertion costs without relying on
+    // integer hashing, including for adversarially chosen segment numbers.
+    segments: Option<BTreeSet<u32>>,
+    missing_segment_issue: Option<MimeComplianceIssue>,
     extended: bool,
     plain: bool,
 }
 
 impl ParameterState {
+    fn has_missing_segments(&self) -> bool {
+        // Distinct nonnegative indices cover 0..n-1 iff their maximum is n-1.
+        self.segments.as_ref().is_some_and(|segments| {
+            segments
+                .last()
+                .is_some_and(|&highest| highest as usize != segments.len() - 1)
+        })
+    }
+
     fn add(&mut self, segment: Option<u32>, encoded: bool, allow_fallback: bool) -> bool {
         if let Some(segment) = segment {
             let repeated =
                 self.segments.is_none() && (self.extended || (self.plain && !allow_fallback));
             return !self
                 .segments
-                .get_or_insert_with(HashSet::new)
+                .get_or_insert_with(BTreeSet::new)
                 .insert(segment)
                 || repeated;
         }
@@ -56,7 +68,7 @@ struct Declaration<'a> {
 
 // Inspect raw declarations independently of parameter decoding and precedence.
 // Malformed syntax ends or resynchronizes this check, not the MIME parser;
-// this validator reports repetitions, not parameter syntax errors.
+// this validator reports repetitions and missing segments, not syntax errors.
 struct Scanner<'a> {
     text: &'a [u8],
     index: usize,
@@ -183,8 +195,30 @@ pub(super) fn validate(
         return Ok(());
     }
     // The reader's max_header_length bounds the number and size of declarations.
-    let mut parameters: HashMap<String, ParameterState> = HashMap::new();
+    let mut parameters: HashMap<String, usize> = HashMap::new();
+    // Preserve declaration order when reporting gaps, independently of hash order.
+    let mut states: Vec<ParameterState> = Vec::new();
     let mut scanned = 0;
+    let mut create_issue = |violation, at, position_kind| {
+        // Advance monotonically so many reports do not rescan the prefix.
+        let prefix = &text[scanned..at];
+        column = prefix
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(column + prefix.len() as u64, |lf| {
+                (prefix.len() - lf) as u64
+            });
+        position = position.advance(prefix);
+        scanned = at;
+        MimeComplianceIssue {
+            context,
+            violation,
+            stream_offset: position.offset,
+            line_number: position.line,
+            column_number: column,
+            position_kind,
+        }
+    };
     while scanner.index < text.len() {
         let Some(declaration) = scanner.parameter() else {
             if !scanner.next_parameter() {
@@ -206,32 +240,37 @@ pub(super) fn validate(
         } else {
             Violation::RepeatedParameter
         };
-        if parameters.entry(name).or_default().add(
-            declaration.segment,
-            declaration.encoded,
-            filename,
-        ) {
-            // Advance monotonically so many reports do not rescan the prefix.
-            let prefix = &text[scanned..declaration.start];
-            column = prefix
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(column + prefix.len() as u64, |lf| {
-                    (prefix.len() - lf) as u64
-                });
-            position = position.advance(prefix);
-            scanned = declaration.start;
-            logger.log(MimeComplianceIssue {
-                context,
+        let index = *parameters.entry(name).or_insert_with(|| {
+            states.push(ParameterState::default());
+            states.len() - 1
+        });
+        let state = &mut states[index];
+        // Capture the first segment's position before later issues advance the cursor.
+        if declaration.segment.is_some() && state.segments.is_none() {
+            state.missing_segment_issue = Some(create_issue(
+                Violation::MissingParameterSegment,
+                declaration.start,
+                MimeCompliancePositionKind::ElementStart,
+            ));
+        }
+        if state.add(declaration.segment, declaration.encoded, filename) {
+            logger.log(create_issue(
                 violation,
-                stream_offset: position.offset,
-                line_number: position.line,
-                column_number: column,
-                position_kind: MimeCompliancePositionKind::Exact,
-            })?;
+                declaration.start,
+                MimeCompliancePositionKind::Exact,
+            ))?;
         }
         if !scanner.skip_value() {
             break;
+        }
+    }
+    for state in states {
+        if state.has_missing_segments() {
+            logger.log(
+                state
+                    .missing_segment_issue
+                    .expect("continuations have a first declaration"),
+            )?;
         }
     }
     Ok(())
@@ -299,26 +338,85 @@ mod tests {
 
     #[test]
     fn many_repeated_parameters_are_bounded() {
-        let count = 16_384;
-        let text = format!("text/plain; x=0{}", ";\r\n x=1".repeat(count));
-        let start = std::time::Instant::now();
-        let mut issues = Vec::new();
-        validate(
-            text.as_bytes(),
-            HeaderId::ContentType,
-            MimePosition { offset: 0, line: 1 },
-            1,
-            MimeComplianceContext::Transport,
-            &mut |issue| {
-                issues.push(issue);
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(issues.len(), count);
-        assert_eq!(issues[count - 1].line_number, count as u64 + 1);
-        assert_eq!(issues[count - 1].column_number, 2);
-        assert_eq!(issues[count - 1].stream_offset, (text.len() - 3) as u64);
-        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        for name in ["x", "x*0"] {
+            let count = 16_384;
+            let text = format!(
+                "text/plain; {name}=0{}",
+                format!(";\r\n {name}=1").repeat(count)
+            );
+            let start = std::time::Instant::now();
+            let mut issues = Vec::new();
+            validate(
+                text.as_bytes(),
+                HeaderId::ContentType,
+                MimePosition { offset: 0, line: 1 },
+                1,
+                MimeComplianceContext::Transport,
+                &mut |issue| {
+                    issues.push(issue);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(issues.len(), count);
+            assert_eq!(issues[count - 1].line_number, count as u64 + 1);
+            assert_eq!(issues[count - 1].column_number, 2);
+            assert_eq!(
+                issues[count - 1].stream_offset,
+                (text.len() - name.len() - 2) as u64
+            );
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn continuation_calls_preserve_slice_offsets_and_clear_state() {
+        let value = "text/plain; name*2=x;\r\n name*2=y";
+        let bytes = format!("xx{value}yy");
+        for _ in 0..2 {
+            for text in [
+                &bytes.as_bytes()[2..bytes.len() - 2],
+                b"text/plain; name*0=a; name*1=b",
+            ] {
+                let mut issues = Vec::new();
+                validate(
+                    text,
+                    HeaderId::ContentType,
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                    &mut |issue| {
+                        issues.push(issue);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                if text == value.as_bytes() {
+                    assert_eq!(issues.len(), 2);
+                    assert_eq!(issues[0].violation, Violation::RepeatedFilenameParameter);
+                    let missing = issues[1];
+                    assert_eq!(missing.violation, Violation::MissingParameterSegment);
+                    assert_eq!(
+                        missing.stream_offset,
+                        100 + value.find("name*2").unwrap() as u64
+                    );
+                    assert_eq!(missing.line_number, 5);
+                    assert_eq!(
+                        missing.column_number,
+                        7 + value.find("name*2").unwrap() as u64
+                    );
+                    assert_eq!(missing.context, MimeComplianceContext::Storage);
+                    assert_eq!(
+                        missing.position_kind,
+                        MimeCompliancePositionKind::ElementStart
+                    );
+                } else {
+                    assert!(issues.is_empty());
+                }
+            }
+        }
     }
 }

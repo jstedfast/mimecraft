@@ -1909,7 +1909,7 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `3e32122`. Numeric identifiers
+and remarks are ported through MimeKit commit `21860252`. Numeric identifiers
 match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
@@ -1930,6 +1930,13 @@ filename, and other parameter declarations, including duplicate RFC 2231
 continuation indices, at exact byte positions. Distinct continuation segments
 are allowed; Content-Type `name` and Content-Disposition `filename` also allow
 one ordinary fallback beside one extended or continued representation.
+Missing RFC 2231 continuation segments are reported once per parameter, at the
+first continuation declaration (`ElementStart`), after scanning the header.
+Indices may appear out of order but must cover consecutive values starting at
+zero. A balanced tree stores only observed indices, bounding segment tracking
+by declaration count rather than the largest index and avoiding integer hash
+collision behavior. Diagnostics retain declaration order and original positions
+even when later repeated-parameter reports have already been emitted.
 Repeated Content-Disposition headers are structural checks, enabled even with
 `NONE`, and reset per header block. Reporting does not change selected headers,
 decoded parameters, message bodies, or serialization. Upstream declaration,

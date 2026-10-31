@@ -158,6 +158,11 @@ fn assert_splits(wire: &[u8], format: MimeEventFormat, options: MimeEntityParseO
 #[test]
 fn repeated_parameters_and_disposition_survive_every_split() {
     let wires: &[&[u8]] = &[
+        b"Content-Type: text/plain; z*0=a;\r\n\tname=fallback;\r\n\
+\t(\xc3\xa9) name*2=b; z*0=c;\r\n\tother*1=x; name*4=d; other*3=y\r\n\r\nbody\r\n",
+        b"Content-Type: text/plain; name*0=a\r\nContent-Type: text/plain; name*1=b\r\n\
+Content-Disposition: attachment; filename*0=a\r\n\
+Content-Disposition: attachment; filename*1=b\r\n\r\nbody\r\n",
         b"X-Prefix: \xc3\xa9\r\nContent-Type \t: text/plain; charset=utf-8;\r\n\
 \t(comment; charset=x)\r\n\t(\xc3\xa9) CHARSET=us-ascii; charset=iso-8859-1\r\n\r\nbody\r\n",
         b"Content-Type: text/plain\r\nContent-Type: text/plain; name=a; name=b\r\n\

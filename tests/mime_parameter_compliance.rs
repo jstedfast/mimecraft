@@ -14,6 +14,7 @@ const BOUNDARY: Violation = Violation::RepeatedBoundaryParameter;
 const FILENAME: Violation = Violation::RepeatedFilenameParameter;
 const PARAMETER: Violation = Violation::RepeatedParameter;
 const DISPOSITION: Violation = Violation::RepeatedContentDisposition;
+const MISSING: Violation = Violation::MissingParameterSegment;
 
 fn is_parameter(issue: &Issue) -> bool {
     matches!(issue.violation, BOUNDARY | FILENAME | PARAMETER)
@@ -342,8 +343,166 @@ const NESTED: &str = "Content-Type: multipart/mixed; boundary=b\r\nContent-Dispo
 --b\r\nContent-Type: message/rfc822\r\nContent-Disposition: inline\r\n\r\n\
 Content-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\ntwo\r\n--b--\r\n";
 const LIMITED: &str = "Content-Type: text/plain; x=1; x=2; x=3; x=4; boundary=a; boundary=b\r\n\
-Content-Disposition: attachment; filename=a; filename=b; filename=c\r\n\
+Content-Disposition: attachment; filename=a; filename=b; filename=c; a*1=x; b*3=y\r\n\
 Content-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\nbody\r\n";
+const CONTINUED: &str = "Content-Type: text/plain\r\n\
+Content-Disposition: attachment; filename*0=file.; filename*2=txt\r\n\r\nbody\r\n";
+
+#[test]
+fn upstream_continuation_gap_cases() {
+    // Continuation-gap cases inspired by https://github.com/noxxi/mime-is-broken.
+    let cases = [
+        ("filename*0=a", 0, 0),
+        ("filename*0=a; filename*1=b", 0, 0),
+        ("filename*1=b; filename*0=a", 0, 0),
+        ("filename*2=c; filename*0=a; filename*1=b", 0, 0),
+        ("filename*1=a; filename*2=b", 1, 0),
+        ("filename*0=a; filename*2=b", 1, 0),
+        ("filename*0=a; filename*0=b; filename*1=c", 0, 1),
+        ("filename*1=a; filename*1=b; filename*3=c", 1, 1),
+        ("filename*0=a; filename*2147483647=b", 1, 0),
+        ("filename*2147483647=a; filename*2147483647=b", 1, 1),
+        ("filename*0000=a; filename*0001=b", 0, 0),
+        ("filename=fallback; filename*1=b", 1, 0),
+        ("filename*1=b; filename=fallback", 1, 0),
+        ("filename*=us-ascii''fallback; filename*1=b", 1, 1),
+        ("filename*1=b; filename*=us-ascii''fallback", 1, 1),
+        ("filename*1*=b; filename*0*=us-ascii''a", 0, 0),
+        ("filename*0*=us-ascii''a; filename*2=b", 1, 0),
+        ("filename*0=a; filename*0*=b", 0, 1),
+        ("filename*2147483648=a; filename*1=b", 1, 0),
+        ("filename*9999999999999999999999=a; filename*0=b", 0, 0),
+        ("filename*=us-ascii''a", 0, 0),
+        ("filename*0=a; other*1=b; filename*2=c", 2, 0),
+        ("filename*2=a; other*1=b; filename*0=c; other*0=d", 1, 0),
+        ("boundary*0=a; boundary*2=b", 1, 0),
+    ];
+    assert_eq!(cases.len(), 24);
+    for (parameters, missing, repeated) in cases {
+        for header in [
+            format!("Content-Disposition: attachment; {parameters}"),
+            format!(
+                "Content-Type: text/plain; {}",
+                parameters.replace("filename", "name")
+            ),
+        ] {
+            let text = format!("{header}\r\n\r\nbody\r\n");
+            let issues = read(&text, 4096, Options::default());
+            assert_eq!(
+                issues.iter().filter(|i| i.violation == MISSING).count(),
+                missing,
+                "{header}"
+            );
+            assert!(
+                issues
+                    .iter()
+                    .filter(|i| i.violation == MISSING)
+                    .all(|i| i.position_kind == PositionKind::ElementStart)
+            );
+            assert_parameters(&issues, &vec![FILENAME; repeated]);
+            for capacity in [1, 7] {
+                assert_eq!(
+                    read(&text, capacity, Options::default()),
+                    issues,
+                    "{header}"
+                );
+            }
+            assert_eq!(feed(&text, Options::default()), issues, "{header}");
+        }
+    }
+}
+
+#[test]
+fn missing_segment_positions_survive_later_repetition_reports() {
+    let text = "Content-Type: text/plain; z*0=a;\r\n\tname=fallback;\r\n\
+\t(\u{e9}) name*2=b; z*0=c;\r\n\tother*1=x; name*4=d; other*3=y\r\n\r\nbody\r\n";
+    for capacity in [1, 4096] {
+        let issues = read(text, capacity, Options::default());
+        let missing: Vec<_> = issues.iter().filter(|i| i.violation == MISSING).collect();
+        assert_eq!(missing.len(), 2);
+        assert_position(text, "name*2=", missing[0], PositionKind::ElementStart);
+        assert_position(text, "other*1=", missing[1], PositionKind::ElementStart);
+        let repeated: Vec<_> = issues.iter().filter(|i| i.violation == PARAMETER).collect();
+        assert_eq!(repeated.len(), 1);
+        assert_position(text, "z*0=c", repeated[0], PositionKind::Exact);
+        let parameter_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| is_parameter(i) || i.violation == MISSING)
+            .map(|i| i.violation)
+            .collect();
+        assert_eq!(parameter_issues, [PARAMETER, MISSING, MISSING]);
+        assert_eq!(feed(text, Options::default()), issues);
+    }
+}
+
+#[test]
+fn continuation_segments_do_not_cross_headers_and_obey_validator_selection() {
+    let text = "Content-Type: text/plain; name*0=a\r\n\
+Content-Type: text/plain; name*1=b\r\n\
+Content-Disposition: attachment; filename*0=a\r\n\
+Content-Disposition: attachment; filename*1=b\r\n\r\nbody\r\n";
+    for enabled_validators in [
+        Validators::ALL,
+        Validators::PARAMETERS,
+        Validators::BASE64,
+        Validators::NONE,
+    ] {
+        let options = Options {
+            enabled_validators,
+            ..Default::default()
+        };
+        for capacity in [1, 4096] {
+            let issues = read(text, capacity, options);
+            assert_parameters(&issues, &[]);
+            assert_eq!(
+                issues.iter().filter(|i| i.violation == DISPOSITION).count(),
+                1
+            );
+            assert_eq!(
+                issues
+                    .iter()
+                    .filter(|i| i.violation == Violation::RepeatedContentType)
+                    .count(),
+                1
+            );
+            let missing: Vec<_> = issues.iter().filter(|i| i.violation == MISSING).collect();
+            if enabled_validators.contains(Validators::PARAMETERS) {
+                assert_eq!(missing.len(), 2);
+                assert_position(text, "name*1=b", missing[0], PositionKind::ElementStart);
+                assert_position(text, "filename*1=b", missing[1], PositionKind::ElementStart);
+            } else {
+                assert!(missing.is_empty());
+            }
+            assert_eq!(feed(text, options), issues);
+        }
+    }
+}
+
+#[test]
+fn gap_report_order_and_caps_follow_parameter_declaration_order() {
+    let text = "Content-Disposition: attachment; z=fallback; a*1=x; z*2=y; b*4=z\r\n\r\n";
+    for limit in [0, 1] {
+        let options = Options {
+            max_issues_per_violation: limit,
+            ..Default::default()
+        };
+        let issues = read(text, 1, options);
+        let missing: Vec<_> = issues.iter().filter(|i| i.violation == MISSING).collect();
+        assert_eq!(missing.len(), if limit == 0 { 3 } else { 1 });
+        assert_position(text, "z*2=", missing[0], PositionKind::ElementStart);
+        if limit == 0 {
+            assert_position(text, "a*1=", missing[1], PositionKind::ElementStart);
+            assert_position(text, "b*4=", missing[2], PositionKind::ElementStart);
+        } else {
+            let marker = issues
+                .iter()
+                .find(|i| i.violation == Violation::TooManyComplianceIssues)
+                .unwrap();
+            assert_position(text, "a*1=", marker, PositionKind::Exact);
+        }
+        assert_eq!(feed(text, options), issues);
+    }
+}
 
 #[test]
 fn folded_positions_are_byte_based_and_account_for_raw_field_whitespace() {
@@ -508,7 +667,7 @@ fn disposition_state_and_parameter_budgets_reset_between_mbox_messages() {
 #[test]
 fn header_length_limit_precedes_parameter_validation() {
     let text = format!(
-        "Content-Type: text/plain; x=1; x=2; x={}\r\n\r\n",
+        "Content-Type: text/plain; x*1=1; x*1=2; x={}\r\n\r\n",
         "a".repeat(256)
     );
     for capacity in [1, 4096] {
@@ -529,6 +688,7 @@ fn header_length_limit_precedes_parameter_validation() {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_parameters(&issues, &[]);
+        assert!(!issues.iter().any(|i| i.violation == MISSING));
     }
 }
 
@@ -545,6 +705,7 @@ fn new_violations_have_separate_reporting_budgets() {
         FILENAME,
         PARAMETER,
         DISPOSITION,
+        MISSING,
         Violation::TooManyComplianceIssues,
     ] {
         assert_eq!(
@@ -559,36 +720,50 @@ fn new_violations_have_separate_reporting_budgets() {
 
 #[test]
 fn reporting_preserves_selected_headers_body_and_serialization() {
-    let mut expected = None;
-    for logging in [false, true] {
-        for enabled_validators in [Validators::NONE, Validators::ALL] {
-            let mut parser = MimeParser::new(BufReader::with_capacity(
-                1,
-                Cursor::new(REPEATED.as_bytes()),
-            ));
-            parser.set_compliance_options(Options {
-                enabled_validators,
-                ..Default::default()
-            });
-            let mut message = if logging {
-                parser.parse_message_with_logger(&mut |_| Ok(())).unwrap()
-            } else {
-                parser.parse_message().unwrap()
-            };
-            let MimeEntity::Part(part) = message.body_mut().unwrap() else {
-                panic!("expected text part")
-            };
-            assert_eq!(part.content_type().unwrap().unwrap().name(), None);
-            assert_eq!(
-                part.content_disposition().unwrap().unwrap().file_name(),
-                Some("a")
-            );
-            let mut decoded = Vec::new();
-            part.content_mut().decode_to(&mut decoded).unwrap();
-            assert_eq!(decoded, b"body\r\n");
-            let mut actual = Vec::new();
-            message.write_to(&mut actual).unwrap();
-            assert_eq!(&actual, expected.get_or_insert_with(|| actual.clone()));
+    for (text, filename) in [(REPEATED, "a"), (CONTINUED, "file.txt")] {
+        let mut expected = None;
+        for logging in [false, true] {
+            for enabled_validators in [Validators::NONE, Validators::ALL] {
+                let mut parser =
+                    MimeParser::new(BufReader::with_capacity(1, Cursor::new(text.as_bytes())));
+                parser.set_compliance_options(Options {
+                    enabled_validators,
+                    ..Default::default()
+                });
+                let mut issues = Vec::new();
+                let mut message = if logging {
+                    parser
+                        .parse_message_with_logger(&mut |issue| {
+                            issues.push(issue);
+                            Ok(())
+                        })
+                        .unwrap()
+                } else {
+                    parser.parse_message().unwrap()
+                };
+                let MimeEntity::Part(part) = message.body_mut().unwrap() else {
+                    panic!("expected text part")
+                };
+                assert_eq!(part.content_type().unwrap().unwrap().name(), None);
+                assert_eq!(
+                    part.content_disposition().unwrap().unwrap().file_name(),
+                    Some(filename)
+                );
+                let mut decoded = Vec::new();
+                part.content_mut().decode_to(&mut decoded).unwrap();
+                assert_eq!(decoded, b"body\r\n");
+                let mut actual = Vec::new();
+                message.write_to(&mut actual).unwrap();
+                assert_eq!(&actual, expected.get_or_insert_with(|| actual.clone()));
+                assert_eq!(
+                    issues.iter().filter(|i| i.violation == MISSING).count(),
+                    usize::from(
+                        logging
+                            && enabled_validators.contains(Validators::PARAMETERS)
+                            && text == CONTINUED
+                    ),
+                );
+            }
         }
     }
 }
@@ -600,6 +775,7 @@ fn logger_errors_from_each_new_violation_and_the_budget_marker_propagate() {
         FILENAME,
         PARAMETER,
         DISPOSITION,
+        MISSING,
         Violation::TooManyComplianceIssues,
     ] {
         let mut reader = MimeReader::new(LIMITED.as_bytes());
