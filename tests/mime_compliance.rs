@@ -201,8 +201,8 @@ fn metadata_is_complete_and_context_does_not_change_categories() {
             assert_eq!(transport, storage);
         }
     }
-    assert_eq!(codes.len(), 96);
-    for code in 1..=95 {
+    assert_eq!(codes.len(), 97);
+    for code in 1..=96 {
         assert!(codes.contains(&code));
     }
     assert!(codes.contains(&(i32::MAX as u32)));

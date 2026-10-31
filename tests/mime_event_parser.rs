@@ -3,8 +3,8 @@
 use std::io;
 
 use mimecraft::{
-    MimeComplianceIssue, MimeComplianceOptions, MimeContentKind, MimeEntityParseOptions, MimeEvent,
-    MimeEventFormat, MimeEventParser, MimePosition, MimeReader,
+    MimeComplianceIssue, MimeComplianceOptions, MimeComplianceViolation, MimeContentKind,
+    MimeEntityParseOptions, MimeEvent, MimeEventFormat, MimeEventParser, MimePosition, MimeReader,
 };
 
 #[path = "support/content_type_syntax.rs"]
@@ -180,6 +180,10 @@ fn assert_splits(wire: &[u8], format: MimeEventFormat, options: MimeEntityParseO
 #[test]
 fn repeated_parameters_and_disposition_survive_every_split() {
     let wires: &[&[u8]] = &[
+        b"X-Prefix: \xc3\xa9\r\nContent-Type: text/plain; z*2=x;\r\n\
+\t(\xc3\xa9) name;\r\n\tz*2=y; filename=;\r\n\tsize=\"unterminated\r\n\r\nbody\r\n",
+        b"Content-Type: text/plain\r\nContent-Type: text/html; name\r\n\
+Content-Disposition: attachment; filename=a\r\nContent-Disposition: inline; filename=\r\n\r\nbody\r\n",
         b"Content-Type: text/plain; z*0=a;\r\n\tname=fallback;\r\n\
 \t(\xc3\xa9) name*2=b; z*0=c;\r\n\tother*1=x; name*4=d; other*3=y\r\n\r\nbody\r\n",
         b"Content-Type: text/plain; name*0=a\r\nContent-Type: text/plain; name*1=b\r\n\
@@ -712,23 +716,52 @@ fn callbacks_and_logger_failures_are_terminal_and_preserve_errors() {
             );
         }
     }
-    let mut logger = |_: MimeComplianceIssue| Err(io::Error::other("logger sentinel"));
-    let mut parser = MimeEventParser::with_logger(
-        MimeEventFormat::Message,
-        Default::default(),
-        Default::default(),
-        &mut logger,
-    )
-    .unwrap();
-    let error = parser
-        .parse(b"Subject: test\n\nbody", |_| Ok(()))
-        .and_then(|_| parser.finish(|_| Ok(())))
-        .unwrap_err();
-    assert_eq!(error.to_string(), "logger sentinel");
-    assert_eq!(
-        parser.finish(|_| panic!("poisoned")).unwrap_err().kind(),
-        io::ErrorKind::InvalidInput
-    );
+    for (wire, rejected) in [
+        (b"Subject: test\n\nbody".as_slice(), None),
+        (
+            b"Content-Type: text/plain; broken\r\n\r\nbody",
+            Some(MimeComplianceViolation::InvalidParameter),
+        ),
+    ] {
+        for split in 0..=wire.len() {
+            let mut rejected_count = 0;
+            let mut logger = |issue: MimeComplianceIssue| {
+                assert_eq!(rejected_count, 0, "logging continued after rejection");
+                if rejected.is_none_or(|violation| issue.violation == violation) {
+                    rejected_count += 1;
+                    Err(io::Error::other("logger sentinel"))
+                } else {
+                    Ok(())
+                }
+            };
+            let mut parser = MimeEventParser::with_logger(
+                MimeEventFormat::Message,
+                Default::default(),
+                Default::default(),
+                &mut logger,
+            )
+            .unwrap();
+            let error = parser
+                .parse(&wire[..split], |_| Ok(()))
+                .and_then(|_| parser.parse(&wire[split..], |_| Ok(())))
+                .and_then(|_| parser.finish(|_| Ok(())))
+                .unwrap_err();
+            assert_eq!(error.to_string(), "logger sentinel");
+            assert_eq!(
+                parser.finish(|_| panic!("poisoned")).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                parser
+                    .parse(b"more", |_| panic!("poisoned"))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            drop(parser);
+            assert_eq!(rejected_count, 1);
+        }
+    }
 }
 
 #[test]

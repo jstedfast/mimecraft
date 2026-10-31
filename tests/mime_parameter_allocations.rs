@@ -9,7 +9,8 @@ use std::{
 };
 
 use mimecraft::{
-    MimeComplianceIssue, MimeComplianceViolation as Violation, MimeEntityParseOptions, MimeReader,
+    MimeComplianceIssue, MimeComplianceOptions, MimeCompliancePositionKind,
+    MimeComplianceViolation as Violation, MimeEntityParseOptions, MimeReader,
 };
 
 struct MeasuredAllocator;
@@ -66,6 +67,78 @@ unsafe impl GlobalAlloc for MeasuredAllocator {
 #[global_allocator]
 static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
 
+fn measure_headers(text: &str) -> (Vec<MimeComplianceIssue>, usize, Duration) {
+    let mut reader = MimeReader::with_options(
+        text.as_bytes(),
+        MimeEntityParseOptions {
+            max_header_length: text.len(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    reader.set_compliance_options(MimeComplianceOptions {
+        max_issues_per_violation: 0,
+        ..Default::default()
+    });
+    let mut issues = Vec::new();
+    // Unlike the upstream private-validator measurement, this also includes
+    // raw header parsing and reporting setup, under the same allocation cap.
+    let start = Instant::now();
+    ALLOCATED.with(|allocated| allocated.set(Some(0)));
+    let result = reader.read_headers_with_logger(
+        &mut |issue: MimeComplianceIssue| {
+            issues.push(issue);
+            Ok(())
+        },
+        |_| Ok(()),
+    );
+    let allocated = ALLOCATED.with(|allocated| allocated.replace(None).unwrap());
+    let elapsed = start.elapsed();
+    result.unwrap();
+    (issues, allocated, elapsed)
+}
+
+#[test]
+fn many_malformed_parameters_are_bounded() {
+    const COUNT: usize = 16_384;
+    for parameter in ["broken", "x="] {
+        let text = format!(
+            "Content-Disposition: attachment{}\r\n\r\n",
+            format!(";\r\n {parameter}").repeat(COUNT)
+        );
+        let (issues, allocated, elapsed) = measure_headers(&text);
+        let invalid: Vec<_> = issues
+            .iter()
+            .filter(|i| i.violation == Violation::InvalidParameter)
+            .collect();
+        assert_eq!(invalid.len(), COUNT);
+        assert!(
+            invalid
+                .iter()
+                .all(|i| i.position_kind == MimeCompliancePositionKind::ElementStart)
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| i.violation == Violation::RepeatedParameter)
+                .count(),
+            if parameter == "x=" { COUNT - 1 } else { 0 },
+        );
+        let last = issues.last().unwrap();
+        assert_eq!(last.line_number, COUNT as u64 + 1);
+        assert_eq!(last.column_number, 2);
+        assert_eq!(
+            last.stream_offset,
+            (text.len() - parameter.len() - 4) as u64
+        );
+        assert!(elapsed < Duration::from_secs(5), "{parameter}: {elapsed:?}");
+        assert!(
+            allocated < COUNT * 256 + 65536,
+            "{parameter}: {allocated} bytes"
+        );
+    }
+}
+
 #[test]
 fn segment_tracking_is_bounded_by_declaration_count() {
     const COUNT: usize = 4096;
@@ -81,30 +154,7 @@ fn segment_tracking_is_bounded_by_declaration_count() {
             write!(text, "; filename*{last}=x").unwrap();
         }
         write!(text, "; filename*{last}=y\r\n\r\n").unwrap();
-        let mut reader = MimeReader::with_options(
-            text.as_bytes(),
-            MimeEntityParseOptions {
-                max_header_length: text.len(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mut issues = Vec::new();
-
-        // Unlike the upstream private-validator measurement, this also includes
-        // raw header parsing and reporting setup, under the same allocation cap.
-        let start = Instant::now();
-        ALLOCATED.with(|allocated| allocated.set(Some(0)));
-        let result = reader.read_headers_with_logger(
-            &mut |issue: MimeComplianceIssue| {
-                issues.push(issue);
-                Ok(())
-            },
-            |_| Ok(()),
-        );
-        let allocated = ALLOCATED.with(|allocated| allocated.replace(None).unwrap());
-        let elapsed = start.elapsed();
-        result.unwrap();
+        let (issues, allocated, elapsed) = measure_headers(&text);
 
         assert_eq!(
             issues

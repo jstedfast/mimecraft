@@ -12,7 +12,9 @@ use super::{
 };
 use crate::{
     HeaderId, MimePosition,
-    parse_utils::{is_attribute, skip_comment, skip_comments_and_whitespace, skip_quoted},
+    parse_utils::{
+        is_attribute, skip_comment, skip_comments_and_whitespace, skip_quoted, skip_whitespace,
+    },
 };
 
 #[derive(Default)]
@@ -67,8 +69,7 @@ struct Declaration<'a> {
 }
 
 // Inspect raw declarations independently of parameter decoding and precedence.
-// Malformed syntax ends or resynchronizes this check, not the MIME parser;
-// this validator reports repetitions and missing segments, not syntax errors.
+// Malformed syntax ends or resynchronizes this check, not the MIME parser.
 struct Scanner<'a> {
     text: &'a [u8],
     index: usize,
@@ -103,9 +104,6 @@ impl<'a> Scanner<'a> {
     }
 
     fn parameter(&mut self) -> Option<Declaration<'a>> {
-        if !self.cfws() {
-            return None;
-        }
         let start = self.index;
         while self.text.get(self.index).is_some_and(|&b| is_attribute(b)) {
             self.index += 1;
@@ -158,27 +156,33 @@ impl<'a> Scanner<'a> {
         })
     }
 
-    fn skip_value(&mut self) -> bool {
+    fn skip_value(&mut self) -> (bool, bool) {
         if !self.cfws() || self.index == self.text.len() {
-            return false;
+            return (false, true);
         }
-        if self.text[self.index] == b'"' {
+        let invalid = if self.text[self.index] == b'"' {
             if skip_quoted(self.text, &mut self.index).is_err() {
-                return false;
+                return (false, true);
             }
+            false
         } else {
+            let start = self.index;
             while self.index < self.text.len() && !matches!(self.text[self.index], b';' | b'(') {
                 self.index += 1;
             }
+            self.index == start
+        };
+        if !self.cfws() {
+            return (false, true);
         }
-        if !self.cfws() || self.index == self.text.len() {
-            return false;
+        if self.index == self.text.len() {
+            return (false, invalid);
         }
         // Loose parsing also accepts a missing separator after a quote or comment.
         if self.text[self.index] == b';' {
             self.index += 1;
         }
-        self.index < self.text.len()
+        (self.index < self.text.len(), invalid)
     }
 }
 
@@ -220,7 +224,31 @@ pub(super) fn validate(
         }
     };
     while scanner.index < text.len() {
+        skip_whitespace(text, &mut scanner.index);
+        let start = scanner.index;
+        if !scanner.cfws() {
+            logger.log(create_issue(
+                Violation::InvalidParameter,
+                start,
+                MimeCompliancePositionKind::ElementStart,
+            ))?;
+            break;
+        }
+        if scanner.index == text.len() {
+            break;
+        }
+        // Empty parameter slots are also ignored by ParameterList.
+        if text[scanner.index] == b';' {
+            scanner.index += 1;
+            continue;
+        }
+        let start = scanner.index;
         let Some(declaration) = scanner.parameter() else {
+            logger.log(create_issue(
+                Violation::InvalidParameter,
+                start,
+                MimeCompliancePositionKind::ElementStart,
+            ))?;
             if !scanner.next_parameter() {
                 break;
             }
@@ -260,7 +288,15 @@ pub(super) fn validate(
                 MimeCompliancePositionKind::Exact,
             ))?;
         }
-        if !scanner.skip_value() {
+        let (more, invalid) = scanner.skip_value();
+        if invalid {
+            logger.log(create_issue(
+                Violation::InvalidParameter,
+                declaration.start,
+                MimeCompliancePositionKind::ElementStart,
+            ))?;
+        }
+        if !more {
             break;
         }
     }
@@ -334,6 +370,50 @@ mod tests {
         .unwrap();
         assert_eq!(issues[0].column_number, 24);
         assert_eq!(issues[0].stream_offset, 117);
+    }
+
+    #[test]
+    fn malformed_calls_preserve_slice_offsets_and_clear_state() {
+        let value = "text/plain; broken;\r\n x=";
+        let bytes = format!("xx{value}yy");
+        for _ in 0..2 {
+            for text in [&bytes.as_bytes()[2..bytes.len() - 2], b"text/plain; x=\"\""] {
+                let mut issues = Vec::new();
+                validate(
+                    text,
+                    HeaderId::ContentType,
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                    &mut |issue| {
+                        issues.push(issue);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                if text == value.as_bytes() {
+                    assert_eq!(issues.len(), 2);
+                    for (index, marker) in ["broken", "x="].iter().enumerate() {
+                        let issue = issues[index];
+                        let offset = value.find(marker).unwrap() as u64;
+                        assert_eq!(issue.violation, Violation::InvalidParameter);
+                        assert_eq!(issue.stream_offset, 100 + offset);
+                        assert_eq!(issue.line_number, 5 + index as u64);
+                        assert_eq!(issue.column_number, if index == 0 { 7 + offset } else { 2 });
+                        assert_eq!(issue.context, MimeComplianceContext::Storage);
+                        assert_eq!(
+                            issue.position_kind,
+                            MimeCompliancePositionKind::ElementStart
+                        );
+                    }
+                } else {
+                    assert!(issues.is_empty());
+                }
+            }
+        }
     }
 
     #[test]

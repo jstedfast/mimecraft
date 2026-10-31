@@ -1909,8 +1909,8 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `8cca4762`. Numeric identifiers
-match its unreleased enum, including the renumbering in `21860252`, and are not
+and remarks are ported through MimeKit commit `c21dbd41`. Numeric identifiers
+match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
 currently covers raw-header syntax and line format, repeated/missing message
@@ -1935,6 +1935,11 @@ filename, and other parameter declarations, including duplicate RFC 2231
 continuation indices, at exact byte positions. Distinct continuation segments
 are allowed; Content-Type `name` and Content-Disposition `filename` also allow
 one ordinary fallback beside one extended or continued representation.
+`InvalidParameter` reports malformed declarations or fragments at their start
+(`ElementStart`), including missing names, equals signs or values and unclosed
+quotes or comments. Empty slots and quoted empty values remain valid. These
+optional checks follow tolerant tokenization, not strict grammar, and do not
+validate encoded RFC 2231 value contents or change recovery and decoding.
 Missing RFC 2231 continuation segments are reported once per parameter, at the
 first continuation declaration (`ElementStart`), after scanning the header.
 Indices may appear out of order but must cover consecutive values starting at

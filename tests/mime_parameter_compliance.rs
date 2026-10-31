@@ -15,6 +15,176 @@ const FILENAME: Violation = Violation::RepeatedFilenameParameter;
 const PARAMETER: Violation = Violation::RepeatedParameter;
 const DISPOSITION: Violation = Violation::RepeatedContentDisposition;
 const MISSING: Violation = Violation::MissingParameterSegment;
+const INVALID: Violation = Violation::InvalidParameter;
+
+fn assert_invalid(issues: &[Issue], count: usize) {
+    let invalid: Vec<_> = issues.iter().filter(|i| i.violation == INVALID).collect();
+    assert_eq!(invalid.len(), count);
+    assert!(
+        invalid
+            .iter()
+            .all(|i| i.position_kind == PositionKind::ElementStart)
+    );
+}
+
+#[test]
+fn upstream_malformed_parameter_cases() {
+    // Malformed parameter cases inspired by https://github.com/noxxi/mime-is-broken.
+    let cases = [
+        ("", 0),
+        (" ; ; (comment)", 0),
+        ("(nested (comment; filename=ignored))", 0),
+        ("filename=\"\"", 0),
+        ("filename=(comment) \"file.txt\"", 0),
+        ("filename=unquoted file.txt", 0),
+        ("filename=unquoted\r\n\tfile.txt", 0),
+        ("filename=\"file.txt\" filename=other.txt", 0),
+        ("filename=file.txt(comment)filename=other.txt", 0),
+        ("filename=\"file; \\\"name\\\".txt\"; size=1", 0),
+        ("filename*=''file.txt", 0),
+        ("filename*=utf-8''%GG", 0),
+        ("filename*=no-prefix", 0),
+        ("filename*0=file; filename*2=.txt", 0),
+        ("filename", 1),
+        ("filename value", 1),
+        ("filename (comment)", 1),
+        ("=file.txt", 1),
+        ("\"filename\"=file.txt", 1),
+        ("file/name=file.txt", 1),
+        ("filenam\u{e9}=file.txt", 1),
+        ("filename*", 1),
+        ("filename*0", 1),
+        ("filename*0x=file.txt", 1),
+        ("filename**=file.txt", 1),
+        ("filename*2147483648=file.txt", 1),
+        ("filename=", 1),
+        ("filename= \t ; size=1", 1),
+        ("filename=(comment)", 1),
+        ("filename=(comment); size=1", 1),
+        ("filename=\"unterminated; size=1", 1),
+        ("filename=file(comment", 1),
+        ("filename (comment", 1),
+        ("(unterminated", 1),
+        ("filename=\"file\".zip", 1),
+        ("filename; =bad; size=1", 2),
+        ("\"bad; ignored=1\"=x; filename=file.txt", 1),
+        ("broken (comment; ignored=1); filename=a; filename=b", 1),
+        ("filename=; filename=good; filename=again", 1),
+        ("filename*0=; filename*2=x", 1),
+    ];
+    assert_eq!(cases.len(), 40);
+    let mut headers = Vec::new();
+    for (parameters, count) in cases {
+        headers.push((
+            format!("Content-Disposition: attachment; {parameters}"),
+            count,
+        ));
+        headers.push((
+            format!(
+                "Content-Type: text/plain; {}",
+                parameters.replace("filename", "name")
+            ),
+            count,
+        ));
+    }
+    for (header, count) in [
+        ("X-Parameters: attachment; broken", 0),
+        ("Content-Type: text/plain junk", 0),
+        ("Content-Disposition: \"attachment; broken\"", 0),
+        ("Content-Disposition: attachment (comment; broken)", 0),
+        (
+            "Content-Disposition: attachment (comment; broken); filename",
+            1,
+        ),
+    ] {
+        headers.push((header.to_owned(), count));
+    }
+    for (header, count) in headers {
+        let text = format!("{header}\r\n\r\nbody\r\n");
+        let issues = read(&text, 4096, Options::default());
+        assert_invalid(&issues, count);
+        for capacity in [1, 7] {
+            assert_eq!(
+                read(&text, capacity, Options::default()),
+                issues,
+                "{header}"
+            );
+        }
+        assert_eq!(feed(&text, Options::default()), issues, "{header}");
+    }
+}
+
+const MALFORMED: &str = "X-Prefix: \u{e9}\r\nContent-Type: text/plain; z*2=x;\r\n\
+\t(\u{e9}) name;\r\n\tz*2=y; filename=;\r\n\tsize=\"unterminated\r\n\r\nbody\r\n";
+const IGNORED_MALFORMED: &str = "Content-Type: text/plain\r\n\
+Content-Type: text/html; name\r\n\
+Content-Disposition: attachment; filename=a\r\n\
+Content-Disposition: inline; filename=\r\n\r\nbody\r\n";
+const INVALID_HEADERS: &str = "Content-Type: text/plain; name\r\n\
+Content-Disposition: attachment; filename=a\r\n\r\nbody\r\n";
+
+#[test]
+fn malformed_positions_preserve_repetition_and_first_segment_locations() {
+    for capacity in [1, 4096] {
+        let issues = read(MALFORMED, capacity, Options::default());
+        assert_invalid(&issues, 3);
+        let invalid: Vec<_> = issues.iter().filter(|i| i.violation == INVALID).collect();
+        for (marker, issue) in ["name;", "filename=", "size="].iter().zip(invalid) {
+            assert_position(MALFORMED, marker, issue, PositionKind::ElementStart);
+        }
+        let missing: Vec<_> = issues.iter().filter(|i| i.violation == MISSING).collect();
+        assert_eq!(missing.len(), 1);
+        assert_position(MALFORMED, "z*2=x", missing[0], PositionKind::ElementStart);
+        let repeated: Vec<_> = issues.iter().filter(|i| i.violation == PARAMETER).collect();
+        assert_eq!(repeated.len(), 1);
+        assert_position(MALFORMED, "z*2=y", repeated[0], PositionKind::Exact);
+        assert_eq!(feed(MALFORMED, Options::default()), issues);
+    }
+    for fragment in ["(unterminated", "(closed) (unterminated"] {
+        let text = format!("Content-Type: text/plain;\r\n\t{fragment}\r\n\r\nbody");
+        let issues = read(&text, 1, Options::default());
+        assert_invalid(&issues, 1);
+        let issue = issues.iter().find(|i| i.violation == INVALID).unwrap();
+        assert_position(&text, fragment, issue, PositionKind::ElementStart);
+    }
+}
+
+#[test]
+fn ignored_headers_still_report_malformed_parameters_when_enabled() {
+    for enabled_validators in [
+        Validators::ALL,
+        Validators::PARAMETERS,
+        Validators::BASE64,
+        Validators::NONE,
+    ] {
+        let options = Options {
+            enabled_validators,
+            ..Default::default()
+        };
+        for capacity in [1, 4096] {
+            let issues = read(IGNORED_MALFORMED, capacity, options);
+            if enabled_validators.contains(Validators::PARAMETERS) {
+                assert_invalid(&issues, 2);
+                let invalid: Vec<_> = issues.iter().filter(|i| i.violation == INVALID).collect();
+                assert_position(
+                    IGNORED_MALFORMED,
+                    "name\r\n",
+                    invalid[0],
+                    PositionKind::ElementStart,
+                );
+                assert_position(
+                    IGNORED_MALFORMED,
+                    "filename=\r\n",
+                    invalid[1],
+                    PositionKind::ElementStart,
+                );
+            } else {
+                assert_invalid(&issues, 0);
+            }
+            assert_eq!(feed(IGNORED_MALFORMED, options), issues);
+        }
+    }
+}
 
 fn is_parameter(issue: &Issue) -> bool {
     matches!(issue.violation, BOUNDARY | FILENAME | PARAMETER)
@@ -343,7 +513,7 @@ const NESTED: &str = "Content-Type: multipart/mixed; boundary=b\r\nContent-Dispo
 --b\r\nContent-Type: message/rfc822\r\nContent-Disposition: inline\r\n\r\n\
 Content-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\ntwo\r\n--b--\r\n";
 const LIMITED: &str = "Content-Type: text/plain; x=1; x=2; x=3; x=4; boundary=a; boundary=b\r\n\
-Content-Disposition: attachment; filename=a; filename=b; filename=c; a*1=x; b*3=y\r\n\
+Content-Disposition: attachment; filename=a; filename=b; filename=c; a*1=x; b*3=y; bad; broken=\r\n\
 Content-Disposition: inline\r\nContent-Disposition: attachment\r\n\r\nbody\r\n";
 const CONTINUED: &str = "Content-Type: text/plain\r\n\
 Content-Disposition: attachment; filename*0=file.; filename*2=txt\r\n\r\nbody\r\n";
@@ -667,7 +837,7 @@ fn disposition_state_and_parameter_budgets_reset_between_mbox_messages() {
 #[test]
 fn header_length_limit_precedes_parameter_validation() {
     let text = format!(
-        "Content-Type: text/plain; x*1=1; x*1=2; x={}\r\n\r\n",
+        "Content-Type: text/plain; broken; x*1=1; x*1=2; x={}\r\n\r\n",
         "a".repeat(256)
     );
     for capacity in [1, 4096] {
@@ -689,6 +859,7 @@ fn header_length_limit_precedes_parameter_validation() {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_parameters(&issues, &[]);
         assert!(!issues.iter().any(|i| i.violation == MISSING));
+        assert_invalid(&issues, 0);
     }
 }
 
@@ -706,6 +877,7 @@ fn new_violations_have_separate_reporting_budgets() {
         PARAMETER,
         DISPOSITION,
         MISSING,
+        INVALID,
         Violation::TooManyComplianceIssues,
     ] {
         assert_eq!(
@@ -720,7 +892,12 @@ fn new_violations_have_separate_reporting_budgets() {
 
 #[test]
 fn reporting_preserves_selected_headers_body_and_serialization() {
-    for (text, filename) in [(REPEATED, "a"), (CONTINUED, "file.txt")] {
+    for (text, filename, invalid) in [
+        (REPEATED, "a", 0),
+        (CONTINUED, "file.txt", 0),
+        (INVALID_HEADERS, "a", 1),
+        (IGNORED_MALFORMED, "a", 2),
+    ] {
         let mut expected = None;
         for logging in [false, true] {
             for enabled_validators in [Validators::NONE, Validators::ALL] {
@@ -744,7 +921,16 @@ fn reporting_preserves_selected_headers_body_and_serialization() {
                 let MimeEntity::Part(part) = message.body_mut().unwrap() else {
                     panic!("expected text part")
                 };
-                assert_eq!(part.content_type().unwrap().unwrap().name(), None);
+                if text == INVALID_HEADERS {
+                    // Rust's typed getter remains strict; recovery retains the raw header.
+                    assert!(part.content_type().is_err());
+                    assert_eq!(
+                        part.headers().get("Content-Type").unwrap().raw_value(),
+                        b" text/plain; name\r\n"
+                    );
+                } else {
+                    assert_eq!(part.content_type().unwrap().unwrap().name(), None);
+                }
                 assert_eq!(
                     part.content_disposition().unwrap().unwrap().file_name(),
                     Some(filename)
@@ -755,6 +941,14 @@ fn reporting_preserves_selected_headers_body_and_serialization() {
                 let mut actual = Vec::new();
                 message.write_to(&mut actual).unwrap();
                 assert_eq!(&actual, expected.get_or_insert_with(|| actual.clone()));
+                assert_invalid(
+                    &issues,
+                    if logging && enabled_validators.contains(Validators::PARAMETERS) {
+                        invalid
+                    } else {
+                        0
+                    },
+                );
                 assert_eq!(
                     issues.iter().filter(|i| i.violation == MISSING).count(),
                     usize::from(
@@ -776,6 +970,7 @@ fn logger_errors_from_each_new_violation_and_the_budget_marker_propagate() {
         PARAMETER,
         DISPOSITION,
         MISSING,
+        INVALID,
         Violation::TooManyComplianceIssues,
     ] {
         let mut reader = MimeReader::new(LIMITED.as_bytes());
