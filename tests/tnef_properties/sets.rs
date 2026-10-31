@@ -4,7 +4,7 @@
 use super::*;
 use mimecraft::tnef::{TnefProperty, TnefPropertySet};
 
-fn multi(kind: Type, values: &[&[u8]]) -> Vec<u8> {
+pub(super) fn multi(kind: Type, values: &[&[u8]]) -> Vec<u8> {
     let mut item = fixed(0x6601, Type(kind.0 | 0x1000), &[]);
     dword(&mut item, values.len() as i32);
     for value in values {
@@ -17,7 +17,7 @@ fn multi(kind: Type, values: &[&[u8]]) -> Vec<u8> {
     item
 }
 
-fn read_set(data: &[u8], chunk: usize) -> TnefPropertySet {
+pub(super) fn read_set(data: &[u8], chunk: usize) -> TnefPropertySet {
     let mut reader = TnefReader::new(Chunked { input: data, chunk });
     let mut logger = |issue| panic!("unexpected issue: {issue:?}");
     assert!(reader.read_next_with_logger(&mut logger).unwrap());
@@ -166,6 +166,7 @@ fn lookup_preserves_order_duplicates_types_and_case_sensitive_names() {
         name: TnefName::Id(0x8501),
     };
     assert_eq!(set.get_named(&numeric), Some(&set[4]));
+    assert_eq!(set.get_named(&numeric).unwrap().to_i32(), Ok(7));
     assert_eq!(set.get_by_id(0x9999), None);
 
     let mut empty = text(Type::BINARY, b"");

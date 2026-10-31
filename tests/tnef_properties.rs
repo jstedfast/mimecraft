@@ -12,12 +12,16 @@ use mimecraft::tnef::{
     TnefValue as Value,
 };
 
+#[path = "tnef_properties/conversions.rs"]
+mod conversions;
 #[path = "tnef_properties/dates.rs"]
 mod dates;
 #[path = "tnef_properties/embedded.rs"]
 mod embedded;
 #[path = "tnef_properties/sets.rs"]
 mod sets;
+#[path = "tnef_properties/tags.rs"]
+mod tags;
 
 fn dword(bytes: &mut Vec<u8>, value: i32) {
     bytes.extend_from_slice(&value.to_le_bytes());

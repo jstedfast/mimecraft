@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
+    borrow::Cow,
     cell::RefCell,
     io::{self, Read},
     rc::Rc,
@@ -18,6 +19,15 @@ use super::{
     TnefComplianceIssue, TnefComplianceLogger, TnefComplianceViolation as Violation, TnefDateTime,
     TnefDateTimeError, TnefReadError, TnefReaderOptions,
 };
+
+pub(super) fn decode_string(charset: Charset, bytes: &[u8]) -> Cow<'_, str> {
+    // Eight-bit strings are usually NUL-terminated.
+    let length = bytes
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |index| index + 1);
+    charset.decode_lossy(&bytes[..length]).0
+}
 
 enum Logger<'a> {
     None,
@@ -861,12 +871,7 @@ impl<R: Read> TnefReader<R> {
             return Err(TnefReadError::InvalidValueType(tag));
         }
         let bytes = self.bytes_core(logger)?;
-        let length = bytes
-            .iter()
-            .rposition(|&byte| byte != 0)
-            .map_or(0, |index| index + 1);
-        // Eight-bit strings are usually NUL-terminated.
-        Ok(self.charset.decode_lossy(&bytes[..length]).0.into_owned())
+        Ok(decode_string(self.charset, &bytes).into_owned())
     }
 
     fn load_scalar(

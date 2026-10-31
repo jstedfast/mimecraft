@@ -17,6 +17,25 @@ mod date_workloads;
 #[path = "support/tnef_embedded.rs"]
 mod embedded_workloads;
 
+#[path = "support/tnef_conversions.rs"]
+mod conversion_workloads;
+
+fn prepare_conversions(name: &'static str) -> conversion_workloads::Workload {
+    let case = conversion_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(CONVERSIONS, "tnef-conversions", "Access")]
+#[bench::Numeric(&prepare_conversions("Numeric"))]
+#[bench::Text(&prepare_conversions("Text"))]
+#[bench::BinaryText(&prepare_conversions("BinaryText"))]
+#[bench::Bytes(&prepare_conversions("Bytes"))]
+#[bench::Lookup(&prepare_conversions("Lookup"))]
+fn conversions(case: &conversion_workloads::Workload) -> conversion_workloads::Summary {
+    conversion_workloads::read(case)
+}
+
 fn prepare_embedded(name: &'static str) -> embedded_workloads::Workload {
     let case = embedded_workloads::workload(name);
     case.check();
@@ -189,6 +208,15 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         });
     }
     group.finish();
+    let mut group = criterion.benchmark_group("tnef-conversions");
+    for name in conversion_workloads::CASES {
+        let case = prepare_conversions(name);
+        group.throughput(Throughput::Bytes(case.input_length as u64));
+        group.bench_function(BenchmarkId::new("Access", name), |b| {
+            b.iter(|| conversion_workloads::read(&case));
+        });
+    }
+    group.finish();
 }
 
 metabench::main!(
@@ -203,6 +231,7 @@ metabench::main!(
         PROPERTY_SNAPSHOT,
         PROPERTY_SET,
         DATES,
-        EMBEDDED
+        EMBEDDED,
+        CONVERSIONS
     ]
 );

@@ -12,6 +12,19 @@ mod date_workloads;
 #[path = "../benches/support/tnef_embedded.rs"]
 mod embedded_workloads;
 
+#[path = "../benches/support/tnef_conversions.rs"]
+mod conversion_workloads;
+
+#[test]
+fn owned_tnef_access_workloads_match_generated_values() {
+    for name in conversion_workloads::CASES {
+        let case = conversion_workloads::workload(name);
+        case.check();
+        assert!(!case.name.is_empty());
+        assert!(case.input_length > 0);
+    }
+}
+
 #[test]
 fn embedded_tnef_workloads_match_generated_messages_and_bodies() {
     for name in embedded_workloads::CASES {

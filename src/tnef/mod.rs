@@ -5,7 +5,7 @@
 //!
 //! Raw attribute values, checksums, and framing diagnostics are supported.
 //! MAPI properties and recipient rows support forward-only, bounded value reads
-//! and owned snapshots and ordered sets.
+//! and owned snapshots and ordered sets with explicit typed conversions.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -15,8 +15,10 @@ use std::{error::Error, fmt, io};
 
 mod date_time;
 mod property_set;
+mod property_tags;
 mod property_types;
 mod reader;
+mod value_conversion;
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
 pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{
@@ -24,6 +26,7 @@ pub use property_types::{
 };
 pub use reader::{TnefEmbeddedReader, TnefEmbeddedSource};
 pub use reader::{TnefPropertyReader, TnefPropertyValueReader, TnefReader, TnefValueReader};
+pub use value_conversion::TnefValueConversionError;
 
 /// The object to which an attribute belongs, preserving unrecognized bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

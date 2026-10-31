@@ -57,7 +57,8 @@ impl TnefPropertyType {
 }
 
 /// A full MAPI tag: property identifier in the high word, type in the low word.
-/// No catalog lookup is needed; unrecognized identifiers remain usable.
+/// Includes all 696 built-in tags defined by MimeKit, including string variants
+/// and multivalue flags. [`new`](Self::new) preserves all other identifiers.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TnefPropertyTag(pub u32);
 

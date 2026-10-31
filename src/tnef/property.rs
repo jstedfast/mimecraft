@@ -24,8 +24,9 @@ use std::io::{self, Read};
 /// the value unclaimed, permitting streaming instead.
 ///
 /// No I/O occurs on drop. Embedded readers share limits and diagnostics;
-/// numeric coercions are not yet implemented. Invalid dates are diagnosed while loading fixed-width values;
-/// native date values retain their original wire numbers.
+/// numeric conversions are available on returned [`TnefValue`]s and snapshots,
+/// not directly on this cursor. Invalid dates are diagnosed while loading
+/// fixed-width values; native dates retain their original wire numbers.
 /// Values remain provisional until parent advance verifies the checksum.
 ///
 /// ```
@@ -124,7 +125,7 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
         let Some(property) = &self.property else {
             return false;
         };
-        if !self.has_value || property.tag.id() != 0x3701 {
+        if !self.has_value || property.tag.id() != Tag::ATTACH_DATA_OBJ.id() {
             return false;
         }
         let kind = property.tag.value_type();
@@ -260,7 +261,7 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
                 }
             }
         }
-        Ok(TnefProperty::new(info, values))
+        Ok(TnefProperty::new(info, values, self.reader.charset))
     }
 
     /// Collects all properties following the current property, or all
@@ -336,14 +337,7 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
         let bytes = self.read_value_bytes()?;
         Ok(match tag.value_type() {
             Type::STRING8 => {
-                let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-                TnefValue::Text(
-                    self.reader
-                        .charset
-                        .decode_lossy(&bytes[..end])
-                        .0
-                        .into_owned(),
-                )
+                TnefValue::Text(super::decode_string(self.reader.charset, &bytes).into_owned())
             }
             Type::UNICODE => TnefValue::Text(decode_unicode(&bytes)),
             Type::OBJECT => TnefValue::Object(bytes),
@@ -691,10 +685,10 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
                 }
                 self.data_end = self.reader.position;
                 self.value_end = self.data_end;
-                if tag.id() == 0x3705 && tag.value_type() == Type::LONG {
+                if tag.id() == Tag::ATTACH_METHOD.id() && tag.value_type() == Type::LONG {
                     self.reader.attach_method = i32::from_le_bytes(bytes[..4].try_into().unwrap());
                 }
-                if tag.id() == 0x3fde
+                if tag.id() == Tag::INTERNET_CODEPAGE.id()
                     && tag.value_type() == Type::LONG
                     && !tag.is_multi_valued()
                     && self.reader.attribute.unwrap().level == TnefAttributeLevel::Message

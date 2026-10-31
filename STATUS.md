@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Message/attachment models, detached embedded readers, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection, date, and recursive-reader benchmark baselines cover the implemented layers. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Message/attachment models, detached embedded readers, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection/accessor, date, and recursive-reader benchmark baselines cover the implemented layers. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -8940,8 +8940,8 @@ read-only slice of native values after reader advancement or destruction.
 `value_count` reports values actually read, not a malformed declared count.
 `value()` returns the single value, or `None` for empty or multivalued properties;
 `Some(TnefValue::Null)` is distinct from absence. Dates, currency, GUIDs, and
-object data retain the native representations above; no implicit coercions or
-binary-to-string decoding helpers are added.
+object data retain the native representations above. Explicit typed accessors
+do not replace or implicitly coerce those stored values.
 
 `TnefPropertySet` preserves wire order and duplicates, with indexed access,
 iteration, slice access, and consuming vector conversion. `get(tag)` matches
@@ -8982,6 +8982,66 @@ Existing native-scalar and source-failure tests also exercise snapshots/sets.
 All 19 fixtures compare owned collections against native cursor reads and
 diagnostics across one-byte, seven-byte, and full refills, without pretending
 to cover upstream embedded-message recursion or converted models.
+
+### Typed owned property access
+
+`TnefValue` now provides explicit boolean, integer, floating-point, GUID, and
+byte accessors alongside its existing checked date conversion. `TnefProperty`
+adds scalar accessors for the same types and text. `TnefPropertySet` provides
+`get_bool`, `get_i16/i32/i64`, `get_f32/f64`, `get_datetime`, `get_guid`,
+`get_bytes`, and `get_text`, using the existing first-ID lookup independent of
+the requested tag's type. Named lookups return properties with the same
+accessors. Native multivalues remain accessible through the original value
+slice, without an extra generic array-conversion API.
+
+Set getters return `Result<Option<T>, TnefValueConversionError>`: only a missing
+identifier is `Ok(None)`. Empty, multivalued, incompatible, invalid-date, and
+out-of-range conversions remain errors, never silently missing values.
+Even an empty or incompatible first duplicate shadows later convertible
+properties. Scalar access rejects multivalues even with zero or one element.
+Conversions do not change reader state or repeat date diagnostics.
+
+Numeric behavior follows MimeKit's owned-property coercions: error codes are
+signed 32-bit numbers; booleans become zero/one; currency retains its 1/10000
+fraction for floating-point conversion and truncates it toward zero for
+integers. Nonzero currency fractions are true. Floating-point values and dates
+are not accepted as booleans, and dates are not treated as numbers.
+Integer narrowing keeps the low 16/32 bits rather than clamping. Unlike
+unchecked runtime-dependent floating-point-to-integer casts, NaNs, infinities,
+and values outside i64's range explicitly fail before narrowing. Floating-point
+conversion itself preserves NaNs/infinities and can overflow f64 to f32 infinity.
+
+Snapshots retain their resolved `Charset`, exposed through `charset()`.
+`to_text`/`get_text` borrow native strings or decode Binary with that captured
+charset, stripping only trailing NUL bytes and using the existing replacement
+decoder. Later codepage changes and reader destruction do not affect decoding.
+Object values are not interpreted as text. Borrowed `Cow<str>` results avoid
+allocation when possible; decoded results are not cached and any allocations
+are caller-owned, outside the former reader's wire-byte budget.
+Binary/Object/GUID byte access borrows storage, retains object IIDs and Windows
+GUID byte order, and does not parse strings/binary as GUIDs.
+
+All 696 active `TnefPropertyTag` constants from MimeKit are available in Rust
+SCREAMING_SNAKE_CASE, preserving identifiers, types, aliases, String8/Unicode
+variants, and all 19 multivalued tags. Upstream MAPI documentation and applicable
+remarks accompany the constants. MimeKit's commented-out `LocallyDelivered`
+declaration is not an active tag and is intentionally omitted. Arbitrary and
+unknown identifiers remain available through `TnefPropertyTag::new`.
+`tests/tnef_properties/tags.rs` adapts `TnefPropertyTagTests.TestBuiltIns` to
+exercise every constant against literal upstream wire values, reconstruction,
+type/flag extraction, equality, and hashing. It also checks String8/Unicode
+pairs, preserving upstream's String8-only service entry name and seven-bit
+display name rather than fabricating Unicode variants.
+
+Ten tests in `tests/tnef_properties/conversions.rs` adapt the owned-property
+type and coercion cases from `TnefPropertySetTests` and
+`TnefPropertyReaderCoercionTests`. They cover core constants, numeric matrices
+and narrowing boundaries, currency fractions/extremes, nonnumeric rejection,
+missing/empty/null/multivalue distinctions, first-match failures, borrowed
+storage, charset changes and cloned snapshot lifetime, raw-value preservation,
+and recoverable date errors without repeated diagnostics. Existing named
+lookup tests also exercise typed access. Five original prepared-snapshot
+benchmark cases cover this layer separately from parsing/collection.
 
 ### TNEF date interpretation
 
@@ -9076,12 +9136,12 @@ with identical attribute offsets/depths and diagnostics across one-byte,
 seven-byte, and full refills. A compile-fail doctest checks the parent borrow.
 These tests do not claim detached-reader or message-model parity.
 
-Detached embedded readers, numeric cross-type coercions,
-the full property-name catalog,
+Detached embedded readers, direct typed numeric cursor methods,
+the separate property-ID and named-property GUID/name catalogs,
 attachment/message models, MIME conversion, writing, async, and sans-I/O are deferred.
 Existing conversion snapshots are not presented as reader reference outputs.
-The benchmark sections record separate raw, property, collection, date, and
-recursive-reader baselines.
+The benchmark sections record separate raw, property, collection, date,
+recursive-reader, and owned-accessor baselines.
 
 ## Acceleration
 
@@ -9769,6 +9829,59 @@ The standalone executable's SHA-256 is
 All preceding raw/property/collection/date baseline artifacts remain preserved
 for the deferred sans-I/O work.
 
+#### TNEF owned property accessors
+
+`benches/support/tnef_conversions.rs` adds five generated cases to both TNEF
+harnesses and the integration smoke tests. Every batch uses 256 prepared owned
+properties; wire generation, parsing/checksum validation, snapshot construction,
+and correctness checks are outside measurement. Numeric performs i64 and f64
+conversion for eight native numeric/boolean types. Text borrows already-decoded
+String8/Unicode values; BinaryText decodes 256 non-ASCII Windows-1252 binary
+strings on every pass. Bytes borrows mixed Binary/Object/GUID values. Lookup
+performs 256 identifier hits and 64 misses through typed set accessors.
+Text/byte cases also consume the returned bytes. Every converted result is
+checked against the generator's independent model.
+
+The standalone harness displays equivalent original-wire-byte throughput, not
+parser throughput. The table instead reports time per complete batch. On
+2026-10-31, three serial release processes were pinned to logical CPU 2
+(`0x4`), with three warmups and five samples of at least 100 ms per case.
+Times are derived from the median of process-median batch rates on the same
+Windows x86-64 host used above; allocations come from the separate metabench
+operation. These are exploratory shared-host baselines, not performance
+thresholds or a .NET comparison.
+
+| Case | us/batch | Allocations | Allocated bytes |
+|---|---:|---:|---:|
+| Numeric | 0.528 | 0 | 0 |
+| Text | 0.540 | 0 | 0 |
+| BinaryText | 15.602 | 256 | 4,278 |
+| Bytes | 0.714 | 0 | 0 |
+| Lookup | 13.919 | 0 | 0 |
+
+All 62 smoke identities passed. All previous 57 allocation counts are
+unchanged; 51 also retain identical byte counts. Capturing the charset adds
+inline snapshot metadata, increasing vector storage only in the six existing
+Set cases below. Byte counts include cumulative vector growth, not peak memory;
+no payload copies or additional per-property allocations were introduced.
+The earlier tables remain records of their preserved pre-accessor binaries.
+
+| Set case | Previous allocated bytes | Current allocated bytes |
+|---|---:|---:|
+| Fixed | 196,288 | 228,992 |
+| MultiValue | 81,600 | 89,728 |
+| Named | 31,862 | 35,894 |
+| Recipients | 153,546 | 169,930 |
+| LargeBinary | 2,031,968 | 2,032,032 |
+| ShortReads | 153,546 | 169,930 |
+
+The local session directory `files/tnef-conversion-baseline` preserves both
+executables, all 62 smoke cases, allocation JSON/Markdown, three timing logs,
+and a summary CSV. The standalone executable's SHA-256 is
+`348223A6B8BDBBBFF61D2B0EF35E13C7F91C4C9A2FDD43630F8A773C27F578E0`.
+Earlier binaries remain preserved for contemporaneous alternating comparisons
+during the deferred sans-I/O work.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -9779,7 +9892,7 @@ are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 27 Base64, 27 MIME, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
-30 TNEF-property, five TNEF-date, and four embedded-TNEF cases.
+30 TNEF-property, five TNEF-date, four embedded-TNEF, and five owned-TNEF-access cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

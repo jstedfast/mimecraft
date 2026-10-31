@@ -17,6 +17,9 @@ mod date_workloads;
 #[path = "support/tnef_embedded.rs"]
 mod embedded_workloads;
 
+#[path = "support/tnef_conversions.rs"]
+mod conversion_workloads;
+
 fn measure(name: &str, size: usize, mut read: impl FnMut()) {
     for _ in 0..3 {
         read();
@@ -128,6 +131,26 @@ fn main() {
             case.input.len(),
             || {
                 black_box(embedded_workloads::read(case));
+            },
+        );
+    }
+    println!("Owned access: preloaded snapshots; reader/setup/drop are outside measurement.");
+    println!(
+        "Equivalent wire-byte throughput, NOT parser throughput; includes binary text decoding."
+    );
+    let cases: Vec<_> = conversion_workloads::CASES
+        .into_iter()
+        .map(conversion_workloads::workload)
+        .collect();
+    for case in &cases {
+        case.check();
+    }
+    for case in &cases {
+        measure(
+            &format!("Conversions/Access/{}", case.name),
+            case.input_length,
+            || {
+                black_box(conversion_workloads::read(case));
             },
         );
     }
