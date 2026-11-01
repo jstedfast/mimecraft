@@ -16,6 +16,9 @@ use mimecraft::{
 mod support;
 use support::{Builder, crc, document};
 
+#[path = "rtf_compressed/writer.rs"]
+mod writer;
+
 // Published [MS-OXRTFCP] examples, also used by MimeKit's Text/Tnef suites.
 // https://msdn.microsoft.com/en-us/library/ee217938(v=exchg.80).aspx
 const SIMPLE: &[u8] = b"\x2d\0\0\0\x2b\0\0\0LZFu\xf1\xc5\xc7\xa7\x03\x00\x0a\x00rcpg125B2\x0a\xf3 hel\x09\x00 bw\x05\xb0ld}\x0a\x80\x0f\xa0";

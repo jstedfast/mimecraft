@@ -26,6 +26,26 @@ mod recipient_workloads;
 #[path = "support/rtf_compressed.rs"]
 mod rtf_compressed_workloads;
 
+#[path = "support/rtf_compressed_writer.rs"]
+mod rtf_writer_workloads;
+
+fn prepare_rtf_writer(name: &'static str) -> rtf_writer_workloads::Workload {
+    let case = rtf_writer_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(RTF_WRITER, "rtf-compressed", "Encode")]
+#[bench::Repetitive(&prepare_rtf_writer("Repetitive"))]
+#[bench::Random(&prepare_rtf_writer("Random"))]
+#[bench::Overlapping(&prepare_rtf_writer("Overlapping"))]
+#[bench::Uncompressed(&prepare_rtf_writer("Uncompressed"))]
+#[bench::ShortChunks(&prepare_rtf_writer("ShortChunks"))]
+#[bench::ShortWrites(&prepare_rtf_writer("ShortWrites"))]
+fn rtf_write(case: &rtf_writer_workloads::Workload) -> rtf_writer_workloads::Summary {
+    rtf_writer_workloads::write(case)
+}
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -395,6 +415,13 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
             b.iter(|| rtf_compressed_workloads::read(&case));
         });
     }
+    for name in rtf_writer_workloads::CASES {
+        let case = prepare_rtf_writer(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        group.bench_function(BenchmarkId::new("Encode", name), |b| {
+            b.iter(|| rtf_writer_workloads::write(&case));
+        });
+    }
     group.finish();
     let mut group = criterion.benchmark_group("tnef-bodies");
     for name in body_workloads::CASES {
@@ -449,6 +476,7 @@ metabench::main!(
         RECIPIENT_LOAD,
         RECIPIENT_ACCESS,
         RTF_COMPRESSED,
+        RTF_WRITER,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

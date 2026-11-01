@@ -8,6 +8,7 @@
 //! and owned snapshots and ordered sets with explicit typed conversions.
 //! Owned recipient models preserve their complete rows and expose checked fields.
 //! Compressed RTF decoding is available as an incremental filter with explicit validation.
+//! Compressed RTF writing supports seekable sinks and explicit, fallible finalization.
 //! Owned text/HTML/RTF bodies provide repeatable readers and checked text decoding.
 //! Owned attachment models expose checked metadata, raw content, and detached readers.
 //! Whole-message loading maps legacy metadata, selects bodies, and groups attachments.
@@ -29,6 +30,7 @@ mod property_types;
 mod reader;
 mod recipient;
 mod rtf_compressed;
+mod rtf_compressed_writer;
 mod value_conversion;
 pub use attachment::{TnefAttachFlags, TnefAttachMethod, TnefAttachment, TnefAttachmentContent};
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
@@ -42,6 +44,7 @@ pub use reader::{TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 pub use reader::{TnefPropertyReader, TnefPropertyValueReader, TnefReader, TnefValueReader};
 pub use recipient::{TnefRecipient, TnefRecipientType};
 pub use rtf_compressed::{RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError};
+pub use rtf_compressed_writer::RtfCompressedWriter;
 pub use value_conversion::TnefValueConversionError;
 
 /// The object to which an attribute belongs, preserving unrecognized bytes.

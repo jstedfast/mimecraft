@@ -21,6 +21,19 @@ mod recipient_workloads;
 #[path = "../benches/support/rtf_compressed.rs"]
 mod rtf_compressed_workloads;
 
+#[path = "../benches/support/rtf_compressed_writer.rs"]
+mod rtf_writer_workloads;
+
+#[test]
+fn compressed_rtf_writer_workloads_match_headers_crc_and_full_content() {
+    for name in rtf_writer_workloads::CASES {
+        let case = rtf_writer_workloads::workload(name);
+        assert_eq!(case.name, name);
+        assert!(!case.input.is_empty());
+        case.check();
+    }
+}
+
 #[path = "../benches/support/tnef_bodies.rs"]
 mod body_workloads;
 

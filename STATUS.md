@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading now maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. TNEF-to-MIME conversion and writing remain unported. Benchmarks cover readers, owned models, compressed RTF, whole-message loading, and recursive content traversal. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF-to-MIME conversion and TNEF attribute/property writing remain unported. Benchmarks cover readers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9209,7 +9209,7 @@ an incomplete stream. Reset clears the entire dictionary, not only its
 initializer, preventing malformed references from exposing previous content.
 Cloning snapshots all state without shared mutable storage.
 
-Nineteen tests in `tests/rtf_compressed.rs` adapt both upstream compressed-RTF
+Nineteen decoder tests in `tests/rtf_compressed.rs` adapt both upstream compressed-RTF
 test classes, their reference builder, and robustness suites. Coverage includes
 the two published specification vectors, every header/token split, checksum
 and size boundaries, dictionary overlap/wrap, reset/clone, filter-trait and I/O
@@ -9223,6 +9223,65 @@ alongside yEnc regressions for the shared CRC extraction.
 This filter is the decompression foundation used by the owned body model below.
 It does not automatically render RTF, extract HTML, or convert TNEF to MIME.
 Four original benchmark cases cover filter decoding separately from body access.
+
+### Compressed RTF writing
+
+`tnef::RtfCompressedWriter<W: Write + Seek>` ports
+`RtfCompressedWriteStream` as a synchronous Rust write adapter. Pass an explicit
+`RtfCompressionMode::Compressed` or `Uncompressed`; unknown variants fail before
+I/O. It reserves a sixteen-byte header at the destination's current position.
+`finish()` emits the compressed terminator, patches COMPSIZE/RAWSIZE/mode/CRC,
+restores the end position, and flushes. Existing prefix/suffix bytes outside the
+written range are preserved, including when several encoded streams share a sink.
+
+The encoder shares the decoder's 207-byte initializer and the existing CRC
+helper. Its fixed inline storage contains a 4 KiB circular dictionary, two
+4,096-entry signed-short hash-chain tables, a 4 KiB input buffer, and a
+seventeen-byte token group. Two-byte hashes restrict longest-match searches to
+64 candidates; references span 2-17 bytes. Applicable upstream explanations
+are retained for initializer entries, dictionary updates, overlapping copies,
+oldest-candidate tie breaking, the reserved end-marker offset, reference bit
+layout, input compaction, and COMPSIZE's twelve-byte header adjustment.
+No unsafe code or dependencies were added.
+
+Unlike the upstream disposal callback, Rust finalization returns `io::Result`
+explicitly; neither drop nor `into_inner` finalizes or flushes the writer.
+Owned sinks retain their ordinary drop behavior. Successful repeated `finish`
+calls are no-ops; later nonempty writes fail. `raw_size`, `compression_mode`,
+`is_finished`, and `is_faulted` expose progress without offering mutable sink
+access that could accidentally bypass framing. `get_ref` and `into_inner`
+provide inspection and ownership recovery.
+
+Writes acknowledge exactly the input accepted. Compressed writes encode a
+previously full buffer before accepting new input, and never perform fallible
+I/O after accepting it. Short sink writes and interrupted operations are
+handled. `flush` encodes available input and flushes complete groups while
+retaining up to seventeen lookahead bytes and any incomplete token group; it
+does not patch the header. Input chunks and intermediate flushes do not change
+the final encoded bytes.
+
+RAWSIZE is bounded by `i32::MAX` and CONTENTS by `i32::MAX - 12`, matching
+MimeKit. Input-size preflight errors leave the writer usable; encoding-size
+overflow and non-interrupted sink failures permanently fault it, including
+header-patch, position-restoration, and flush failures. Provisional output is
+not reported as successfully finalized or silently retried. Empty writes are
+no-ops except on a faulted writer.
+
+Fourteen tests in `tests/rtf_compressed/writer.rs` adapt upstream examples,
+empty modes, 2,000-line repetitive data and its one-third compression threshold,
+random/small-alphabet input, single-byte runs, nonzero output offsets, and
+stream-member behavior. They retain the published byte-exact compression vector
+and add all split/flush boundaries, dictionary wrap, sequential streams, short
+and interrupted I/O, terminal sink failures, and explicit drop/finalization
+checks. Three internal tests cover exact 32-bit size limits without multi-GiB
+allocations. Async/cancellation and exception-only .NET stream members are not
+claimed as Rust APIs. Six original benchmark workloads validate headers, an
+independent bitwise CRC, complete decoded bytes, and compression ratios.
+
+The default/scalar scoped suites pass 207 tests with one existing ignored
+raw-reader test. Strict scoped Clippy, eleven TNEF doctests, and strict rustdoc
+pass. This is the compression foundation for TNEF writing, not a TNEF
+attribute/property writer or MIME converter.
 
 ### Owned TNEF message bodies
 
@@ -10443,6 +10502,41 @@ logs/reports. The standalone binary's SHA-256 is
 `96DC082C4DA8CD2151105F301AB31AEEED8812E8570CE22734F34EBC6EB5B978`.
 Earlier baselines remain preserved.
 
+#### Compressed RTF writing
+
+Six original `rtf-compressed/Encode` cases share
+`benches/support/rtf_compressed_writer.rs` across the standalone,
+native/metabench, and optional Criterion harnesses. Repetitive uses the upstream
+2,000-line message generator; Random and Overlapping use 24,000 deterministic
+bytes with full/small alphabets. Uncompressed writes the repetitive document
+as MELA. ShortChunks supplies the same repetitive input one byte at a time;
+ShortWrites limits each sink write to seven bytes.
+
+Measurement includes a fresh writer, a growing `Cursor<Vec<u8>>` sink, raw input
+submission, header/CRC finalization, complete output observation, and drop.
+It excludes fixture construction and correctness checks. Throughput counts raw
+input bytes once, not encoded bytes. Compressed output is not decoded inside
+the measured operation; full-content and independent CRC checks run beforehand.
+
+All 119 smoke and allocation cases pass. Per-operation allocation counts and
+cumulative allocated bytes for the new operations are:
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| Repetitive | 12 | 65,520 |
+| Random | 12 | 65,520 |
+| Overlapping | 11 | 32,752 |
+| Uncompressed | 7 | 259,072 |
+| ShortChunks | 12 | 65,520 |
+| ShortWrites | 13 | 65,528 |
+
+These allocations are the output vector's growth, not the inline encoder state
+or peak retained memory. The seven-byte sink starts with a smaller allocation,
+adding one growth step. All previous 113 allocation counts and byte totals
+match the preserved whole-message baseline. No throughput timings were recorded
+for these new cases. The schema-v9 allocation report is preserved under session
+`files/tnef-rtf-writer-baseline/allocations.json`.
+
 #### TNEF owned message bodies
 
 Fifteen original cases under `tnef-bodies/{Construct,Stream,Text}` cover String8
@@ -10534,7 +10628,8 @@ Fixture generation and independent metadata/full-content expectations remain
 outside measurement.
 
 The standalone, native allocation/smoke, and optional Criterion harnesses share
-`benches/support/tnef_messages.rs`. All 113 TNEF smoke and allocation cases pass.
+`benches/support/tnef_messages.rs`. All 113 TNEF smoke and allocation cases passed
+at this stage, before the six compressed-RTF encoding cases were added.
 New per-operation allocation counts / cumulative bytes (not peak memory):
 
 | Case | Load | Traverse |
@@ -10569,8 +10664,9 @@ These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 38 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
-six recipient-model cases, four compressed-RTF cases, fifteen body-model cases,
-twelve attachment-model cases, and ten whole-message cases.
+six recipient-model cases, four compressed-RTF decoding and six encoding cases,
+fifteen body-model cases, twelve attachment-model cases, and ten whole-message
+cases (119 TNEF cases in total).
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

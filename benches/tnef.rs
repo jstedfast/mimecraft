@@ -26,6 +26,9 @@ mod recipient_workloads;
 #[path = "support/rtf_compressed.rs"]
 mod rtf_compressed_workloads;
 
+#[path = "support/rtf_compressed_writer.rs"]
+mod rtf_writer_workloads;
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -58,6 +61,23 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
 }
 
 fn main() {
+    println!(
+        "RTF writing includes a fresh encoder/sink, headers, CRC, finalization, and output drop."
+    );
+    println!(
+        "Throughput counts raw input bytes; ShortChunks uses one-byte input and ShortWrites a seven-byte sink."
+    );
+    for name in rtf_writer_workloads::CASES {
+        let case = rtf_writer_workloads::workload(name);
+        case.check();
+        measure(
+            &format!("RtfCompressed/Encode/{}", case.name),
+            case.input.len(),
+            || {
+                black_box(rtf_writer_workloads::write(&case));
+            },
+        );
+    }
     println!(
         "Whole messages: legacy/MAPI selection, recipient/attachment assembly, and final charsets."
     );
