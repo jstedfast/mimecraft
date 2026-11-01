@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Full message models and whole-message loading, TNEF-to-MIME conversion, and writing remain unported. Benchmarks cover raw/property readers, owned collections/accessors, recipients, dates, borrowed/detached readers, compressed RTF, bodies, and attachments. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading now maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. TNEF-to-MIME conversion and writing remain unported. Benchmarks cover readers, owned models, compressed RTF, whole-message loading, and recursive content traversal. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -50,7 +50,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 The queued performance work is:
 
-1. Extend the TNEF reader with the remaining value/model interpretations,
+1. Extend TNEF support with the remaining conversions and writing,
    adding applicable benchmark coverage. The current upstream checkout has no
    TNEF benchmark class; the raw-reader and property workloads are original.
 2. Refactor the TNEF reader to sans-I/O only against a preserved I/O-coupled
@@ -58,6 +58,10 @@ The queued performance work is:
 3. Investigate header-collection preallocation at reader/parser call sites.
    This remains deferred; `HeaderList::with_capacity` and pre-sized indexing
    when constructing a list from a vector already exist.
+
+After the TNEF port is complete, port MimeKit commit
+`7908d7d10a4ec4a5bc7129178d472b5af5555ba6` (repeated Content-Id diagnostics
+and compact reader state), including its regression tests.
 
 Cryptography, including DKIM, ARC, and DMARC, is excluded from the current scope.
 `LegacyMimeParser` and its event-argument types will not be ported. These are
@@ -8889,8 +8893,8 @@ from the current decoded values.
 
 ## TNEF attributes
 
-`mimecraft::tnef::TnefReader<R: Read>` is an initial synchronous attribute reader,
-not a TNEF message model or converter. It ports attribute framing and raw-value
+`mimecraft::tnef::TnefReader<R: Read>` is a synchronous attribute reader with an
+optional whole-message loader described below. It ports attribute framing and raw-value
 behavior from MimeKit's `Tnef/TnefReader.cs`, `TnefReaderStream.cs`, tag/type/level
 definitions, and the additive checksum arithmetic from `TnefChecksum.cs`.
 Applicable rationale comments are retained, adapted to Rust buffering, borrowing,
@@ -8924,8 +8928,8 @@ replacement decoding. A non-multivalued Long InternetCodepage property in
 message-level MAPI properties supplies the fallback when no usable OEM codepage
 has been seen. Unsupported, nonpositive, and UTF-16/32 fallback hints are ignored
 as in MimeKit. This affects subsequent String8 reads, not strings already
-returned; retrospective decoding of preceding bodies belongs to the unported
-message model.
+returned; the whole-message loader applies the final charset to preceding
+eight-bit bodies.
 
 The `*_with_logger` methods accept a fallible closure or `TnefComplianceLogger`.
 They report signature/version/codepage/message-class errors, unknown or
@@ -9158,8 +9162,8 @@ permit fallback. Empty strings are values; empty, multivalued, null, incompatibl
 or out-of-range properties return their existing explicit conversion errors.
 A failing first duplicate is not bypassed by a later valid property.
 Neither wrapping nor field access mutates the stored properties or reader state.
-This increment provides recipient models, not the complete `TnefMessage` loader
-or recipient-to-MIME/address conversion.
+The recipient-model increment did not include whole-message loading; that is
+now available below. Recipient-to-MIME/address conversion remains unported.
 
 Ten tests in `tests/tnef_properties/recipients.rs` include MimeKit's
 `TnefMessageTests.TestRecipients` Alice/Bob rows and its resent-flag comment,
@@ -9272,9 +9276,9 @@ truncation, and source/logger failures. An embedded-reader test covers inherited
 charset/diagnostics and shared budget accounting. Compressed fixtures reuse
 the existing independent upstream-derived reference builder.
 
-This does not yet port the complete message loader: duplicate-body precedence,
-MAPI-over-legacy selection, automatic final charset application, and excluding
-body properties from a loaded message's property set remain future work.
+The whole-message loader below now supplies duplicate-body precedence,
+MAPI-over-legacy selection, final charset application, and separation from the
+message's metadata properties. Standalone body construction does not do so.
 
 ### Owned TNEF attachments
 
@@ -9326,8 +9330,8 @@ options but receives fresh byte/report budgets and fault state; logger
 callbacks are supplied explicitly. Signature and checksum validation remain
 deferred until the respective readers advance. A stored method or manually
 supplied Object IID alone does not establish captured embedded context.
-Recognition happens at collection time, not retrospectively when a later
-AttachMethod appears.
+Standalone collection recognizes content at read time. The whole-message loader
+also recognizes embedded content retrospectively when AttachMethod follows it.
 
 Fourteen tests in `tests/tnef_properties/attachments.rs` adapt MimeKit's
 attachment metadata/content vectors and add unknown methods/flags, priority
@@ -9336,10 +9340,78 @@ independent raw/detached cursors, IID truncation, property classification,
 recoverable size/nesting limits, shared borrowed-reader diagnostics, and
 source/logger failures. Existing embedded fixture builders are reused.
 
-This is not the whole-message attachment loader. Stream grouping, legacy
-metadata synthesis, MAPI/legacy content precedence, maximum-attachment
-selection, retrospective recognition, and loading a parsed embedded message
-remain unported. Corresponding upstream loader tests are not claimed here.
+The standalone model does not perform attachment assembly. The whole-message
+loader below adds grouping, legacy metadata, content precedence, attachment
+limits, and retrospective recognition. `load_embedded_message` and its logger
+variant return independently loaded messages with inherited configuration.
+
+### Whole TNEF messages
+
+`TnefMessage::load` loads a stream with default options. Configure
+`TnefReaderOptions` on a reader and use `load_message` or
+`load_message_with_logger` for custom limits and diagnostics. A borrowed
+`TnefEmbeddedReader` also loads a whole message using its inherited logger and
+shared budget. Readers must not have advanced; an invalid or incomplete
+six-byte header returns `InvalidMessageHeader`, rather than an empty model.
+Loading advances through EOF and checks enclosing attribute checksums; decoded
+RTF and nested messages remain lazy.
+
+The model exposes its final codepage/header key, ordered recipients and
+attachments, properties, and text/HTML/RTF bodies. Subject and InternetMessageId
+remain unnormalized. MessageClass is trimmed, with empty/whitespace-only text
+reported as absent while the underlying property is preserved. These getters
+use checked conversions and borrow native strings when possible.
+
+The loader ports MimeKit's property-set builder and legacy mappings, including
+message-class translations, hexadecimal search keys, priority/status flags,
+request-response flags, dates, sender TRPs, deferred owner/delegator mapping,
+Unicode One-Off EntryIDs, attachment titles/dates/rendering data, OLE tags,
+and MacBinary encoding identifiers. Malformed legacy structures are diagnosed
+and skipped, not fabricated. Synthesized properties record their originating
+attribute offset; `TnefValue::DateTime` preserves legacy dates' unspecified
+time kind instead of manufacturing UTC FILETIME values. Native MAPI dates
+still retain their original wire numbers.
+
+Valued MAPI properties replace legacy properties by identifier; MAPI duplicates
+retain order. The first supported valued MAPI body of each format wins, with
+MAPI text replacing legacy text even when empty. Bodies are excluded from
+message metadata; unsupported or valueless body properties remain. Final
+message/Internet charsets are applied after all attributes are read.
+
+AttachRenderData starts an attachment; attachment attributes before any such
+marker start one implicitly. The first MAPI AttachData replaces legacy data;
+subsequent MAPI/legacy content is skipped. Content and metadata remain separate.
+After an attachment is assembled, a stored AttachMethod of EmbeddedMessage can
+establish embedded context even when it followed Binary/Object data. IID bytes
+are excluded from exposed content. Each detached load uses fresh inherited
+budgets and absolute positions, and receives its logger explicitly rather than
+retaining a borrowed callback.
+
+The default `max_attachments` is 1024 per message; zero rejects attachments.
+Count overflow reports `TooManyAttachments` (upstream identifier 21) and returns
+`AttachmentLimitExceeded`. Byte/depth limits likewise return errors without a
+successful partial model, unlike upstream's skipped/empty-content fallbacks.
+Already-collected wire bytes are not refunded when a replacement wins.
+Recoverable limit errors do not fault the low-level reader, but loading cannot
+restart on an advanced reader. Source/logger failures fault the reader tree.
+Assembly-critical malformed metadata returns `ValueConversion`. Ordinary
+framing/truncation recovery retains the reader's existing logged partial-data
+behavior; decoded text and RTF errors stay explicit.
+
+The 22 tests in `tests/tnef_properties/messages.rs` adapt synchronous upstream
+loader tests for legacy mappings, owner/class handling, property/body/content precedence,
+recipients, implicit/explicit attachments, repeated embedded loads, and limits,
+with Rust-specific ownership/error/borrowed-reader regressions. These include
+exact count/byte limits, limit-logger faults, captured owner offsets/charsets,
+and delayed embedded validation with per-attachment charset snapshots. All 19 existing
+TNEF corpus inputs use upstream attachment-name lists and decoded-content
+references, copied without text normalization; comparisons use the same
+Dos2Unix final-newline policy as upstream. Async, cancellation-token, and
+disposed-object assertions are not claimed as synchronous Rust APIs. The copied
+66 reference files match upstream byte-for-byte.
+
+TNEF-to-MIME conversion, calendar/OLE conversion helpers, writing, and async
+drivers remain unported.
 
 ### TNEF date interpretation
 
@@ -9380,8 +9452,8 @@ claim rules, multivalues, report caps/offsets, and source/logger failures.
 The reference vectors include the lower-bound rounding edge that reaches
 0099-12-31 and rounded overflow beyond year 9999. Every truncation of a legacy
 date is exercised; all 19 fixtures compare dates and diagnostics across one-byte,
-seven-byte, and full refills. These are reader/conversion checks, not parity
-claims for unported message models.
+seven-byte, and full refills. Whole-message legacy-date coverage is separate
+from these reader/conversion checks.
 
 ### Embedded TNEF readers
 
@@ -9456,19 +9528,19 @@ The type adapts `TnefEmbeddedMessageContext` in `TnefAttachment.cs` and
 Rust cannot retain the parent's borrowed callback after it is dropped:
 detached operations take an explicit logger through the existing
 `*_with_logger` APIs. Content and its slice-backed readers are Send/Sync.
-Opening a reader does not allocate or consume input. This is serialized content,
-not the still-unported whole-message loader.
+Opening a reader does not allocate or consume input. This is serialized content;
+call its reader's `load_message` to assemble an owned model.
 
 `tests/tnef_properties/detached.rs` adapts upstream repeat-load and nesting
 cases from `TnefMessageTests`, with Rust ownership, concurrent cursor, physical
 truncation, prefix/padding, charset, checksum, budget, claim, and logger/source
 failure regressions. Binary recognition still requires AttachMethod to have
 already been read: retrospective recognition when that property follows the
-data belongs to the future attachment loader, not this forward-only cursor.
+data belongs to the whole-message attachment loader, not this forward-only cursor.
 
 Direct typed numeric cursor methods,
 the separate property-ID and named-property GUID/name catalogs,
-attachment/message models, MIME conversion, writing, async, and sans-I/O are deferred.
+MIME conversion, writing, async, and sans-I/O are deferred.
 Existing conversion snapshots are not presented as reader reference outputs.
 The benchmark sections record separate raw, property, collection, date,
 recursive-reader, and owned-accessor baselines.
@@ -10426,7 +10498,7 @@ once for all modes, not just content or decoded text.
 The standalone and optional native/Criterion harnesses share
 `benches/support/tnef_attachments.rs`; regression checks compare metadata and
 complete content against independent expected values before measurement.
-The TNEF metabench now contains 103 cases.
+The attachment-model increment brought the TNEF metabench to 103 cases.
 
 All 103 smoke and allocation cases passed. Allocation counts and cumulative
 allocated bytes for the previous 91 cases are unchanged. The new cases measured
@@ -10443,6 +10515,49 @@ Binary metadata decoding accounts for the BinaryText access allocations.
 Raw streaming allocates nothing for all four cases. No throughput timings
 were recorded for these new workloads.
 
+#### Whole TNEF messages
+
+Ten original cases under `tnef-messages/{Load,Traverse}` cover legacy attributes,
+MAPI properties, mixed MAPI-over-legacy selection, embedded messages with late
+Binary AttachMethod recognition, and seven-byte source reads. Each generated
+root has one recipient and 32 attachments. Nonembedded attachments contain
+2 KiB payloads; embedded ones contain child messages with a subject/text body.
+The MAPI case still uses legacy message-class and rendering attributes.
+
+Both modes include fresh readers, checksums, rejecting diagnostic loggers, full
+model assembly, and destruction. `Load` observes root/recipient/attachment
+counts without decoding content. `Traverse` also streams body/content bytes
+and recursively loads embedded messages, checking byte totals and a rolling
+checksum. Decoded Unicode body streams remain UTF-16LE bytes, not UTF-8 string
+conversion. Throughput counts complete outer serialized input bytes once.
+Fixture generation and independent metadata/full-content expectations remain
+outside measurement.
+
+The standalone, native allocation/smoke, and optional Criterion harnesses share
+`benches/support/tnef_messages.rs`. All 113 TNEF smoke and allocation cases pass.
+New per-operation allocation counts / cumulative bytes (not peak memory):
+
+| Case | Load | Traverse |
+| --- | ---: | ---: |
+| Legacy | 282 / 91,810 | 282 / 91,810 |
+| Mapi | 349 / 93,583 | 349 / 93,583 |
+| Mixed | 481 / 95,716 | 481 / 95,716 |
+| Embedded | 481 / 32,196 | 673 / 47,556 |
+| ShortReads | 481 / 95,716 | 481 / 95,716 |
+
+All previous 103 allocation counts are unchanged. Ninety-nine previous cases
+also retain their exact byte totals. Each of the four attachment `Load` cases
+allocates 480 more bytes: the added attachment-count limit enlarges captured
+reader options and attachment-vector storage, without adding allocations.
+Their new byte totals are Direct 121,070; BinaryText 118,542; Embedded 121,870;
+Empty 8,160. No throughput timings were recorded for this increment.
+The schema-v9 allocation report is preserved in session artifacts under
+`files/tnef-message-loader-baseline/allocations.json`.
+
+The scoped default/scalar suites pass 170 tests (one existing raw-reader test
+remains ignored). Scoped strict Clippy, ten TNEF doctests, and strict rustdoc
+also pass.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -10455,7 +10570,7 @@ These harnesses use the same fixtures, generators, and operations under
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF cases, fifteen body-model cases,
-and twelve attachment-model cases.
+twelve attachment-model cases, and ten whole-message cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

@@ -32,6 +32,9 @@ mod body_workloads;
 #[path = "support/tnef_attachments.rs"]
 mod attachment_workloads;
 
+#[path = "support/tnef_messages.rs"]
+mod message_workloads;
+
 fn measure(name: &str, size: usize, mut read: impl FnMut()) {
     for _ in 0..3 {
         read();
@@ -55,6 +58,33 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
 }
 
 fn main() {
+    println!(
+        "Whole messages: legacy/MAPI selection, recipient/attachment assembly, and final charsets."
+    );
+    println!(
+        "Traverse also streams decoded bodies/content and recursively loads embedded messages."
+    );
+    println!(
+        "Both include fresh readers, model allocation/drop, checksums, and a rejecting logger."
+    );
+    let cases: Vec<_> = message_workloads::CASES
+        .into_iter()
+        .map(message_workloads::workload)
+        .collect();
+    for case in &cases {
+        case.check();
+    }
+    for case in &cases {
+        for mode in message_workloads::MODES {
+            measure(
+                &format!("Messages/{}/{}", mode.name(), case.name),
+                case.input.len(),
+                || {
+                    black_box(message_workloads::read(case, mode));
+                },
+            );
+        }
+    }
     println!("Initial synchronous raw TNEF attribute baseline; no upstream TNEF benchmark exists.");
     println!("Fresh readers, 4 KiB read-ahead; Stream uses a reused 4 KiB stack buffer.");
     println!("Collect includes owned-value allocation/destruction. Skip still computes checksums.");

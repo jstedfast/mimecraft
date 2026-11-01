@@ -83,6 +83,9 @@ pub use property::{TnefPropertyReader, TnefPropertyValueReader};
 mod embedded;
 pub use embedded::{TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 
+#[path = "message_loader.rs"]
+mod message_loader;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Claim {
     None,

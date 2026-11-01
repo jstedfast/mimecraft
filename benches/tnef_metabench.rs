@@ -32,6 +32,35 @@ mod body_workloads;
 #[path = "support/tnef_attachments.rs"]
 mod attachment_workloads;
 
+#[path = "support/tnef_messages.rs"]
+mod message_workloads;
+
+fn prepare_message(name: &'static str) -> message_workloads::Workload {
+    let case = message_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(MESSAGE_LOAD, "tnef-messages", "Load")]
+#[bench::Legacy(&prepare_message("Legacy"))]
+#[bench::Mapi(&prepare_message("Mapi"))]
+#[bench::Mixed(&prepare_message("Mixed"))]
+#[bench::Embedded(&prepare_message("Embedded"))]
+#[bench::ShortReads(&prepare_message("ShortReads"))]
+fn message_load(case: &message_workloads::Workload) -> message_workloads::Summary {
+    message_workloads::read(case, message_workloads::Mode::Load)
+}
+
+#[metabench::benchmark(MESSAGE_TRAVERSE, "tnef-messages", "Traverse")]
+#[bench::Legacy(&prepare_message("Legacy"))]
+#[bench::Mapi(&prepare_message("Mapi"))]
+#[bench::Mixed(&prepare_message("Mixed"))]
+#[bench::Embedded(&prepare_message("Embedded"))]
+#[bench::ShortReads(&prepare_message("ShortReads"))]
+fn message_traverse(case: &message_workloads::Workload) -> message_workloads::Summary {
+    message_workloads::read(case, message_workloads::Mode::Traverse)
+}
+
 fn prepare_attachment(name: &'static str) -> attachment_workloads::Workload {
     let case = attachment_workloads::workload(name);
     case.check();
@@ -389,6 +418,17 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         }
     }
     group.finish();
+    let mut group = criterion.benchmark_group("tnef-messages");
+    for name in message_workloads::CASES {
+        let case = prepare_message(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        for mode in message_workloads::MODES {
+            group.bench_function(BenchmarkId::new(mode.name(), name), |b| {
+                b.iter(|| message_workloads::read(&case, mode));
+            });
+        }
+    }
+    group.finish();
 }
 
 metabench::main!(
@@ -414,6 +454,8 @@ metabench::main!(
         BODY_TEXT,
         ATTACHMENT_LOAD,
         ATTACHMENT_ACCESS,
-        ATTACHMENT_STREAM
+        ATTACHMENT_STREAM,
+        MESSAGE_LOAD,
+        MESSAGE_TRAVERSE
     ]
 );

@@ -74,11 +74,11 @@ impl Summary {
     }
 }
 
-fn integer(tag: Tag, value: i32) -> Vec<u8> {
+pub(super) fn integer(tag: Tag, value: i32) -> Vec<u8> {
     [tag.0.to_le_bytes(), value.to_le_bytes()].concat()
 }
 
-fn value(tag: Tag, content: &[u8]) -> Vec<u8> {
+pub(super) fn value(tag: Tag, content: &[u8]) -> Vec<u8> {
     let mut bytes = tag.0.to_le_bytes().to_vec();
     bytes.extend_from_slice(&1u32.to_le_bytes());
     bytes.extend_from_slice(&(content.len() as u32).to_le_bytes());

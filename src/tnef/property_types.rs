@@ -117,13 +117,15 @@ pub struct TnefPropertyInfo {
     /// Named-property descriptor, when present.
     pub name: Option<TnefNameId>,
     /// Offset of the property's wire tag in the outermost TNEF stream.
+    /// For synthesized legacy properties, the originating attribute's header.
     pub offset: u64,
 }
 
 /// A native property value without lossy cross-type coercion.
 ///
-/// Currency retains its exact scaled integer. Date values retain their wire
-/// numbers; [`to_datetime`](Self::to_datetime) performs checked calendar conversion.
+/// Currency retains its exact scaled integer. MAPI dates retain their wire
+/// numbers; synthesized legacy dates retain their unspecified time kind.
+/// [`to_datetime`](Self::to_datetime) performs checked calendar conversion.
 /// GUIDs retain Windows byte order, not network-order UUID bytes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TnefValue {
@@ -145,6 +147,9 @@ pub enum TnefValue {
     AppTime(f64),
     /// Raw FILETIME.
     SysTime(i64),
+    /// A date synthesized from a legacy attribute, retaining its unspecified
+    /// time zone. Unlike SysTime, this is not a raw FILETIME wire number.
+    DateTime(super::TnefDateTime),
     /// Error code with its original bits.
     Error(u32),
     /// Boolean using the low sixteen bits only.
@@ -160,7 +165,8 @@ pub enum TnefValue {
 }
 
 impl TnefValue {
-    /// Converts AppTime or SysTime to a checked date without changing the raw value.
+    /// Converts AppTime or SysTime to a checked date without changing the raw value,
+    /// or returns a synthesized legacy DateTime with its original time kind.
     /// AppTime uses .NET-compatible millisecond rounding and an unspecified zone;
     /// FILETIME retains 100-nanosecond precision and is always UTC.
     ///
@@ -173,6 +179,7 @@ impl TnefValue {
         match self {
             Self::AppTime(value) => super::TnefDateTime::from_oa_date(*value),
             Self::SysTime(value) => super::TnefDateTime::from_file_time(*value),
+            Self::DateTime(value) => Ok(*value),
             _ => Err(super::TnefDateTimeError::NotDate),
         }
     }

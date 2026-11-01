@@ -286,7 +286,7 @@ impl TnefAttachment {
     /// the reader's `*_with_logger` operations; no parent logger is retained.
     /// Signature and checksums are validated when their readers advance.
     ///
-    /// This returns a reader, not a loaded message model.
+    /// Use [`load_embedded_message`](Self::load_embedded_message) to load its model.
     ///
     /// # Errors
     ///
@@ -297,5 +297,31 @@ impl TnefAttachment {
             Some(TnefAttachmentContent::Embedded(content)) => content.open_reader(),
             _ => Err(TnefReadError::NotEmbeddedMessage),
         }
+    }
+
+    /// Loads the captured embedded message with fresh inherited reader budgets.
+    /// Repeated calls are independent. Diagnostics are discarded; use the logger
+    /// variant to retain them. Nested attachments are not recursively loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns selection, header, I/O, conversion, or resource-limit errors.
+    pub fn load_embedded_message(&self) -> Result<super::TnefMessage, TnefReadError> {
+        self.open_embedded_reader()?.load_message()
+    }
+
+    /// Loads the embedded message, reporting diagnostics to the supplied logger.
+    /// No former parent logger is retained.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`load_embedded_message`](Self::load_embedded_message) errors and
+    /// propagates logger errors.
+    pub fn load_embedded_message_with_logger(
+        &self,
+        logger: &mut dyn super::TnefComplianceLogger,
+    ) -> Result<super::TnefMessage, TnefReadError> {
+        self.open_embedded_reader()?
+            .load_message_with_logger(logger)
     }
 }

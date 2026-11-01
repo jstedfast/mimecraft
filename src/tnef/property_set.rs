@@ -146,7 +146,8 @@ impl TnefProperty {
         self.scalar()?.to_f64()
     }
 
-    /// Converts a single AppTime/SysTime without losing its time kind or precision.
+    /// Converts a single AppTime/SysTime or synthesized legacy DateTime without
+    /// losing its time kind or precision.
     ///
     /// # Errors
     ///

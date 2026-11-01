@@ -27,6 +27,22 @@ mod body_workloads;
 #[path = "../benches/support/tnef_attachments.rs"]
 mod attachment_workloads;
 
+#[path = "../benches/support/tnef_messages.rs"]
+mod message_workloads;
+
+#[test]
+fn whole_message_workloads_match_independent_content_and_metadata() {
+    for name in message_workloads::CASES {
+        let case = message_workloads::workload(name);
+        case.check();
+        assert!(!case.name.is_empty());
+        assert!(!case.input.is_empty());
+    }
+    for mode in message_workloads::MODES {
+        assert!(!mode.name().is_empty());
+    }
+}
+
 #[test]
 fn attachment_workloads_match_metadata_and_content() {
     for name in attachment_workloads::CASES {

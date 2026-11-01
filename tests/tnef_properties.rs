@@ -28,6 +28,8 @@ mod recipients;
 mod sets;
 #[path = "tnef_properties/tags.rs"]
 mod tags;
+#[path = "tnef_properties/messages.rs"]
+mod messages;
 
 fn dword(bytes: &mut Vec<u8>, value: i32) {
     bytes.extend_from_slice(&value.to_le_bytes());

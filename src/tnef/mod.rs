@@ -10,7 +10,7 @@
 //! Compressed RTF decoding is available as an incremental filter with explicit validation.
 //! Owned text/HTML/RTF bodies provide repeatable readers and checked text decoding.
 //! Owned attachment models expose checked metadata, raw content, and detached readers.
-//! Full message loading and body selection are not yet implemented.
+//! Whole-message loading maps legacy metadata, selects bodies, and groups attachments.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
@@ -21,6 +21,7 @@ use std::{error::Error, fmt, io};
 
 mod attachment;
 mod date_time;
+mod message;
 mod message_body;
 mod property_set;
 mod property_tags;
@@ -31,6 +32,7 @@ mod rtf_compressed;
 mod value_conversion;
 pub use attachment::{TnefAttachFlags, TnefAttachMethod, TnefAttachment, TnefAttachmentContent};
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
+pub use message::TnefMessage;
 pub use message_body::{TnefBodyError, TnefBodyReader, TnefMessageBody, TnefMessageBodyFormat};
 pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{
@@ -203,8 +205,13 @@ pub struct TnefReaderOptions {
     /// property names do, even when their values are skipped.
     pub max_total_data_bytes: u64,
     /// Maximum embedded-message depth; root is zero, default is 32.
-    /// Exceeding this limit returns an error without claiming the value.
+    /// Direct embedded readers/collectors check before claiming the value.
+    /// Whole-message loading may discover embedded content after collecting it.
+    /// Exceeding this limit returns an error, not a partial message.
     pub max_nesting_depth: usize,
+    /// Maximum attachments loaded per message; default 1024. Zero rejects any
+    /// attachment. Low-level attribute/property reading is not limited by this.
+    pub max_attachments: usize,
     /// Maximum delivered reports of each violation; zero means unlimited.
     /// Calls without a logger discard issues without consuming this budget.
     pub max_issues_per_violation: usize,
@@ -217,6 +224,7 @@ impl Default for TnefReaderOptions {
             max_value_length: 32 * 1024 * 1024,
             max_total_data_bytes: 64 * 1024 * 1024,
             max_nesting_depth: 32,
+            max_attachments: 1024,
             max_issues_per_violation: 0,
         }
     }
@@ -266,6 +274,8 @@ pub enum TnefComplianceViolation {
     InvalidNamedPropertyKind = 19,
     /// An embedded message would exceed the configured nesting limit.
     NestingTooDeep = 20,
+    /// Whole-message loading encountered more than the allowed attachments.
+    TooManyAttachments = 21,
     /// An owned-value read exceeded a configured byte budget.
     DataSizeLimitExceeded = 22,
 }
@@ -308,6 +318,15 @@ pub enum TnefReadError {
     Io(io::Error),
     /// An explicit initial codepage is unsupported.
     UnsupportedCodepage(u32),
+    /// Whole-message loading requires a reader that has not advanced.
+    ReaderAlreadyStarted,
+    /// Whole-message loading requires a complete, valid six-byte TNEF header.
+    InvalidMessageHeader,
+    /// A property needed for message assembly cannot be interpreted.
+    ValueConversion(TnefValueConversionError),
+    /// Whole-message loading exceeded the attachment count limit.
+    /// No successful, silently shortened message is returned.
+    AttachmentLimitExceeded,
     /// A value was requested without a current attribute.
     NoAttribute,
     /// The current value was already claimed by another read.
@@ -343,6 +362,10 @@ impl fmt::Display for TnefReadError {
         match self {
             Self::Io(error) => error.fmt(f),
             Self::UnsupportedCodepage(page) => write!(f, "unsupported TNEF codepage: {page}"),
+            Self::ReaderAlreadyStarted => f.write_str("the TNEF reader has already advanced"),
+            Self::InvalidMessageHeader => f.write_str("invalid or incomplete TNEF message header"),
+            Self::ValueConversion(error) => error.fmt(f),
+            Self::AttachmentLimitExceeded => f.write_str("TNEF attachment count limit exceeded"),
             Self::NoAttribute => f.write_str("the TNEF reader is not on an attribute"),
             Self::ValueAlreadyRead => f.write_str("the TNEF value has already been claimed"),
             Self::InvalidValueType(tag) => write!(f, "invalid TNEF value type: {tag:?}"),
@@ -366,6 +389,7 @@ impl Error for TnefReadError {
         match self {
             Self::Io(error) => Some(error),
             Self::InvalidDate(error) => Some(error),
+            Self::ValueConversion(error) => Some(error),
             _ => None,
         }
     }
@@ -374,5 +398,11 @@ impl Error for TnefReadError {
 impl From<io::Error> for TnefReadError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<TnefValueConversionError> for TnefReadError {
+    fn from(error: TnefValueConversionError) -> Self {
+        Self::ValueConversion(error)
     }
 }

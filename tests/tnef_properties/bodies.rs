@@ -21,7 +21,7 @@ fn body_property(tag: Tag, bytes: &[u8]) -> Vec<u8> {
     value
 }
 
-fn compressed(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn compressed(bytes: &[u8]) -> Vec<u8> {
     let mut builder = compression::Builder::new();
     builder.literals(bytes);
     builder.end();
