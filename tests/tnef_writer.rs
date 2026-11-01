@@ -11,6 +11,9 @@ use std::{
     rc::Rc,
 };
 
+#[path = "tnef_writer/buffered.rs"]
+mod buffered;
+
 fn attribute(output: &mut Vec<u8>, level: u8, tag: Tag, value: &[u8]) {
     output.push(level);
     output.extend_from_slice(&tag.0.to_le_bytes());

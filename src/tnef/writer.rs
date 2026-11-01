@@ -1,13 +1,14 @@
-// Ported from MimeKit's Tnef/TnefWriter.cs.
+// Ported from MimeKit's Tnef/TnefWriter.cs and TnefValueWriteStream.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use super::{
     SIGNATURE, TnefAttributeLevel as Level, TnefAttributeTag as Tag, TnefAttributeType as Type,
     TnefDateTime, VERSION, checksum,
 };
 use crate::charsets::{self, Charset};
+use crate::io::MemoryBlockStream;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -37,11 +38,12 @@ enum State {
 /// Text uses the existing strict charset encoder, rejecting unmappable characters
 /// rather than applying .NET's replacement/best-fit fallback.
 ///
-/// No seekable sink, temporary stream factory, or whole-message buffer is needed.
+/// No seekable output sink or whole-message buffer is needed.
 /// [`write_attribute_from`](Self::write_attribute_from) copies a known-length
-/// payload with a fixed 4 KiB buffer; callers can prepare unknown-length values
-/// in their own memory/file storage first. Property construction and buffered
-/// child writers are not implemented yet.
+/// payload with a fixed 4 KiB buffer. [`open_attribute`](Self::open_attribute)
+/// buffers unknown-length values in a memory block stream; custom memory/file
+/// storage can be supplied with [`open_attribute_with_buffer`](Self::open_attribute_with_buffer).
+/// Property construction is not implemented yet.
 ///
 /// Call `finish` explicitly to observe final flush errors. Neither drop nor
 /// [`into_inner`](Self::into_inner) performs writer I/O or finishes the stream;
@@ -128,9 +130,66 @@ impl<W: Write> TnefWriter<W> {
         self.state == State::Finished
     }
 
-    /// Whether an I/O failure prevents further operations.
+    /// Whether an I/O failure or unfinished buffered attribute prevents further operations.
     pub fn is_faulted(&self) -> bool {
         self.state == State::Faulted
+    }
+
+    /// Opens an unknown-length raw attribute backed by a [`MemoryBlockStream`].
+    ///
+    /// The child exclusively borrows this writer. Call its `finish` to emit the
+    /// attribute and release the borrow; dropping it unfinished faults this writer.
+    /// No output is written until the child finishes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the same tags/states as [`write_attribute`](Self::write_attribute).
+    pub fn open_attribute(&mut self, tag: Tag) -> io::Result<TnefAttributeWriter<'_, W>> {
+        self.open_attribute_with_buffer(tag, MemoryBlockStream::new())
+    }
+
+    /// Opens an unknown-length raw attribute with caller-supplied scratch storage.
+    ///
+    /// The buffer must be empty and positioned at zero, and support `Read`,
+    /// `Write`, and `Seek`. It is owned by the child and returned on successful
+    /// finalization. Pass `&mut buffer` to retain it even on error. File creation
+    /// and deletion policies belong to the caller; no factory or implicit spill
+    /// threshold is used.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid tags/states before accessing the buffer. Buffer validation
+    /// errors leave the parent state and output unchanged, though failed seeks
+    /// can change the scratch position. Interrupted operations are retried.
+    pub fn open_attribute_with_buffer<B: Read + Write + Seek>(
+        &mut self,
+        tag: Tag,
+        mut buffer: B,
+    ) -> io::Result<TnefAttributeWriter<'_, W, B>> {
+        self.next_attribute(tag)?;
+        // Each temporary stream must be new, empty, and positioned at zero.
+        if retry(|| buffer.stream_position())? != 0 {
+            return Err(invalid(
+                "the TNEF attribute buffer must be positioned at zero",
+            ));
+        }
+        let length = retry(|| buffer.seek(SeekFrom::End(0)))?;
+        retry(|| buffer.rewind())?;
+        if length != 0 {
+            return Err(invalid("the TNEF attribute buffer must be empty"));
+        }
+        let previous_state = self.state;
+        // Poison by default: abandoning or forgetting the child must not let the
+        // parent report success with a silently omitted attribute. No Drop I/O.
+        self.state = State::Faulted;
+        Ok(TnefAttributeWriter {
+            parent: self,
+            buffer,
+            tag,
+            previous_state,
+            length: 0,
+            faulted: false,
+        })
     }
 
     /// Writes a raw attribute value without validating its contents.
@@ -437,6 +496,169 @@ fn attribute_header(level: Level, tag: Tag, length: u32) -> [u8; 9] {
     bytes
 }
 
+/// An append-only buffered TNEF attribute value, opened by [`TnefWriter`].
+///
+/// Implements `Write`, but not `Read` or `Seek`. Its position is always its
+/// accepted byte count, [`len`](Self::len). `flush` flushes scratch storage only;
+/// it does not emit an attribute or flush the parent output.
+///
+/// [`finish`](Self::finish) consumes the child, flushes/rewinds its buffer, and
+/// emits the header, value, and checksum to the parent. Unlike MimeKit's disposal
+/// callback/queue, output errors are returned at this call. The parent still
+/// needs its own `finish` to flush the output sink.
+///
+/// Dropping, forgetting, or dismantling an unfinished child performs no writer
+/// I/O and leaves the parent faulted, rather than silently discarding a value.
+/// Owned buffers retain their normal drop behavior. Buffer/output errors are
+/// terminal; oversized input is rejected before I/O and leaves the child usable.
+///
+/// ```
+/// use std::io::Write;
+/// use mimecraft::tnef::{TnefAttributeTag as Tag, TnefWriter};
+///
+/// let mut writer = TnefWriter::new(Vec::new(), 1252, 0)?;
+/// let mut value = writer.open_attribute(Tag::BODY)?;
+/// value.write_all(b"hello")?;
+/// value.write_all(b" world\0")?;
+/// let buffer = value.finish()?;
+/// assert_eq!(buffer.len(), 12);
+/// writer.finish()?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// The parent cannot advance while a child is in use:
+///
+/// ```compile_fail
+/// use std::io::Write;
+/// use mimecraft::tnef::{TnefAttributeTag as Tag, TnefWriter};
+/// let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+/// let mut value = writer.open_attribute(Tag::BODY).unwrap();
+/// writer.flush().unwrap();
+/// value.write_all(b"body").unwrap();
+/// ```
+#[derive(Debug)]
+#[must_use = "call finish() or the parent TNEF writer remains faulted"]
+pub struct TnefAttributeWriter<'a, W, B = MemoryBlockStream> {
+    parent: &'a mut TnefWriter<W>,
+    buffer: B,
+    tag: Tag,
+    previous_state: State,
+    length: u64,
+    faulted: bool,
+}
+
+impl<W: Write, B: Read + Write + Seek> TnefAttributeWriter<'_, W, B> {
+    /// Number of bytes acknowledged by successful writes.
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+
+    /// Whether no bytes have been accepted.
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    /// Whether buffer I/O has failed and prevents further operations.
+    pub fn is_faulted(&self) -> bool {
+        self.faulted
+    }
+
+    /// Observes the scratch buffer without allowing writes that bypass accounting.
+    pub fn get_ref(&self) -> &B {
+        &self.buffer
+    }
+
+    /// Abandons this attribute and returns its buffer without I/O.
+    /// The parent remains faulted and cannot finish successfully.
+    pub fn into_inner(self) -> B {
+        self.buffer
+    }
+
+    /// Emits the complete attribute, releases the parent, and returns the buffer
+    /// positioned at the end of the value. Does not flush the parent output.
+    ///
+    /// # Errors
+    ///
+    /// Propagates buffer flush/seek/read and parent write errors. A changed
+    /// backing length is `InvalidData`. Errors leave the parent faulted and
+    /// drop an owned buffer; borrow the buffer to retain it on failure.
+    pub fn finish(mut self) -> io::Result<B> {
+        self.flush()?;
+        // Completing a buffered attribute must not silently omit or include
+        // bytes if its backing stream no longer matches the acknowledged length.
+        let length = retry(|| self.buffer.seek(SeekFrom::End(0)))?;
+        if length != self.length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the TNEF attribute buffer length changed",
+            ));
+        }
+        retry(|| self.buffer.rewind())?;
+        self.parent.state = self.previous_state;
+        self.parent
+            .write_attribute_from(self.tag, &mut self.buffer, length)?;
+        Ok(self.buffer)
+    }
+
+    fn check_faulted(&self) -> io::Result<()> {
+        if self.faulted {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TNEF attribute writer is faulted",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn run<T>(&mut self, operation: impl FnOnce(&mut B) -> io::Result<T>) -> io::Result<T> {
+        self.faulted = true;
+        let value = operation(&mut self.buffer)?;
+        self.faulted = false;
+        Ok(value)
+    }
+}
+
+impl<W: Write, B: Read + Write + Seek> Write for TnefAttributeWriter<'_, W, B> {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        self.check_faulted()?;
+        if input.is_empty() {
+            return Ok(0);
+        }
+        if input.len() as u64 > i32::MAX as u64 - self.length {
+            return Err(invalid(
+                "TNEF attribute values cannot exceed i32::MAX bytes",
+            ));
+        }
+        let count = self.run(|buffer| {
+            let count = retry(|| buffer.write(input))?;
+            if count == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to buffer TNEF data",
+                ));
+            }
+            Ok(count)
+        })?;
+        self.length += count as u64;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check_faulted()?;
+        self.run(|buffer| retry(|| buffer.flush()))
+    }
+}
+
+fn retry<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    loop {
+        match operation() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +674,30 @@ mod tests {
                 io::ErrorKind::InvalidInput
             );
         }
+    }
+
+    #[test]
+    fn buffered_attribute_size_preflight_preserves_state() {
+        let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+        let mut value = writer.open_attribute(Tag::BODY).unwrap();
+        value.length = i32::MAX as u64 - 1;
+        assert_eq!(
+            value.write(&[1, 2]).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!value.is_faulted());
+        assert!(value.get_ref().is_empty());
+        assert_eq!(value.write(&[1]).unwrap(), 1);
+        assert_eq!(value.len(), i32::MAX as u64);
+        assert_eq!(
+            value.write(&[2]).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(value.write(&[]).unwrap(), 0);
+        assert!(!value.is_faulted());
+        value.length = 1;
+        value.finish().unwrap();
+        writer.finish().unwrap();
+        assert!(!writer.is_faulted());
     }
 }

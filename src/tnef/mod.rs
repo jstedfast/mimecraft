@@ -13,6 +13,7 @@
 //! Owned attachment models expose checked metadata, raw content, and detached readers.
 //! Whole-message loading maps legacy metadata, selects bodies, and groups attachments.
 //! Attribute writing enforces ordering and supplies framing, codepage, and checksums.
+//! Buffered attribute streams support unknown lengths and caller-owned scratch storage.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
@@ -48,7 +49,7 @@ pub use recipient::{TnefRecipient, TnefRecipientType};
 pub use rtf_compressed::{RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError};
 pub use rtf_compressed_writer::RtfCompressedWriter;
 pub use value_conversion::TnefValueConversionError;
-pub use writer::TnefWriter;
+pub use writer::{TnefAttributeWriter, TnefWriter};
 
 const SIGNATURE: u32 = 0x223e9f78;
 const VERSION: u32 = 0x00010000;

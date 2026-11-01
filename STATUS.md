@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, and known-length streamed payloads on forward-only sinks. TNEF-to-MIME conversion and property/buffered-child writing remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. TNEF-to-MIME conversion, property writing, and embedded-message writing remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9006,9 +9006,32 @@ Known-length input uses `write_attribute_from(tag, &mut source, length)`.
 It supports forward-only sources and sinks, copies through a fixed 4 KiB buffer,
 never reads beyond the length or probes EOF afterward, and never reads for an
 empty value. There is no implicit temporary stream or full-message buffer.
-Callers can prepare unknown-length values in their own memory/file storage;
-upstream's temporary-stream factory, buffered child streams, property writers,
-embedded-message writers, and async/cancellation APIs remain separate work.
+
+Unknown-length input uses `open_attribute(tag)`, returning an append-only
+`TnefAttributeWriter` backed by the existing 2 KiB-block `MemoryBlockStream`.
+`open_attribute_with_buffer(tag, buffer)` accepts owned or borrowed
+`Read + Write + Seek` storage, including files. Per-call storage replaces
+upstream's temporary-stream factory; file lifetime/deletion and spill policies
+belong to the caller. Scratch storage must be empty and positioned at zero.
+Tags/order are checked before scratch access, and failed buffer validation
+leaves the parent unchanged, though failed seeks may alter scratch position.
+
+The child implements `Write`, not `Read` or `Seek`, and exclusively borrows
+the parent. Its `len` tracks acknowledged bytes, and `flush` flushes scratch
+storage only. Consuming `finish` flushes the buffer, verifies its length,
+rewinds it, emits the attribute, and returns the buffer positioned at the end.
+Unlike MimeKit's disposal callback and deferred queue, output errors surface
+immediately at child finalization; the parent still needs its own `finish`.
+The parent is poisoned while a child is active: abandoning, dropping, or even
+forgetting an unfinished child cannot silently omit a value and report success.
+Child `into_inner` recovers storage without I/O but leaves the parent faulted.
+Borrow storage to retain it after a failing `finish`; owned storage is dropped.
+Short/interrupted buffer operations are handled. Buffer errors, early EOF,
+changed lengths, zero writes, and sink errors are terminal; over-limit writes
+are rejected before scratch I/O and leave the child usable.
+
+Property/value writers, embedded-message writers, and async/cancellation APIs
+remain separate work.
 
 Attribute lengths are limited to `i32::MAX`. Unsupported codepages, codepage
 zero, and UTF-16/UTF-32 are rejected. Encoding uses mimecraft's supported charset
@@ -9032,13 +9055,21 @@ ordering, checksum-wrap, and stream-lifetime cases. Additional coverage checks
 calendar extrema/weekdays, strict encoding errors, bounded/empty streams,
 interrupted and seven-byte I/O, every partial header/value/checksum write
 boundary, premature EOF, source failures, terminal states, and no drop I/O.
-An internal size-limit test exercises exact bounds without multi-GiB allocation.
-Six original benchmark workloads have independent framing/full-content checks.
+Two internal size-limit tests exercise exact bounds without multi-GiB allocation.
+Fourteen additional tests in `tests/tnef_writer/buffered.rs` adapt upstream
+split-write, empty-stream, memory/file buffer, temporary-stream validation, and
+ownership cases. They also cover block boundaries, terminal buffer failures,
+length mismatches, every partial output boundary, unchanged grammar on invalid
+opens, short/interrupted scratch I/O, and unfinished/forgotten children.
+A compile-fail doctest checks exclusive parent borrowing. Applicable upstream
+comments are retained with Rust-specific ownership/finalization explanations.
+Eleven original benchmark workloads have independent framing/full-content checks.
 
-The default/scalar scoped suites pass 226 tests with one existing ignored
-raw-reader test. Strict scoped Clippy, twelve TNEF doctests, strict rustdoc, and
-all 125 native benchmark smoke/allocation cases pass. TNEF conversion and the
-property-writing layer are still pending; this does not complete the TNEF port.
+The default/scalar scoped suites, including `MemoryBlockStream`, pass 255 tests
+with one existing ignored raw-reader test. Strict scoped Clippy, fourteen TNEF
+doctests, strict rustdoc, and all 130 native benchmark smoke/allocation cases
+pass. TNEF conversion and the property-writing layer are still pending; this
+does not complete the TNEF port.
 
 ### MAPI properties and recipient rows
 
@@ -10720,7 +10751,7 @@ also pass.
 
 #### TNEF attribute writing
 
-Six original `tnef-writer/Write` cases share
+Eleven original `tnef-writer/Write` cases share
 `benches/support/tnef_writer.rs` across the standalone, native/metabench, and
 optional Criterion harnesses. Typed follows the upstream message-class,
 Windows-1252 subject, body, priority, owner ID, and date example. ManySmall emits
@@ -10729,16 +10760,25 @@ Stream copies the same payload from a source through the writer's 4 KiB buffer.
 ShortReads limits that source to seven bytes; ShortWrites limits a direct
 payload's destination writes to seven bytes.
 
+Five buffered cases use the same 1 MiB attachment. Buffered uses the default
+memory block stream; BufferedCursor supplies a growing `Cursor<Vec<u8>>`.
+Both accept 4 KiB input chunks. BufferedShortChunks uses one-byte input.
+BufferedShortReads and BufferedShortWrites wrap a memory block stream with
+seven-byte scratch reads or writes respectively, while output writes remain
+unrestricted. These measure memory-backed buffering, not filesystem performance.
+
 Each measurement constructs a fresh writer and growing `Vec<u8>` sink, emits
 headers/values/checksums, finalizes, observes every output byte with a rolling
 checksum, and drops the writer/output. Typed also includes its checked date
 construction and charset encoding. Fixture and independent expected-wire
 construction and complete reader/content checks occur outside measurement.
 Throughput counts the complete serialized output byte length once, not only
-the attachment payload.
+the attachment payload. Buffered cases additionally include fresh scratch
+allocation, append operations, flush/length validation/rewind, replay into the
+parent, and destruction of returned scratch storage.
 
-All 125 smoke and allocation cases pass. Per-operation allocations and
-cumulative allocated bytes (not peak memory) for the new operations are:
+All 130 smoke and allocation cases pass. Per-operation allocations and
+cumulative allocated bytes (not peak memory) are:
 
 | Case | Allocations | Allocated bytes |
 | --- | ---: | ---: |
@@ -10748,15 +10788,22 @@ cumulative allocated bytes (not peak memory) for the new operations are:
 | Stream | 11 | 2,130,990 |
 | ShortReads | 16 | 2,621,400 |
 | ShortWrites | 19 | 4,194,296 |
+| Buffered | 531 | 3,204,046 |
+| BufferedCursor | 20 | 4,224,046 |
+| BufferedShortChunks | 531 | 3,204,046 |
+| BufferedShortReads | 536 | 3,694,456 |
+| BufferedShortWrites | 531 | 3,204,046 |
 
-Successful raw/streamed writing needs no heap storage beyond the sink. These
-counts include output-vector growth; Typed also includes the non-ASCII charset
-encoding allocation. Different write sizes change growth/reservation behavior,
-including the trailing checksum after a large direct value. All previous 119
-allocation counts and byte totals match the compressed-RTF-writer baseline.
+Successful direct/known-length writing needs no heap storage beyond the sink.
+These counts include output-vector growth; Typed also includes the non-ASCII
+charset encoding allocation. Different write sizes change growth/reservation behavior,
+including the trailing checksum after a large direct value. Buffered counts also
+include scratch blocks/vector growth; short scratch reads change output growth.
+All previous 125 allocation counts and byte totals match the attribute-writer
+baseline.
 No throughput timings were recorded for this increment. The schema-v9 report
 is preserved under session
-`files/tnef-attribute-writer-baseline/allocations.json`.
+`files/tnef-buffered-attributes-baseline/allocations.json`.
 
 #### Optional metabench targets
 
@@ -10771,7 +10818,7 @@ These harnesses use the same fixtures, generators, and operations under
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,
 fifteen body-model cases, twelve attachment-model cases, and ten whole-message
-cases, plus six attribute-writer cases (125 TNEF cases in total).
+cases, plus eleven attribute-writer cases (130 TNEF cases in total).
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

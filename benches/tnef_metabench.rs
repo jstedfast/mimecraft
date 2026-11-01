@@ -45,6 +45,11 @@ fn prepare_writer(name: &'static str) -> writer_workloads::Workload {
 #[bench::Stream(&prepare_writer("Stream"))]
 #[bench::ShortReads(&prepare_writer("ShortReads"))]
 #[bench::ShortWrites(&prepare_writer("ShortWrites"))]
+#[bench::Buffered(&prepare_writer("Buffered"))]
+#[bench::BufferedCursor(&prepare_writer("BufferedCursor"))]
+#[bench::BufferedShortChunks(&prepare_writer("BufferedShortChunks"))]
+#[bench::BufferedShortReads(&prepare_writer("BufferedShortReads"))]
+#[bench::BufferedShortWrites(&prepare_writer("BufferedShortWrites"))]
 fn write(case: &writer_workloads::Workload) -> writer_workloads::Summary {
     writer_workloads::write(case)
 }

@@ -70,6 +70,9 @@ fn main() {
     println!(
         "Throughput counts complete serialized output bytes once; Stream uses a 4 KiB buffer, ShortReads/ShortWrites seven-byte I/O."
     );
+    println!(
+        "Buffered cases include fresh scratch storage and replay; BufferedShortChunks uses one-byte input, BufferedShortReads/Writes seven-byte scratch I/O."
+    );
     for name in writer_workloads::CASES {
         let case = writer_workloads::workload(name);
         case.check();

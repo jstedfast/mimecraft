@@ -2,21 +2,28 @@
 // There is no upstream TNEF writer benchmark class to port.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
+use mimecraft::io::MemoryBlockStream;
 use mimecraft::tnef::{
-    TnefAttributeTag as Tag, TnefDateTime, TnefDateTimeKind, TnefReader, TnefWriter,
+    TnefAttributeTag as Tag, TnefAttributeWriter, TnefDateTime, TnefDateTimeKind, TnefReader,
+    TnefWriter,
 };
 use std::{
     hint::black_box,
-    io::{self, Read, Write},
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
 };
 
-pub const CASES: [&str; 6] = [
+pub const CASES: [&str; 11] = [
     "Typed",
     "ManySmall",
     "LargeValue",
     "Stream",
     "ShortReads",
     "ShortWrites",
+    "Buffered",
+    "BufferedCursor",
+    "BufferedShortChunks",
+    "BufferedShortReads",
+    "BufferedShortWrites",
 ];
 
 pub struct Workload {
@@ -58,6 +65,46 @@ impl Read for Source<'_> {
         let count = buffer.len().min(self.chunk);
         self.input.read(&mut buffer[..count])
     }
+}
+
+struct Scratch {
+    inner: MemoryBlockStream,
+    read_chunk: usize,
+    write_chunk: usize,
+}
+
+impl Read for Scratch {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let count = bytes.len().min(self.read_chunk);
+        self.inner.read(&mut bytes[..count])
+    }
+}
+
+impl Write for Scratch {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.inner
+            .write(&bytes[..bytes.len().min(self.write_chunk)])
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for Scratch {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(position)
+    }
+}
+
+fn buffer_payload<W: Write, B: Read + Write + Seek>(
+    mut stream: TnefAttributeWriter<'_, W, B>,
+    bytes: &[u8],
+    chunk: usize,
+) {
+    for input in bytes.chunks(chunk) {
+        stream.write_all(input).unwrap();
+    }
+    drop(stream.finish().unwrap());
 }
 
 fn attribute(bytes: &mut Vec<u8>, level: u8, tag: Tag, value: &[u8]) {
@@ -155,7 +202,46 @@ fn encode(case: &Workload) -> Vec<u8> {
             writer
                 .write_attribute(Tag::ATTACH_RENDER_DATA, &[0; 14])
                 .unwrap();
-            if matches!(case.name, "Stream" | "ShortReads") {
+            if matches!(case.name, "Buffered" | "BufferedShortChunks") {
+                buffer_payload(
+                    writer.open_attribute(Tag::ATTACH_DATA).unwrap(),
+                    black_box(&case.payload),
+                    if case.name == "BufferedShortChunks" {
+                        1
+                    } else {
+                        4096
+                    },
+                );
+            } else if case.name == "BufferedCursor" {
+                buffer_payload(
+                    writer
+                        .open_attribute_with_buffer(Tag::ATTACH_DATA, Cursor::new(Vec::new()))
+                        .unwrap(),
+                    black_box(&case.payload),
+                    4096,
+                );
+            } else if matches!(case.name, "BufferedShortReads" | "BufferedShortWrites") {
+                let buffer = Scratch {
+                    inner: MemoryBlockStream::new(),
+                    read_chunk: if case.name == "BufferedShortReads" {
+                        7
+                    } else {
+                        usize::MAX
+                    },
+                    write_chunk: if case.name == "BufferedShortWrites" {
+                        7
+                    } else {
+                        usize::MAX
+                    },
+                };
+                buffer_payload(
+                    writer
+                        .open_attribute_with_buffer(Tag::ATTACH_DATA, buffer)
+                        .unwrap(),
+                    black_box(&case.payload),
+                    4096,
+                );
+            } else if matches!(case.name, "Stream" | "ShortReads") {
                 let mut source = Source {
                     input: black_box(&case.payload),
                     chunk: if case.name == "ShortReads" {
