@@ -51,9 +51,19 @@ impl Accelerator {
         // SAFETY: construction verifies the required features. Kernels check
         // input bounds and limit before each load and use local arrays for stores.
         unsafe {
-            match self.0 {
+            let consumed = match self.0 {
                 Cpu::Ssse3 => encode_ssse3(input, limit, output),
                 Cpu::Avx2 => encode_avx2(input, limit, output),
+            };
+            // Keep the bulk kernels unchanged for other line widths and tails.
+            let limit = limit.min(input.len());
+            if limit - consumed == 9 && consumed >= 12 {
+                match self.0 {
+                    Cpu::Avx2 if consumed >= 24 => encode_avx2_tail(input, limit, consumed, output),
+                    _ => encode_ssse3_tail(input, limit, consumed, output),
+                }
+            } else {
+                consumed
             }
         }
     }
@@ -78,10 +88,9 @@ impl Accelerator {
 }
 
 #[target_feature(enable = "ssse3")]
-fn encode_vector(str: __m128i) -> __m128i {
-    // Input bytes, MSB to LSB (the four high bytes are read but not encoded):
-    // ? ? ? ? l k j i h g f e d c b a
-    let shuffle = _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10);
+#[inline]
+fn encode_vector(str: __m128i, shuffle: __m128i) -> __m128i {
+    // The shuffle selects twelve bytes a..l from either end of the vector.
     let lut = _mm_setr_epi8(
         65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0,
     );
@@ -150,13 +159,16 @@ fn encode_vector(str: __m128i) -> __m128i {
 fn encode_ssse3(input: &[u8], limit: usize, output: &mut Vec<u8>) -> usize {
     let mut consumed = 0;
     let limit = limit.min(input.len());
+    // Input bytes, MSB to LSB (the four high bytes are read but not encoded):
+    // ? ? ? ? l k j i h g f e d c b a
+    let shuffle = _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10);
     while input.len() - consumed >= 16 && limit - consumed >= 12 {
         let mut encoded = [0u8; 16];
         // SAFETY: the loop guarantees 16 readable bytes; the local output is
         // exactly 16 bytes. Unaligned loads/stores impose no alignment requirement.
         unsafe {
             let str = _mm_loadu_si128(input.as_ptr().add(consumed).cast());
-            _mm_storeu_si128(encoded.as_mut_ptr().cast(), encode_vector(str));
+            _mm_storeu_si128(encoded.as_mut_ptr().cast(), encode_vector(str, shuffle));
         }
         output.extend_from_slice(&encoded);
         consumed += 12;
@@ -164,19 +176,34 @@ fn encode_ssse3(input: &[u8], limit: usize, output: &mut Vec<u8>) -> usize {
     consumed
 }
 
+#[target_feature(enable = "ssse3")]
+fn encode_ssse3_tail(input: &[u8], limit: usize, consumed: usize, output: &mut Vec<u8>) -> usize {
+    if limit - consumed == 9 && consumed >= 12 {
+        // Re-encode the preceding triplet only when its quartet was written
+        // in this kernel call, within this line. Load seven bytes before the
+        // tail and select the last twelve, without reading past the line end.
+        let shuffle = _mm_setr_epi8(5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14);
+        let mut encoded = [0u8; 16];
+        // SAFETY: preceding vector blocks consumed at least 12 input bytes
+        // and appended at least 16 output bytes. The load ends at limit,
+        // which is bounded by input.len(); the local store is exactly 16 bytes.
+        unsafe {
+            let str = _mm_loadu_si128(input.as_ptr().add(consumed - 7).cast());
+            _mm_storeu_si128(encoded.as_mut_ptr().cast(), encode_vector(str, shuffle));
+        }
+        output.truncate(output.len() - 4);
+        output.extend_from_slice(&encoded);
+        consumed + 9
+    } else {
+        consumed
+    }
+}
+
 #[target_feature(enable = "avx2")]
-fn encode_vector_avx2(str: __m256i) -> __m256i {
+#[inline]
+fn encode_vector_avx2(str: __m256i, shuffle: __m256i) -> __m256i {
     // Apply encode_vector's bit splitting and alphabet translation independently
-    // in each 128-bit lane. The caller loads bytes 0..15 and 12..27, so both
-    // lanes start with 12 useful bytes and can use the same shuffle:
-    // high lane, MSB to LSB: ? ? ? ? x w v u t s r q p o n m
-    // low lane,  MSB to LSB: ? ? ? ? l k j i h g f e d c b a
-    //
-    // Unlike MimeKit's shifted 32-byte load, these overlapping loads need no
-    // initial four-byte permutation and never read before the input slice.
-    let shuffle = _mm256_broadcastsi128_si256(_mm_setr_epi8(
-        1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10,
-    ));
+    // in each 128-bit lane. The shuffle selects twelve bytes per lane.
     let lut = _mm256_broadcastsi128_si256(_mm_setr_epi8(
         65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0,
     ));
@@ -206,6 +233,15 @@ fn encode_vector_avx2(str: __m256i) -> __m256i {
 fn encode_avx2(input: &[u8], limit: usize, output: &mut Vec<u8>) -> usize {
     let mut consumed = 0;
     let limit = limit.min(input.len());
+    // Load bytes 0..15 and 12..27, so both lanes start with 12 useful bytes:
+    // high lane, MSB to LSB: ? ? ? ? x w v u t s r q p o n m
+    // low lane,  MSB to LSB: ? ? ? ? l k j i h g f e d c b a
+    //
+    // Unlike MimeKit's shifted 32-byte load, these overlapping loads need no
+    // initial four-byte permutation and never read before the input slice.
+    let shuffle = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10,
+    ));
     while input.len() - consumed >= 28 && limit - consumed >= 24 {
         let mut encoded = [0u8; 32];
         // SAFETY: overlapping 16-byte loads cover [consumed, consumed + 28),
@@ -214,12 +250,45 @@ fn encode_avx2(input: &[u8], limit: usize, output: &mut Vec<u8>) -> usize {
             let lo = _mm_loadu_si128(input.as_ptr().add(consumed).cast());
             let hi = _mm_loadu_si128(input.as_ptr().add(consumed + 12).cast());
             let str = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(lo), hi);
-            _mm256_storeu_si256(encoded.as_mut_ptr().cast(), encode_vector_avx2(str));
+            _mm256_storeu_si256(
+                encoded.as_mut_ptr().cast(),
+                encode_vector_avx2(str, shuffle),
+            );
         }
         output.extend_from_slice(&encoded);
         consumed += 24;
     }
     consumed + encode_ssse3(&input[consumed..], limit - consumed, output)
+}
+
+#[target_feature(enable = "avx2")]
+fn encode_avx2_tail(input: &[u8], limit: usize, consumed: usize, output: &mut Vec<u8>) -> usize {
+    if limit - consumed == 9 && consumed >= 24 {
+        // Select the last twelve bytes in each overlapping lane. Re-encoding
+        // the preceding fifteen bytes lets AVX2 write all nine new bytes in
+        // one vector, without loading past the line or touching older output.
+        let shuffle = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+            5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14,
+        ));
+        let mut encoded = [0u8; 32];
+        // SAFETY: consumed >= 24 guarantees both loads stay inside this call's
+        // input and at least 32 output bytes were appended on this line.
+        // The high load ends at limit <= input.len(); the local store is 32 bytes.
+        unsafe {
+            let lo = _mm_loadu_si128(input.as_ptr().add(consumed - 19).cast());
+            let hi = _mm_loadu_si128(input.as_ptr().add(consumed - 7).cast());
+            let str = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(lo), hi);
+            _mm256_storeu_si256(
+                encoded.as_mut_ptr().cast(),
+                encode_vector_avx2(str, shuffle),
+            );
+        }
+        output.truncate(output.len() - 20);
+        output.extend_from_slice(&encoded);
+        consumed + 9
+    } else {
+        consumed
+    }
 }
 
 #[target_feature(enable = "ssse3")]
@@ -405,6 +474,43 @@ fn decode_avx2(input: &[u8], output: &mut Vec<u8>) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_tails_consume_nine_bytes_without_crossing_limits() {
+        let data: Vec<u8> = (0..128).map(|i| (i * 73 + 19) as u8).collect();
+        for accelerator in Accelerator::available() {
+            for offset in 0..32 {
+                for length in 0..=96 {
+                    // The slice ends at its allocation boundary; offsets also
+                    // exercise unaligned loads and a nonzero slice origin.
+                    let allocation = data[..offset + length].to_vec().into_boxed_slice();
+                    let input = &allocation[offset..];
+                    for limit in 0..=length + 1 {
+                        let mut output = b"prefix".to_vec();
+                        let consumed = accelerator.encode(input, limit, &mut output);
+                        assert!(consumed <= limit.min(length));
+                        assert!(consumed.is_multiple_of(3));
+                        if limit >= 21 && limit % 12 == 9 && length >= limit {
+                            assert_eq!(
+                                consumed, limit,
+                                "{accelerator:?}, length={length}, limit={limit}"
+                            );
+                        }
+                        let mut expected = b"prefix".to_vec();
+                        super::super::encode_unwrapped_with_backend(
+                            &input[..consumed],
+                            &mut expected,
+                            super::super::Backend::Scalar,
+                        );
+                        assert_eq!(
+                            output, expected,
+                            "{accelerator:?}, offset={offset}, length={length}, limit={limit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn avx2_consumes_mime_tails_and_continues_without_scalar_handoff() {

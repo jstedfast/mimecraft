@@ -9344,6 +9344,15 @@ non-alphabet bytes, incomplete quartets, and chunk boundaries retain the scalar
 decoder's behavior. Encoding preserves MIME line boundaries. Small input chunks
 use the scalar path without CPU detection.
 
+The x86 Base64 encoder handles nine-byte line tails with overlapping vectors.
+SSSE3 re-encodes the preceding triplet; native AVX2 re-encodes the preceding
+five triplets, falling back to SSSE3 when too little preceding input exists.
+Only bytes encoded by the current kernel call within the same line may overlap.
+Loads stay inside the input slice and output prefixes remain intact, including
+when callers clear or replace output buffers between chunks. The shared
+unwrapped encoder benefits from the same bounded tail kernels. Scalar and NEON
+paths are unchanged.
+
 UU encoding processes full 45-byte lines, overlapping the final vector so every
 load stays inside the line. Decoding validates whole lines into bounded scratch
 storage before appending exactly the declared byte count. In partial lines it
@@ -9469,6 +9478,17 @@ identical across runtimes. Each operation resets the decoder and reuses a
 chunk against the original payload, outside timing. The original 21 cases and
 their order are unchanged; the new six are also registered with metabench.
 
+Eleven `encode-stream/*` cases port MimeKit's `Base64EncoderBenchmarks`:
+`MimeCrlf`, `MimeLf`, `Width60`, `Width64`, `Width68`, `Width72`, `SmallChunks`,
+`Bulk`, `SingleLine`, `Small`, and `Tiny`. They preserve the upstream payload
+sizes (65,536, 57, 48, or one byte), line widths, endings, and chunk sizes
+(4 KiB, 17 bytes, or the whole payload), with the same deterministic PRNG as
+the existing Rust cases. Each operation resets the encoder, reuses a preallocated
+output buffer cleared between chunks, and flushes the final partial line.
+Setup independently checks encoded bytes, wrapping, and padding against a scalar
+reference outside timing. Both harnesses now include 38 Base64 cases, all with
+zero measured allocations when using their preallocated output buffers.
+
 The AVX2 tail optimization was compared on October 30, 2026, using an original
 decoder executable built before the production changes, with the same expanded
 benchmark harness as the final executable. Both used Rust 1.99.1/MSVC,
@@ -9501,8 +9521,8 @@ MIME-wrapped streaming improved about 87-89%, but this is not a uniform speedup:
 the 48-byte payload case lost 10.2% throughput (about 35 ns to 39 ns per
 operation). The unchanged encoder and match-decoder controls ranged from -1.5%
 to +2.6% in this comparison. These are shared-host regression-screening
-measurements, not confidence intervals. All 27 cases allocate zero times during
-measurement with their preallocated/reused buffers; fixture construction is
+measurements, not confidence intervals. The original 27 cases allocate zero
+times during measurement with their preallocated/reused buffers; fixture construction is
 excluded. The Rust port explicitly keeps the scalar fallback inline: allowing
 the larger SIMD function to change inlining decisions caused substantial
 short-line/noisy-input regressions in an earlier version of the port.
@@ -10189,7 +10209,7 @@ with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 27 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
+`benches/support`, covering all 38 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, four embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, and four compressed-RTF cases.

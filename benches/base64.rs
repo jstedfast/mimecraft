@@ -91,4 +91,12 @@ fn main() {
         );
         assert_eq!(case.decode(), case.decoded_length);
     }
+    for name in workloads::ENCODE_LAYOUTS {
+        let mut case = workloads::EncoderCase::new(name);
+        assert_eq!(case.encode(), case.encoded_length);
+        measure(&format!("encode-stream/{name}"), case.input.len(), || {
+            case.encode();
+        });
+        assert_eq!(case.encode(), case.encoded_length);
+    }
 }

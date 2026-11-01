@@ -249,7 +249,8 @@ impl Base64Encoder {
             while input.len() >= 16 {
                 // A 76-character MIME line holds 19 quartets, or 57 input bytes.
                 // NEON encodes its first 48 bytes in one pass, AVX2 in two,
-                // and SSSE3 in four; the remaining 9 bytes are scalar.
+                // and SSSE3 in four. On x86, an overlapping vector handles
+                // the remaining nine bytes without a scalar tail.
                 // Limit consumed input separately from readable input: vector
                 // loads may look ahead, but must not encode across a newline.
                 let line_input = (self.line_length - self.column) / 4 * 3;

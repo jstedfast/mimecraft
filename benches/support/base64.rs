@@ -2,7 +2,7 @@
 
 use std::hint::black_box;
 
-use mimecraft::encodings::{Base64Decoder, Base64Encoder};
+use mimecraft::encodings::{Base64Decoder, Base64Encoder, NewLineFormat};
 
 pub const ENCODE_CHUNKS: [usize; 3] = [1, 57, 4096];
 pub const DECODE_CHUNKS: [usize; 3] = [1, 78, 4096];
@@ -14,6 +14,19 @@ pub const STREAMING_INPUTS: [&str; 6] = [
     "short-lines",
     "garbage",
     "small",
+];
+pub const ENCODE_LAYOUTS: [&str; 11] = [
+    "MimeCrlf",
+    "MimeLf",
+    "Width60",
+    "Width64",
+    "Width68",
+    "Width72",
+    "SmallChunks",
+    "Bulk",
+    "SingleLine",
+    "Small",
+    "Tiny",
 ];
 
 fn random_bytes(length: usize) -> Vec<u8> {
@@ -133,6 +146,106 @@ impl StreamingCase {
             black_box(&self.output);
         }
         black_box(decoded)
+    }
+}
+
+// Adapted from MimeKit's Base64EncoderBenchmarks. Preserve its layouts and
+// chunk sizes, using our deterministic PRNG instead of .NET's.
+pub struct EncoderCase {
+    pub input: Vec<u8>,
+    output: Vec<u8>,
+    encoder: Base64Encoder,
+    chunk_size: usize,
+    pub encoded_length: usize,
+}
+
+impl EncoderCase {
+    pub fn new(name: &str) -> Self {
+        let (length, width, chunk_size, format): (usize, usize, usize, NewLineFormat) = match name {
+            "MimeCrlf" => (65536, 76, 4096, NewLineFormat::Dos),
+            "MimeLf" => (65536, 76, 4096, NewLineFormat::Unix),
+            "Width60" => (65536, 60, 4096, NewLineFormat::Dos),
+            "Width64" => (65536, 64, 4096, NewLineFormat::Dos),
+            "Width68" => (65536, 68, 4096, NewLineFormat::Dos),
+            "Width72" => (65536, 72, 4096, NewLineFormat::Dos),
+            "SmallChunks" => (65536, 76, 17, NewLineFormat::Dos),
+            "Bulk" => (65536, 76, 65536, NewLineFormat::Dos),
+            "SingleLine" => (57, 76, 4096, NewLineFormat::Dos),
+            "Small" => (48, 76, 4096, NewLineFormat::Dos),
+            "Tiny" => (1, 76, 4096, NewLineFormat::Dos),
+            _ => panic!("unknown Base64 encoder benchmark layout: {name}"),
+        };
+        let input = random_bytes(length);
+        let newline = if format == NewLineFormat::Dos {
+            b"\r\n".as_slice()
+        } else {
+            b"\n"
+        };
+        // An independent scalar reference checks bytes, wrapping, and padding,
+        // not just round trips through the same vector kernels.
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut expected = Vec::new();
+        let line_input = width / 4 * 3;
+        for line in input.chunks(line_input) {
+            for triplet in line.chunks(3) {
+                let a = triplet[0];
+                let b = triplet.get(1).copied().unwrap_or(0);
+                let c = triplet.get(2).copied().unwrap_or(0);
+                expected.extend_from_slice(&[
+                    alphabet[(a >> 2) as usize],
+                    alphabet[(((a & 3) << 4) | (b >> 4)) as usize],
+                    if triplet.len() > 1 {
+                        alphabet[(((b & 15) << 2) | (c >> 6)) as usize]
+                    } else {
+                        b'='
+                    },
+                    if triplet.len() > 2 {
+                        alphabet[(c & 63) as usize]
+                    } else {
+                        b'='
+                    },
+                ]);
+            }
+            expected.extend_from_slice(newline);
+        }
+        let mut case = Self {
+            input,
+            output: Vec::with_capacity(
+                chunk_size.div_ceil(3) * 4 + (chunk_size / line_input + 2) * newline.len(),
+            ),
+            encoder: Base64Encoder::with_options(width, format).unwrap(),
+            chunk_size,
+            encoded_length: expected.len(),
+        };
+        let capacity = case.output.capacity();
+        let mut encoded = 0;
+        for chunk in case.input.chunks(chunk_size) {
+            case.output.clear();
+            case.encoder.encode(chunk, &mut case.output);
+            assert_eq!(case.output, expected[encoded..encoded + case.output.len()]);
+            encoded += case.output.len();
+        }
+        case.output.clear();
+        case.encoder.finish(&mut case.output);
+        assert_eq!(case.output, expected[encoded..]);
+        assert_eq!(case.encode(), case.encoded_length);
+        assert_eq!(case.output.capacity(), capacity);
+        case
+    }
+
+    pub fn encode(&mut self) -> usize {
+        self.encoder.reset();
+        let mut encoded = 0;
+        for chunk in black_box(&self.input).chunks(self.chunk_size) {
+            self.output.clear();
+            self.encoder.encode(chunk, &mut self.output);
+            encoded += self.output.len();
+            black_box(&self.output);
+        }
+        self.output.clear();
+        self.encoder.finish(&mut self.output);
+        black_box(&self.output);
+        black_box(encoded + self.output.len())
     }
 }
 

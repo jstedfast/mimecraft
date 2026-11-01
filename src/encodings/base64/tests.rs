@@ -165,6 +165,48 @@ fn every_encoder_backend_matches_scalar_at_block_and_line_boundaries() {
 }
 
 #[test]
+fn encoder_line_tails_preserve_every_partial_line_state() {
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        for width in [60, 64, 68, 72, 76] {
+            let line_input = width / 4 * 3;
+            let input = random_bytes(line_input * 3 + 9);
+            let expected =
+                encode_with_new_line_format(&input, width, &[usize::MAX], Backend::Scalar, format);
+            for backend in backends() {
+                // Include a nine-byte final line: its preceding quartet belongs
+                // to another line and must not be overwritten.
+                for prefix in 0..=line_input + 2 {
+                    let first = input[..prefix].to_vec().into_boxed_slice();
+                    let rest = input[prefix..].to_vec().into_boxed_slice();
+                    let mut encoder = Base64Encoder::with_options(width, format).unwrap();
+                    let mut output = b"canary".to_vec();
+                    let mut actual = b"prefix".to_vec();
+                    // Separate input allocations and a cleared output buffer
+                    // prohibit overlap with bytes belonging to an earlier call.
+                    for chunk in [&first[..], &rest[..]] {
+                        output.truncate(6);
+                        encoder.encode_with_backend(chunk, &mut output, backend);
+                        let length = output.len();
+                        encoder.encode_with_backend(b"", &mut output, backend);
+                        assert_eq!(output.len(), length);
+                        assert_eq!(&output[..6], b"canary");
+                        actual.extend_from_slice(&output[6..]);
+                    }
+                    output.truncate(6);
+                    encoder.finish(&mut output);
+                    assert_eq!(&output[..6], b"canary");
+                    actual.extend_from_slice(&output[6..]);
+                    assert_eq!(
+                        actual, expected,
+                        "{backend:?}, {format:?}, width={width}, prefix={prefix}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn every_decoder_backend_handles_every_byte_at_every_position() {
     let data = random_bytes(72);
     let encoded: Vec<u8> = encode(&data, 76, &[72], Backend::Scalar)[6..]

@@ -86,6 +86,22 @@ fn stream(case: &mut workloads::StreamingCase) {
     case.decode();
 }
 
+#[metabench::benchmark(ENCODE_STREAM, "base64", "encode_stream")]
+#[bench::mime_crlf(&mut workloads::EncoderCase::new("MimeCrlf"))]
+#[bench::mime_lf(&mut workloads::EncoderCase::new("MimeLf"))]
+#[bench::width60(&mut workloads::EncoderCase::new("Width60"))]
+#[bench::width64(&mut workloads::EncoderCase::new("Width64"))]
+#[bench::width68(&mut workloads::EncoderCase::new("Width68"))]
+#[bench::width72(&mut workloads::EncoderCase::new("Width72"))]
+#[bench::small_chunks(&mut workloads::EncoderCase::new("SmallChunks"))]
+#[bench::bulk(&mut workloads::EncoderCase::new("Bulk"))]
+#[bench::single_line(&mut workloads::EncoderCase::new("SingleLine"))]
+#[bench::small(&mut workloads::EncoderCase::new("Small"))]
+#[bench::tiny(&mut workloads::EncoderCase::new("Tiny"))]
+fn encode_stream(case: &mut workloads::EncoderCase) {
+    case.encode();
+}
+
 fn criterion_benchmarks(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group(ENCODE.group_name());
     for chunk_size in workloads::ENCODE_CHUNKS {
@@ -117,10 +133,20 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
             b.iter(|| stream(&mut case));
         });
     }
+    for name in workloads::ENCODE_LAYOUTS {
+        let mut case = workloads::EncoderCase::new(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        group.bench_function(
+            BenchmarkId::new(ENCODE_STREAM.benchmark_name(), name),
+            |b| {
+                b.iter(|| encode_stream(&mut case));
+            },
+        );
+    }
     group.finish();
 }
 
 metabench::main!(
     criterion = criterion_benchmarks,
-    benchmarks = [ENCODE, DECODE, MATCH, STREAM]
+    benchmarks = [ENCODE, DECODE, MATCH, STREAM, ENCODE_STREAM]
 );
