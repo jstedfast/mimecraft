@@ -359,6 +359,47 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
             if header.is_invalid() {
                 continue;
             }
+            let address = matches!(
+                header.id(),
+                HeaderId::From
+                    | HeaderId::Sender
+                    | HeaderId::ReplyTo
+                    | HeaderId::To
+                    | HeaderId::Cc
+                    | HeaderId::Bcc
+                    | HeaderId::ResentFrom
+                    | HeaderId::ResentSender
+                    | HeaderId::ResentReplyTo
+                    | HeaderId::ResentTo
+                    | HeaderId::ResentCc
+                    | HeaderId::ResentBcc
+                    | HeaderId::DispositionNotificationTo
+            );
+            if self
+                .options
+                .enabled_validators
+                .contains(Validators::ENCODED_WORDS)
+                && (address
+                    || matches!(
+                        header.id(),
+                        HeaderId::Subject | HeaderId::Comments | HeaderId::ContentDescription
+                    )
+                    || header
+                        .field()
+                        .and_then(|field| field.as_bytes().get(..2))
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"X-")))
+            {
+                let value = header.raw_value();
+                let (position, column) = header_byte_position(raw, start, raw.len() - value.len());
+                super::encoded_words::validate(
+                    value,
+                    address,
+                    position,
+                    column,
+                    self.options.context,
+                    self,
+                )?;
+            }
             if matches!(
                 header.id(),
                 HeaderId::ContentType | HeaderId::ContentDisposition

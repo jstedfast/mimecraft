@@ -13,8 +13,8 @@ use super::{
 use crate::{
     HeaderId, MimePosition,
     parse_utils::{
-        is_attribute, is_token, is_whitespace, skip_comment, skip_comments_and_whitespace,
-        skip_quoted, skip_whitespace,
+        is_attribute, is_whitespace, skip_comment, skip_comments_and_whitespace, skip_quoted,
+        skip_whitespace,
     },
 };
 
@@ -236,11 +236,8 @@ fn validate_encoded_value(mut value: &[u8], initial: bool) -> bool {
     true
 }
 
-fn is_encoded_word_token(byte: u8) -> bool {
-    is_token(byte) && byte != b'.'
-}
-
 fn contains_encoded_word(mut value: &[u8]) -> bool {
+    use super::encoded_words::is_encoded_word_token;
     #[derive(Clone, Copy, Eq, PartialEq)]
     enum State {
         Text,
@@ -440,11 +437,8 @@ pub(super) fn validate(
 }
 
 #[cfg(test)]
-#[path = "../../tests/support/allocation_tracking.rs"]
-mod allocation_tracking;
-
-#[cfg(test)]
 mod tests {
+    use super::super::allocation_tracking;
     use super::*;
     use std::time::Duration;
 

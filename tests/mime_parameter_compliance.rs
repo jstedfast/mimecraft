@@ -1086,13 +1086,16 @@ fn folded_positions_are_byte_based_and_account_for_raw_field_whitespace() {
 #[test]
 fn every_header_is_checked_and_parameters_are_independently_selectable() {
     assert_eq!(Validators::PARAMETERS.bits(), 16);
-    assert_eq!(Validators::ALL.bits(), 23);
+    assert_eq!(Validators::ENCODED_WORDS.bits(), 32);
+    assert_eq!(Validators::ALL.bits(), 55);
+    assert!(Validators::default().contains(Validators::ENCODED_WORDS));
     assert!(Validators::default().contains(Validators::PARAMETERS));
     assert_eq!(
         Validators::BASE64
             | Validators::QUOTED_PRINTABLE
             | Validators::UU_ENCODE
-            | Validators::PARAMETERS,
+            | Validators::PARAMETERS
+            | Validators::ENCODED_WORDS,
         Validators::ALL
     );
     for enabled_validators in [

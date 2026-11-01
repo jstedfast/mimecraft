@@ -16,6 +16,30 @@ mod rfc2231_parameters;
 #[path = "support/encoded_word_parameters.rs"]
 mod encoded_word_parameters;
 
+#[path = "support/encoded_words.rs"]
+mod encoded_words;
+
+#[test]
+fn header_encoded_words_survive_every_split() {
+    for (header, _, _) in encoded_words::headers() {
+        let text = format!("{header}\r\n\r\nbody\r\n");
+        assert_splits(
+            text.as_bytes(),
+            MimeEventFormat::Message,
+            Default::default(),
+        );
+    }
+    for text in [encoded_words::PRESERVED, encoded_words::POSITIONS] {
+        for format in [
+            MimeEventFormat::Entity,
+            MimeEventFormat::Message,
+            MimeEventFormat::Mbox,
+        ] {
+            assert_splits(text.as_bytes(), format, Default::default());
+        }
+    }
+}
+
 #[test]
 fn encoded_parameter_reporting_survives_every_split() {
     for &(parameters, _) in rfc2231_parameters::CASES
@@ -784,6 +808,14 @@ fn callbacks_and_logger_failures_are_terminal_and_preserve_errors() {
         (
             b"Content-Type: text/plain; name=\"=?utf-8?Q?file?=\"\r\n\r\nbody",
             Some(MimeComplianceViolation::EncodedWordInParameter),
+        ),
+        (
+            b"Subject: =?utf-8?Q?bad=GG?=\r\n\r\nbody",
+            Some(MimeComplianceViolation::InvalidEncodedWord),
+        ),
+        (
+            b"To: \"=?utf-8?Q?file?=\" <a@example.com>\r\n\r\nbody",
+            Some(MimeComplianceViolation::InvalidEncodedWordPlacement),
         ),
     ] {
         for split in 0..=wire.len() {

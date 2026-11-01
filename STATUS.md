@@ -1899,7 +1899,8 @@ Logger errors propagate unchanged, stop further events, and return no partial
 owned model. No strict-mode switch is introduced. Use `set_compliance_options`
 with `MimeComplianceOptions` to select transport/storage severity and a
 per-violation report cap (zero means unlimited). `enabled_validators` selects
-`MimeComplianceValidators::BASE64`, `QUOTED_PRINTABLE`, `UU_ENCODE`, and `PARAMETERS`;
+`MimeComplianceValidators::BASE64`, `QUOTED_PRINTABLE`, `UU_ENCODE`, `PARAMETERS`,
+and `ENCODED_WORDS`;
 combine flags with `|`, use `ALL` (the default), or `NONE` to keep only
 structural and raw-byte checks. Disabling a validator changes reporting, not
 parsing or recovery. Budgets reset per operation,
@@ -1909,7 +1910,7 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `b7b8585b`. Numeric identifiers
+and remarks are ported through MimeKit commit `1044247a`. Numeric identifiers
 match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
@@ -1964,13 +1965,26 @@ Repeated Content-Disposition headers are structural checks, enabled even with
 decoded parameters, message bodies, or serialization. Upstream declaration,
 position, malformed-input, budget, and bounded-scan regressions cover synchronous
 and chunked input; sans-I/O checks also cover input splits. `PARAMETERS` keeps
-MimeKit's bit value 16; `ALL` includes implemented bits only (23).
+MimeKit's bit value 16; `ENCODED_WORDS` is 32, and `ALL` includes implemented bits
+only (55).
 
 Quoted-printable literal runs use bulk byte searches; UU scanning skips whole
 runs where classification is no longer needed. Base64 validation currently uses
 MimeKit's table-driven scalar logic, not its separate SIMD validator kernels.
-Deep address validation is not yet ported. An empty report is not a guarantee
-of full MIME compliance.
+`ENCODED_WORDS` independently checks RFC 2047 syntax in address headers, Subject,
+Comments, Content-Description, and X- fields. `InvalidEncodedWord` covers envelopes,
+B/Q payloads, the 75-byte limit, separation, and phrase/comment restrictions.
+`InvalidEncodedWordPlacement` reports complete envelopes in quoted strings and
+addr-specs, even when their payloads are malformed; incomplete addr-spec lookalikes
+are left alone. Positions identify each candidate's start. The scanner neither
+looks up charsets nor decodes text, and leaves tolerant parsing and serialization
+unchanged. Bounded word lookahead and cached address range classification avoid
+unbounded rescanning or allocating decoded names and address trees. Only malformed
+lists that re-enter complex lookahead regions allocate a suffix index, with
+storage proportional to the header value length; ordinary scans allocate none.
+
+Deep address syntax validation (`ADDRESS`) is not yet ported. An empty report is
+not a guarantee of full MIME compliance.
 
 Accepting a diagnostic preserves the same default recovery as an unlogged read.
 Source, callback, logger, and resource-limit failures remain fatal. Ordinary methods

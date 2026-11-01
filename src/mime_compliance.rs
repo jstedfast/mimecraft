@@ -4,10 +4,15 @@
 
 use std::{fmt, io, ops};
 
+mod encoded_words;
 mod encoding;
 mod parameters;
 mod reporting;
 mod violation;
+
+#[cfg(test)]
+#[path = "../tests/support/allocation_tracking.rs"]
+mod allocation_tracking;
 
 pub(crate) use reporting::{HeaderEnd, Reporting};
 pub use violation::MimeComplianceViolation;
@@ -182,8 +187,12 @@ impl MimeComplianceValidators {
     /// RFC 2231 encoded values, and missing continuation segments in Content-Type
     /// and Content-Disposition headers.
     pub const PARAMETERS: Self = Self(16);
+    /// Validate RFC 2047 syntax in address headers, Subject, Comments,
+    /// Content-Description, and X- headers, including prohibited address placement.
+    /// Independent of MIME parameter validation; does not change address recovery.
+    pub const ENCODED_WORDS: Self = Self(32);
     /// All currently implemented validators.
-    pub const ALL: Self = Self(7 | 16);
+    pub const ALL: Self = Self(7 | 16 | 32);
 
     /// Returns the underlying validator bits.
     pub const fn bits(self) -> u8 {

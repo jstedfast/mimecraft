@@ -656,9 +656,10 @@ impl<R: BufRead> MimeReader<R> {
     /// MIME metadata, framing/depth failures, and body line format/null/high bytes.
     /// Headers are checked after their block completes, before entity-begin.
     /// Body checks are incremental and do not retain content. Base64,
-    /// quoted-printable, and UU validators run by default; select them with
-    /// [`MimeComplianceOptions::enabled_validators`]. Deep address validation
-    /// is not yet implemented.
+    /// quoted-printable, UU, MIME parameter, and header encoded-word validators
+    /// run by default; select them with [`MimeComplianceOptions::enabled_validators`].
+    /// Address encoded-word placement is checked, but deep address syntax
+    /// validation is not yet implemented.
     ///
     /// Encoded bytes are checked without decoding or repairing them. Validators
     /// finish before the part's end event; they inspect the newline preceding a
