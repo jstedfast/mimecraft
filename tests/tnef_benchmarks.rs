@@ -24,6 +24,19 @@ mod rtf_compressed_workloads;
 #[path = "../benches/support/rtf_compressed_writer.rs"]
 mod rtf_writer_workloads;
 
+#[path = "../benches/support/tnef_writer.rs"]
+mod writer_workloads;
+
+#[test]
+fn tnef_writer_workloads_match_independent_framing_and_full_content() {
+    for name in writer_workloads::CASES {
+        let case = writer_workloads::workload(name);
+        assert_eq!(case.name, name);
+        assert!(case.output_length > 40);
+        case.check();
+    }
+}
+
 #[test]
 fn compressed_rtf_writer_workloads_match_headers_crc_and_full_content() {
     for name in rtf_writer_workloads::CASES {

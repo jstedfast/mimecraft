@@ -1,7 +1,7 @@
-// Adapted from MimeKit's Tnef attribute, options, and compliance types.
+// Adapted from MimeKit's Tnef attribute, options, compliance, and checksum types.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-//! Synchronous, forward-only TNEF attribute reading.
+//! Synchronous, forward-only TNEF attribute reading and writing.
 //!
 //! Raw attribute values, checksums, and framing diagnostics are supported.
 //! MAPI properties and recipient rows support forward-only, bounded value reads
@@ -12,6 +12,7 @@
 //! Owned text/HTML/RTF bodies provide repeatable readers and checked text decoding.
 //! Owned attachment models expose checked metadata, raw content, and detached readers.
 //! Whole-message loading maps legacy metadata, selects bodies, and groups attachments.
+//! Attribute writing enforces ordering and supplies framing, codepage, and checksums.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
@@ -32,6 +33,7 @@ mod recipient;
 mod rtf_compressed;
 mod rtf_compressed_writer;
 mod value_conversion;
+mod writer;
 pub use attachment::{TnefAttachFlags, TnefAttachMethod, TnefAttachment, TnefAttachmentContent};
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
 pub use message::TnefMessage;
@@ -46,6 +48,20 @@ pub use recipient::{TnefRecipient, TnefRecipientType};
 pub use rtf_compressed::{RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError};
 pub use rtf_compressed_writer::RtfCompressedWriter;
 pub use value_conversion::TnefValueConversionError;
+pub use writer::TnefWriter;
+
+const SIGNATURE: u32 = 0x223e9f78;
+const VERSION: u32 = 0x00010000;
+
+fn checksum(previous: u16, bytes: &[u8]) -> u16 {
+    // Addition modulo 65536 is associative. Accumulate at full width and
+    // truncate once per bounded block, not after each byte. A 64 KiB block
+    // sums to at most 65536 * 255, so no u32 accumulator can overflow.
+    bytes.chunks(65536).fold(previous, |sum, block| {
+        let block_sum: u32 = block.iter().map(|&byte| u32::from(byte)).sum();
+        sum.wrapping_add(block_sum as u16)
+    })
+}
 
 /// The object to which an attribute belongs, preserving unrecognized bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

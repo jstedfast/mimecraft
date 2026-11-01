@@ -15,9 +15,10 @@ use std::{
 use crate::charsets::{self, Charset};
 
 use super::{
-    TnefAttribute, TnefAttributeLevel as Level, TnefAttributeTag as Tag, TnefAttributeType as Type,
-    TnefComplianceIssue, TnefComplianceLogger, TnefComplianceViolation as Violation, TnefDateTime,
-    TnefDateTimeError, TnefReadError, TnefReaderOptions,
+    SIGNATURE, TnefAttribute, TnefAttributeLevel as Level, TnefAttributeTag as Tag,
+    TnefAttributeType as Type, TnefComplianceIssue, TnefComplianceLogger,
+    TnefComplianceViolation as Violation, TnefDateTime, TnefDateTimeError, TnefReadError,
+    TnefReaderOptions, VERSION, checksum,
 };
 
 pub(super) fn decode_string(charset: Charset, bytes: &[u8]) -> Cow<'_, str> {
@@ -696,7 +697,7 @@ impl<R: Read> TnefReader<R> {
             }
             let signature =
                 u32::from_le_bytes(self.input[self.index..self.index + 4].try_into().unwrap());
-            if signature != 0x223e9f78 {
+            if signature != SIGNATURE {
                 // A wrong signature is not TNEF; nothing meaningful remains.
                 self.log(logger, Violation::InvalidSignature, self.position)?;
                 return Ok(self.end_iteration());
@@ -791,7 +792,7 @@ impl<R: Read> TnefReader<R> {
                         self.input[self.index..self.index + 4].try_into().unwrap(),
                     );
                     if tag == Tag::TNEF_VERSION {
-                        if value != 0x00010000 {
+                        if value != VERSION {
                             self.log(logger, Violation::UnsupportedVersion, offset)?;
                         }
                     } else if value != 0 {
@@ -1043,14 +1044,4 @@ impl<R: Read> Read for TnefValueReader<'_, R> {
                 error => io::Error::other(error),
             })
     }
-}
-
-fn checksum(previous: u16, bytes: &[u8]) -> u16 {
-    // Addition modulo 65536 is associative. Accumulate at full width and
-    // truncate once per bounded block, not after each byte. A 64 KiB block
-    // sums to at most 65536 * 255, so no u32 accumulator can overflow.
-    bytes.chunks(65536).fold(previous, |sum, block| {
-        let block_sum: u32 = block.iter().map(|&byte| u32::from(byte)).sum();
-        sum.wrapping_add(block_sum as u16)
-    })
 }

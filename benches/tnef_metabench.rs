@@ -29,6 +29,26 @@ mod rtf_compressed_workloads;
 #[path = "support/rtf_compressed_writer.rs"]
 mod rtf_writer_workloads;
 
+#[path = "support/tnef_writer.rs"]
+mod writer_workloads;
+
+fn prepare_writer(name: &'static str) -> writer_workloads::Workload {
+    let case = writer_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(WRITER, "tnef-writer", "Write")]
+#[bench::Typed(&prepare_writer("Typed"))]
+#[bench::ManySmall(&prepare_writer("ManySmall"))]
+#[bench::LargeValue(&prepare_writer("LargeValue"))]
+#[bench::Stream(&prepare_writer("Stream"))]
+#[bench::ShortReads(&prepare_writer("ShortReads"))]
+#[bench::ShortWrites(&prepare_writer("ShortWrites"))]
+fn write(case: &writer_workloads::Workload) -> writer_workloads::Summary {
+    writer_workloads::write(case)
+}
+
 fn prepare_rtf_writer(name: &'static str) -> rtf_writer_workloads::Workload {
     let case = rtf_writer_workloads::workload(name);
     case.check();
@@ -344,6 +364,15 @@ fn collect(case: &Workload) -> Summary {
 }
 
 fn criterion_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("tnef-writer");
+    for name in writer_workloads::CASES {
+        let case = prepare_writer(name);
+        group.throughput(Throughput::Bytes(case.output_length as u64));
+        group.bench_function(BenchmarkId::new("Write", name), |b| {
+            b.iter(|| writer_workloads::write(&case));
+        });
+    }
+    group.finish();
     let mut group = criterion.benchmark_group("tnef");
     for name in workloads::CASES {
         let case = prepare(name);
@@ -477,6 +506,7 @@ metabench::main!(
         RECIPIENT_ACCESS,
         RTF_COMPRESSED,
         RTF_WRITER,
+        WRITER,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

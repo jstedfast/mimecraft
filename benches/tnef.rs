@@ -29,6 +29,9 @@ mod rtf_compressed_workloads;
 #[path = "support/rtf_compressed_writer.rs"]
 mod rtf_writer_workloads;
 
+#[path = "support/tnef_writer.rs"]
+mod writer_workloads;
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -61,6 +64,23 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
 }
 
 fn main() {
+    println!(
+        "TNEF writing includes a fresh writer, growing sink, framing/checksums, finalization, output observation, and drop."
+    );
+    println!(
+        "Throughput counts complete serialized output bytes once; Stream uses a 4 KiB buffer, ShortReads/ShortWrites seven-byte I/O."
+    );
+    for name in writer_workloads::CASES {
+        let case = writer_workloads::workload(name);
+        case.check();
+        measure(
+            &format!("TnefWriter/Write/{}", case.name),
+            case.output_length,
+            || {
+                black_box(writer_workloads::write(&case));
+            },
+        );
+    }
     println!(
         "RTF writing includes a fresh encoder/sink, headers, CRC, finalization, and output drop."
     );
