@@ -1,4 +1,4 @@
-// Adapted from MimeKit's TnefReader.cs and TnefPropertyReader.cs.
+// Adapted from MimeKit's TnefReader.cs, TnefPropertyReader.cs, and TnefAttachment.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
@@ -7,6 +7,80 @@ use std::{
 };
 
 use super::{Logger, TnefDateTime, TnefPropertyReader, TnefReadError, TnefReader, TnefValueReader};
+use crate::{charsets::Charset, tnef::TnefReaderOptions};
+
+/// Owned serialized content of an embedded TNEF message, not a parsed message.
+///
+/// Collected with [`TnefPropertyReader::read_embedded_content`]. The content
+/// survives the parent reader, input, and logger. Independent readers retain
+/// the original nesting depth, absolute stream offsets, charset, and options.
+/// Each reader has its own byte/report budgets and fault state; borrowed
+/// descendants of that reader share those new budgets as usual.
+///
+/// Unlike a borrowed embedded reader, this object does not retain the parent's
+/// logger. Pass a logger to the detached reader's `*_with_logger` operations.
+/// Collection does not validate the embedded signature or either the enclosing
+/// or nested checksums. Advance each respective reader to validate its checksum.
+#[derive(Clone, Debug)]
+pub struct TnefEmbeddedContent {
+    bytes: Vec<u8>,
+    options: TnefReaderOptions,
+    charset: Charset,
+    codepage: u32,
+    depth: usize,
+    position: u64,
+}
+
+impl TnefEmbeddedContent {
+    pub(super) fn new<R: Read>(
+        parent: &TnefReader<R>,
+        bytes: Vec<u8>,
+        position: u64,
+    ) -> Result<Self, TnefReadError> {
+        // Capture the state needed to load the embedded message on demand.
+        // The interface IID is not part of the detached message's content.
+        let position = position
+            .checked_add(bytes.len().min(16) as u64)
+            .ok_or(TnefReadError::PositionOverflow)?;
+        Ok(Self {
+            bytes,
+            options: parent.options,
+            charset: parent.charset,
+            codepage: parent.codepage,
+            depth: parent.depth + 1,
+            position,
+        })
+    }
+
+    /// The serialized message, excluding the 16-byte interface IID and padding.
+    ///
+    /// Truncated collection may return a partial message, or an empty slice if
+    /// the IID itself was incomplete. Reading it reports malformed framing via
+    /// the detached reader's usual diagnostics.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[self.bytes.len().min(16)..]
+    }
+
+    /// Opens an independent reader without allocating or reading any input.
+    ///
+    /// The embedded message may be read any number of times. Readers borrow
+    /// only this immutable content, never the original parent reader.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`TnefReader::with_options`] configuration errors. The saved
+    /// options have already been validated by the parent reader.
+    pub fn open_reader(&self) -> Result<TnefReader<&[u8]>, TnefReadError> {
+        // Unlike an embedded reader over the live parent stream, a detached
+        // reader has its own data budget. Its buffered content excludes the IID.
+        let mut reader = TnefReader::with_options(self.as_bytes(), &self.options)?;
+        reader.charset = self.charset;
+        reader.codepage = self.codepage;
+        reader.depth = self.depth;
+        reader.position = self.position;
+        Ok(reader)
+    }
+}
 
 pub(super) trait EmbeddedInput {
     fn read_embedded(&mut self, buffer: &mut [u8]) -> io::Result<usize>;

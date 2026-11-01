@@ -81,7 +81,7 @@ pub use property::{TnefPropertyReader, TnefPropertyValueReader};
 
 #[path = "embedded.rs"]
 mod embedded;
-pub use embedded::{TnefEmbeddedReader, TnefEmbeddedSource};
+pub use embedded::{TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Claim {

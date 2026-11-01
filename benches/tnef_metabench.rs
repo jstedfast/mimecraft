@@ -94,6 +94,15 @@ fn embedded(case: &embedded_workloads::Workload) -> embedded_workloads::Summary 
     embedded_workloads::read(case)
 }
 
+#[metabench::benchmark(DETACHED, "tnef-embedded", "Detached")]
+#[bench::Single(&prepare_embedded("Single"))]
+#[bench::Deep(&prepare_embedded("Deep"))]
+#[bench::Siblings(&prepare_embedded("Siblings"))]
+#[bench::ShortReads(&prepare_embedded("ShortReads"))]
+fn detached(case: &embedded_workloads::Workload) -> embedded_workloads::Summary {
+    embedded_workloads::read_detached(case)
+}
+
 fn prepare_dates(name: &'static str) -> date_workloads::Workload {
     let case = date_workloads::workload(name);
     case.check();
@@ -249,6 +258,9 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         group.bench_function(BenchmarkId::new("Read", name), |b| {
             b.iter(|| embedded_workloads::read(&case));
         });
+        group.bench_function(BenchmarkId::new("Detached", name), |b| {
+            b.iter(|| embedded_workloads::read_detached(&case));
+        });
     }
     group.finish();
     let mut group = criterion.benchmark_group("tnef-conversions");
@@ -295,6 +307,7 @@ metabench::main!(
         PROPERTY_SET,
         DATES,
         EMBEDDED,
+        DETACHED,
         CONVERSIONS,
         RECIPIENT_LOAD,
         RECIPIENT_ACCESS,

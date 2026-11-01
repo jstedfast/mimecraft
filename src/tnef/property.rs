@@ -1,7 +1,7 @@
 // Adapted from MimeKit's TnefPropertyReader.cs and TnefReaderStream.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use super::embedded::{EmbeddedInput, TnefEmbeddedReader, TnefEmbeddedSource};
+use super::embedded::{EmbeddedInput, TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 use super::{Logger, TnefReader};
 use crate::tnef::{
     TnefAttributeLevel, TnefAttributeTag, TnefComplianceViolation as Violation, TnefName,
@@ -150,16 +150,7 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
     /// empty-reader fallback, exceeding the depth limit reports `NestingTooDeep`
     /// and returns `NestingLimitExceeded`, leaving raw streaming/skipping usable.
     pub fn open_embedded_message(&mut self) -> Result<TnefEmbeddedReader<'_, 'a>, Error> {
-        self.check_variable()?;
-        if !self.is_embedded_message() {
-            return Err(Error::NotEmbeddedMessage);
-        }
-        if self.reader.depth >= self.reader.options.max_nesting_depth {
-            self.run(|properties| {
-                properties.log(Violation::NestingTooDeep, properties.reader.position)
-            })?;
-            return Err(Error::NestingLimitExceeded);
-        }
+        self.check_embedded_message()?;
         let depth = self.reader.depth + 1;
         let position = self.reader.position;
         let options = self.reader.options;
@@ -179,6 +170,48 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
         reader.codepage = codepage;
         Ok(TnefEmbeddedReader { reader, logger })
     }
+
+    /// Collects the selected embedded message for independent, repeatable reads.
+    ///
+    /// Collection charges the complete raw value, including its IID, against
+    /// the parent's per-value and shared total-byte limits. The content retains
+    /// the current charset, options, depth, and original stream offsets, but
+    /// not the parent or its logger. Detached readers get fresh byte/report
+    /// budgets and independent fault state.
+    ///
+    /// As with raw collection, physical truncation returns partial bytes and
+    /// reports it through this property reader's logger. The embedded signature
+    /// and structure are validated only when a detached reader advances.
+    /// Recognition follows [`is_embedded_message`](Self::is_embedded_message):
+    /// Binary AttachData requires an already-read AttachMethod of 5.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`open_embedded_message`](Self::open_embedded_message) selection
+    /// and depth errors, and [`read_value_bytes`](Self::read_value_bytes) limits
+    /// and I/O errors. Depth/value limits leave the value unclaimed, allowing
+    /// raw streaming or skipping; source/logger errors fault the parent.
+    pub fn read_embedded_content(&mut self) -> Result<TnefEmbeddedContent, Error> {
+        self.check_embedded_message()?;
+        let position = self.reader.position;
+        let bytes = self.read_value_bytes()?;
+        self.run(|properties| TnefEmbeddedContent::new(properties.reader, bytes, position))
+    }
+
+    fn check_embedded_message(&mut self) -> Result<(), Error> {
+        self.check_variable()?;
+        if !self.is_embedded_message() {
+            return Err(Error::NotEmbeddedMessage);
+        }
+        if self.reader.depth >= self.reader.options.max_nesting_depth {
+            self.run(|properties| {
+                properties.log(Violation::NestingTooDeep, properties.reader.position)
+            })?;
+            return Err(Error::NestingLimitExceeded);
+        }
+        Ok(())
+    }
+
     /// Whether malformed structure made subsequent property boundaries unknowable.
     pub fn is_stopped(&self) -> bool {
         self.stopped

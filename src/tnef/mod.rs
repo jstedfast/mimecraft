@@ -10,6 +10,7 @@
 //! Compressed RTF decoding is available as an incremental filter with explicit validation.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
+//! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
 //! supply a fallible logger to stop at the first reported issue.
 
@@ -28,7 +29,7 @@ pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{
     TnefName, TnefNameId, TnefPropertyInfo, TnefPropertyTag, TnefPropertyType, TnefValue,
 };
-pub use reader::{TnefEmbeddedReader, TnefEmbeddedSource};
+pub use reader::{TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 pub use reader::{TnefPropertyReader, TnefPropertyValueReader, TnefReader, TnefValueReader};
 pub use recipient::{TnefRecipient, TnefRecipientType};
 pub use rtf_compressed::{RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError};

@@ -113,17 +113,20 @@ fn child(reader: &mut TnefEmbeddedReader<'_, '_>, result: &mut Summary) {
             properties(&mut reader.open_properties().unwrap(), result);
         } else {
             assert_eq!(reader.attribute().unwrap().tag, Attribute::BODY);
-            let mut stream = reader.open_value().unwrap();
-            let mut buffer = [0; 4096];
-            loop {
-                let count = stream.read(&mut buffer).unwrap();
-                if count == 0 {
-                    break;
-                }
-                result.body_bytes += count;
-                result.body_sum += buffer[..count].iter().map(|&b| u64::from(b)).sum::<u64>();
-            }
+            body(&mut reader.open_value().unwrap(), result);
         }
+    }
+}
+
+fn body(stream: &mut impl Read, result: &mut Summary) {
+    let mut buffer = [0; 4096];
+    loop {
+        let count = stream.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        result.body_bytes += count;
+        result.body_sum += buffer[..count].iter().map(|&b| u64::from(b)).sum::<u64>();
     }
 }
 
@@ -147,8 +150,40 @@ pub fn read(case: &Workload) -> Summary {
     result
 }
 
+fn detached<R: Read>(reader: &mut TnefReader<R>, result: &mut Summary) {
+    let mut logger = |issue| panic!("invalid detached benchmark input: {issue:?}");
+    result.messages += 1;
+    while reader.read_next_with_logger(&mut logger).unwrap() {
+        result.attributes += 1;
+        if reader.attribute().unwrap().tag == Attribute::ATTACHMENT {
+            let mut properties = reader.open_properties_with_logger(&mut logger).unwrap();
+            while properties.read_next_property().unwrap() {
+                let content = properties.read_embedded_content().unwrap();
+                detached(&mut content.open_reader().unwrap(), result);
+            }
+        } else {
+            assert_eq!(reader.attribute().unwrap().tag, Attribute::BODY);
+            body(
+                &mut reader.open_value_with_logger(&mut logger).unwrap(),
+                result,
+            );
+        }
+    }
+}
+
+pub fn read_detached(case: &Workload) -> Summary {
+    let mut reader = TnefReader::new(Source {
+        input: black_box(&case.input),
+        chunk: case.chunk,
+    });
+    let mut result = Summary::default();
+    detached(&mut reader, &mut result);
+    result
+}
+
 impl Workload {
     pub fn check(&self) {
         assert_eq!(read(self), self.expected, "{}", self.name);
+        assert_eq!(read_detached(self), self.expected, "detached/{}", self.name);
     }
 }

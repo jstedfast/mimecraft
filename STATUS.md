@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Incremental compressed-RTF decoding is available with explicit validation. Message/attachment models, detached embedded readers, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection/accessor, recipient-model, date, recursive-reader, and compressed-RTF benchmarks cover the implemented layers. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Incremental compressed-RTF decoding is available with explicit validation. Message/attachment models, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection/accessor, recipient-model, date, borrowed/detached recursive-reader, and compressed-RTF benchmarks cover the implemented layers. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9313,7 +9313,39 @@ with identical attribute offsets/depths and diagnostics across one-byte,
 seven-byte, and full refills. A compile-fail doctest checks the parent borrow.
 These tests do not claim detached-reader or message-model parity.
 
-Detached embedded readers, direct typed numeric cursor methods,
+`read_embedded_content` collects a recognized embedded property into owned
+`TnefEmbeddedContent`. Collection charges the raw value, including its IID,
+against the parent's per-value and shared total-byte budgets. A limit error
+leaves it unclaimed for raw streaming/skipping. `as_bytes` excludes the IID and
+padding; short/truncated input retains available message bytes, with normal
+reader diagnostics rather than synthesized valid content. Signature and nested
+checksum validation remain deferred until a detached reader advances.
+
+`TnefEmbeddedContent::open_reader` borrows only the immutable owned bytes, not
+the original source, reader, or logger. Multiple independent readers can coexist
+and the message can be reopened repeatedly. Each reader retains the captured
+charset, codepage, options, depth, and absolute offsets, but starts with its own
+byte/report budgets and fault state, as in MimeKit's detached reader. Borrowed
+descendants share that new reader's budgets. Detaching never refunds the parent's
+collection charge or resets nesting depth. The depth check occurs during
+collection and returns the same explicit error as borrowed opening.
+
+The type adapts `TnefEmbeddedMessageContext` in `TnefAttachment.cs` and
+`TnefReader.CreateDetached`, retaining their applicable inline comments.
+Rust cannot retain the parent's borrowed callback after it is dropped:
+detached operations take an explicit logger through the existing
+`*_with_logger` APIs. Content and its slice-backed readers are Send/Sync.
+Opening a reader does not allocate or consume input. This is serialized content,
+not the still-unported parsed message/attachment model.
+
+`tests/tnef_properties/detached.rs` adapts upstream repeat-load and nesting
+cases from `TnefMessageTests`, with Rust ownership, concurrent cursor, physical
+truncation, prefix/padding, charset, checksum, budget, claim, and logger/source
+failure regressions. Binary recognition still requires AttachMethod to have
+already been read: retrospective recognition when that property follows the
+data belongs to the future attachment loader, not this forward-only cursor.
+
+Direct typed numeric cursor methods,
 the separate property-ID and named-property GUID/name catalogs,
 attachment/message models, MIME conversion, writing, async, and sans-I/O are deferred.
 Existing conversion snapshots are not presented as reader reference outputs.
@@ -10040,6 +10072,23 @@ The standalone executable's SHA-256 is
 All preceding raw/property/collection/date baseline artifacts remain preserved
 for the deferred sans-I/O work.
 
+Four additional `tnef-embedded/Detached` identities reuse the same generated
+inputs and independent expected counts/sums. They collect owned embedded content
+at every depth, open detached readers, stream bodies, validate checksums, and
+drop all content/readers within measurement. Each detached reader receives an
+explicit logger rejecting unexpected issues. `ShortReads` limits only the
+original source; detached sources are already in memory. Throughput still
+counts outer input bytes once, even though deeper content is copied and parsed
+at each level. Both the standalone and native/Criterion metabench harnesses
+include these cases; benchmark regression tests check both traversal modes.
+No upstream TNEF benchmark class exists in the current MimeKit checkout.
+
+The detached allocation measurements are 1 allocation/32,801 bytes for `Single`,
+8/263,864 for `Deep` and `ShortReads`, and 16/33,296 for `Siblings`.
+These are owned serialized buffers, including their IID prefixes; opening the
+slice-backed readers adds no allocations. Counts are cumulative, not peak
+retained memory. All 76 TNEF metabench smoke identities pass.
+
 #### TNEF owned property accessors
 
 `benches/support/tnef_conversions.rs` adds five generated cases to both TNEF
@@ -10211,7 +10260,7 @@ are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 38 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
-30 TNEF-property, five TNEF-date, four embedded-TNEF, five owned-TNEF-access,
+30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, and four compressed-RTF cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name

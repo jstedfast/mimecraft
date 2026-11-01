@@ -124,6 +124,9 @@ fn main() {
     }
     println!("Embedded messages: bounded recursive readers, inherited logger, and shared limits.");
     println!("Includes streaming bodies, checksums at every depth, and reader setup/destruction.");
+    println!(
+        "Detached also collects/drops owned content at every depth, with fresh child budgets."
+    );
     let cases: Vec<_> = embedded_workloads::CASES
         .into_iter()
         .map(embedded_workloads::workload)
@@ -137,6 +140,13 @@ fn main() {
             case.input.len(),
             || {
                 black_box(embedded_workloads::read(case));
+            },
+        );
+        measure(
+            &format!("Embedded/Detached/{}", case.name),
+            case.input.len(),
+            || {
+                black_box(embedded_workloads::read_detached(case));
             },
         );
     }

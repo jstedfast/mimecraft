@@ -7,6 +7,9 @@ use std::{cell::Cell, rc::Rc};
 
 const IID: [u8; 16] = [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 
+#[path = "detached.rs"]
+mod detached;
+
 fn object(id: u16, kind: Type, value: &[u8]) -> Vec<u8> {
     let mut bytes = fixed(id, kind, &[]);
     dword(&mut bytes, 1);
@@ -59,6 +62,10 @@ fn iid_detection_precedes_method_and_never_claims_raw_bytes() {
                             props.open_embedded_message(),
                             Err(Error::NoPropertyValue)
                         ));
+                        assert!(matches!(
+                            props.read_embedded_content(),
+                            Err(Error::NoPropertyValue)
+                        ));
                         if method.is_some() {
                             assert!(props.read_next_property().unwrap());
                             assert!(!props.is_embedded_message());
@@ -76,6 +83,10 @@ fn iid_detection_precedes_method_and_never_claims_raw_bytes() {
                                 props.open_embedded_message(),
                                 Err(Error::NotEmbeddedMessage)
                             ));
+                            assert!(matches!(
+                                props.read_embedded_content(),
+                                Err(Error::NotEmbeddedMessage)
+                            ));
                         }
                         let position = props.position();
                         assert!(!props.is_value_consumed());
@@ -83,6 +94,10 @@ fn iid_detection_precedes_method_and_never_claims_raw_bytes() {
                         assert_eq!(props.position(), position + value.len() as u64);
                         assert!(matches!(
                             props.open_embedded_message(),
+                            Err(Error::ValueAlreadyRead)
+                        ));
+                        assert!(matches!(
+                            props.read_embedded_content(),
                             Err(Error::ValueAlreadyRead)
                         ));
                         assert!(props.read_next_property().unwrap());
