@@ -412,6 +412,40 @@ impl<R: Read> TnefReader<R> {
         self.bytes_core(&mut Logger::Borrowed(logger))
     }
 
+    /// Collects the legacy Body attribute as an owned String8 message body.
+    ///
+    /// # Errors
+    ///
+    /// Rejects other attribute tags before collection; otherwise shares
+    /// [`read_value_bytes`](Self::read_value_bytes) errors and limits.
+    pub fn read_body(&mut self) -> Result<super::TnefMessageBody, TnefReadError> {
+        self.body_core(&mut Logger::None)
+    }
+
+    /// Collects a legacy body with explicit framing/limit diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`read_body`](Self::read_body) errors; logger errors fault the reader.
+    pub fn read_body_with_logger(
+        &mut self,
+        logger: &mut dyn TnefComplianceLogger,
+    ) -> Result<super::TnefMessageBody, TnefReadError> {
+        self.body_core(&mut Logger::Borrowed(logger))
+    }
+
+    fn body_core(
+        &mut self,
+        logger: &mut Logger<'_>,
+    ) -> Result<super::TnefMessageBody, TnefReadError> {
+        let tag = self.check_unclaimed()?.tag;
+        if tag != Tag::BODY {
+            return Err(TnefReadError::InvalidValueType(tag));
+        }
+        let bytes = self.bytes_core(logger)?;
+        super::TnefMessageBody::new(super::TnefPropertyTag::BODY_A, bytes, self.charset)
+    }
+
     /// Reads a string with the current codepage, trimming trailing NUL bytes.
     /// Invalid byte sequences are replaced as in MimeKit's default encodings.
     ///

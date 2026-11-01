@@ -125,7 +125,7 @@ pub const CASES: [&str; 4] = ["Literals", "References", "Uncompressed", "ShortCh
 pub struct Workload {
     pub name: &'static str,
     pub input: Vec<u8>,
-    expected: Vec<u8>,
+    pub expected: Vec<u8>,
     chunk: usize,
 }
 

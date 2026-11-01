@@ -188,6 +188,15 @@ impl<'p> TnefEmbeddedReader<'p, '_> {
         self.reader.bytes_core(&mut self.logger)
     }
 
+    /// Collects a legacy body with inherited diagnostics and shared limits.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`TnefReader::read_body`] errors and limits.
+    pub fn read_body(&mut self) -> Result<crate::tnef::TnefMessageBody, TnefReadError> {
+        self.reader.body_core(&mut self.logger)
+    }
+
     /// Collects and decodes an attribute string using this message's charset.
     ///
     /// # Errors

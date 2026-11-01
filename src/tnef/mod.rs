@@ -8,6 +8,8 @@
 //! and owned snapshots and ordered sets with explicit typed conversions.
 //! Owned recipient models preserve their complete rows and expose checked fields.
 //! Compressed RTF decoding is available as an incremental filter with explicit validation.
+//! Owned text/HTML/RTF bodies provide repeatable readers and checked text decoding.
+//! Full message loading and body selection are not yet implemented.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
@@ -17,6 +19,7 @@
 use std::{error::Error, fmt, io};
 
 mod date_time;
+mod message_body;
 mod property_set;
 mod property_tags;
 mod property_types;
@@ -25,6 +28,7 @@ mod recipient;
 mod rtf_compressed;
 mod value_conversion;
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
+pub use message_body::{TnefBodyError, TnefBodyReader, TnefMessageBody, TnefMessageBodyFormat};
 pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{
     TnefName, TnefNameId, TnefPropertyInfo, TnefPropertyTag, TnefPropertyType, TnefValue,

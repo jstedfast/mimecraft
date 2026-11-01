@@ -26,6 +26,45 @@ mod recipient_workloads;
 #[path = "support/rtf_compressed.rs"]
 mod rtf_compressed_workloads;
 
+#[path = "support/tnef_bodies.rs"]
+mod body_workloads;
+
+fn prepare_body(name: &'static str) -> body_workloads::Workload {
+    let case = body_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(BODY_CONSTRUCT, "tnef-bodies", "Construct")]
+#[bench::String8(&prepare_body("String8"))]
+#[bench::Unicode(&prepare_body("Unicode"))]
+#[bench::Html(&prepare_body("Html"))]
+#[bench::CompressedRtf(&prepare_body("CompressedRtf"))]
+#[bench::UncompressedRtf(&prepare_body("UncompressedRtf"))]
+fn body_construct(case: &body_workloads::Workload) -> body_workloads::Summary {
+    body_workloads::read(case, body_workloads::Mode::Construct)
+}
+
+#[metabench::benchmark(BODY_STREAM, "tnef-bodies", "Stream")]
+#[bench::String8(&prepare_body("String8"))]
+#[bench::Unicode(&prepare_body("Unicode"))]
+#[bench::Html(&prepare_body("Html"))]
+#[bench::CompressedRtf(&prepare_body("CompressedRtf"))]
+#[bench::UncompressedRtf(&prepare_body("UncompressedRtf"))]
+fn body_stream(case: &body_workloads::Workload) -> body_workloads::Summary {
+    body_workloads::read(case, body_workloads::Mode::Stream)
+}
+
+#[metabench::benchmark(BODY_TEXT, "tnef-bodies", "Text")]
+#[bench::String8(&prepare_body("String8"))]
+#[bench::Unicode(&prepare_body("Unicode"))]
+#[bench::Html(&prepare_body("Html"))]
+#[bench::CompressedRtf(&prepare_body("CompressedRtf"))]
+#[bench::UncompressedRtf(&prepare_body("UncompressedRtf"))]
+fn body_text(case: &body_workloads::Workload) -> body_workloads::Summary {
+    body_workloads::read(case, body_workloads::Mode::Text)
+}
+
 fn prepare_rtf_compressed(name: &'static str) -> rtf_compressed_workloads::Workload {
     let case = rtf_compressed_workloads::workload(name);
     case.check();
@@ -292,6 +331,17 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         });
     }
     group.finish();
+    let mut group = criterion.benchmark_group("tnef-bodies");
+    for name in body_workloads::CASES {
+        let case = prepare_body(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        for mode in body_workloads::MODES {
+            group.bench_function(BenchmarkId::new(mode.name(), name), |b| {
+                b.iter(|| body_workloads::read(&case, mode));
+            });
+        }
+    }
+    group.finish();
 }
 
 metabench::main!(
@@ -311,6 +361,9 @@ metabench::main!(
         CONVERSIONS,
         RECIPIENT_LOAD,
         RECIPIENT_ACCESS,
-        RTF_COMPRESSED
+        RTF_COMPRESSED,
+        BODY_CONSTRUCT,
+        BODY_STREAM,
+        BODY_TEXT
     ]
 );

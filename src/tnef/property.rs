@@ -4,9 +4,10 @@
 use super::embedded::{EmbeddedInput, TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 use super::{Logger, TnefReader};
 use crate::tnef::{
-    TnefAttributeLevel, TnefAttributeTag, TnefComplianceViolation as Violation, TnefName,
-    TnefNameId, TnefProperty, TnefPropertyInfo, TnefPropertySet, TnefPropertyTag as Tag,
-    TnefPropertyType as Type, TnefReadError as Error, TnefValue, property_types::Width,
+    TnefAttributeLevel, TnefAttributeTag, TnefComplianceViolation as Violation, TnefMessageBody,
+    TnefMessageBodyFormat, TnefName, TnefNameId, TnefProperty, TnefPropertyInfo, TnefPropertySet,
+    TnefPropertyTag as Tag, TnefPropertyType as Type, TnefReadError as Error, TnefValue,
+    property_types::Width,
 };
 use std::io::{self, Read};
 
@@ -378,6 +379,24 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
             Type::OBJECT => TnefValue::Object(bytes),
             _ => TnefValue::Binary(bytes),
         })
+    }
+
+    /// Collects the selected Body, BodyHtml, or RtfCompressed value as an owned
+    /// body, retaining the current message charset. Binary HTML's charset is
+    /// initially unknown; apply final message charsets after reading metadata.
+    /// Selection/collection does not choose among duplicate or legacy bodies.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nonbody and multivalued tags before claiming any bytes. Otherwise
+    /// shares [`read_value_bytes`](Self::read_value_bytes) errors and limits.
+    pub fn read_body(&mut self) -> Result<TnefMessageBody, Error> {
+        let tag = self.check_value()?;
+        if TnefMessageBodyFormat::from_tag(tag).is_none() {
+            return Err(Error::InvalidPropertyType(tag));
+        }
+        let content = self.read_value_bytes()?;
+        TnefMessageBody::new(tag, content, self.reader.charset)
     }
 
     /// Collects the raw bytes of a string, binary, or object value, without

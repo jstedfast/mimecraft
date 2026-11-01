@@ -34,6 +34,46 @@ fn attachment_attribute(bytes: &mut Vec<u8>, kind: Attribute, data: &[u8]) {
 }
 
 #[test]
+fn owned_bodies_inherit_embedded_charset_logger_and_shared_budget() {
+    let mut leaf = document(Attribute::OEM_CODEPAGE, &1252i32.to_le_bytes());
+    attribute(&mut leaf, Attribute::BODY, b"Caf\xe9\0");
+    attribute(&mut leaf, Attribute::BODY, b"!");
+    let input = wrap(&leaf);
+    let options = TnefReaderOptions {
+        max_total_data_bytes: 5,
+        ..Default::default()
+    };
+    let mut reader = TnefReader::with_options(input.as_slice(), &options).unwrap();
+    assert!(reader.read_next().unwrap());
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut logger = |issue| {
+        issues.push(issue);
+        Ok(())
+    };
+    let body;
+    {
+        let mut props = reader.open_properties_with_logger(&mut logger).unwrap();
+        assert!(props.read_next_property().unwrap());
+        {
+            let mut child = props.open_embedded_message().unwrap();
+            assert!(child.read_next().unwrap());
+            assert!(child.read_next().unwrap());
+            body = child.read_body().unwrap();
+            assert!(child.read_next().unwrap());
+            assert!(matches!(child.read_body(), Err(Error::ValueLimitExceeded)));
+        }
+        assert!(!props.read_next_property().unwrap());
+    }
+    assert!(!reader.read_next().unwrap());
+    drop(reader);
+    assert_eq!(body.text().unwrap(), "Caf\u{e9}");
+    assert_eq!(body.as_bytes(), b"Caf\xe9");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].violation, Violation::DataSizeLimitExceeded);
+    assert_eq!(issues[0].depth, 1);
+}
+
+#[test]
 fn iid_detection_precedes_method_and_never_claims_raw_bytes() {
     let leaf = document(Attribute::BODY, b"hello");
     for kind in [Type::OBJECT, Type::BINARY] {

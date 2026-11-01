@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Incremental compressed-RTF decoding is available with explicit validation. Message/attachment models, TNEF-to-MIME conversion, and writing remain unported. Raw-reader, property-reader, owned-collection/accessor, recipient-model, date, borrowed/detached recursive-reader, and compressed-RTF benchmarks cover the implemented layers. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Full message/attachment models and loading, TNEF-to-MIME conversion, and writing remain unported. Benchmarks cover raw/property readers, owned collections/accessors, recipients, dates, borrowed/detached readers, compressed RTF, and bodies. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9216,9 +9216,65 @@ upstream's productive-output thresholds and expansion bounds; chunked mutation
 results are compared byte-for-byte. Tests run with default and scalar features,
 alongside yEnc regressions for the shared CRC extraction.
 
-This is a decompression foundation, not a TNEF body model or message loader.
+This filter is the decompression foundation used by the owned body model below.
 It does not automatically render RTF, extract HTML, or convert TNEF to MIME.
-Four original benchmark cases cover decoding separately from those later layers.
+Four original benchmark cases cover filter decoding separately from body access.
+
+### Owned TNEF message bodies
+
+`TnefMessageBody` and `TnefMessageBodyFormat` port MimeKit's body model and the
+loader's body-tag recognition, terminal-NUL trimming, and charset helpers.
+Applicable inline rationale is retained, including late InternetCodepage
+handling. Supported single-valued tags are Body/String8/Unicode,
+BodyHtml/String8/Unicode/Binary, and RtfCompressed/Binary.
+
+`TnefPropertyReader::read_body` collects the selected property under existing
+owned-value and shared-total byte limits. `TnefReader::read_body` and
+`read_body_with_logger` collect a legacy Body attribute as `BODY_A`; the borrowed
+embedded reader exposes the same operation with inherited diagnostics and
+limits. Unsupported tags and limit errors leave bytes unclaimed for streaming
+recovery. Limits charge original bytes before trimming, including terminators.
+Truncated content follows the existing partial-byte/diagnostic contract; source
+and logger failures remain errors and fault the reader.
+
+The owned body survives its parent/source. `new` takes an existing `Vec<u8>`
+without copying or imposing extra limits. String8 removes trailing zero bytes;
+Unicode removes trailing complete zero code units only when the original
+length is even. Binary HTML and compressed RTF preserve exact bytes.
+`as_bytes`, `len`, and `is_empty` describe this retained raw content.
+`open_read` returns independent seekable slice cursors; `open_decoded_read`
+returns independent readers that decompress only RTF.
+
+String8 captures the message charset, Unicode uses UTF-16LE, and binary
+HTML/compressed RTF initially have no explicit charset. `set_message_charsets`
+applies final message and optional InternetCodepage charsets: String8 changes,
+Unicode stays UTF-16LE, binary HTML selects the Internet charset, and RTF stays
+unspecified. Unspecified text uses the message charset. There is no HTML
+meta-charset detection, RTF rendering, or encapsulated HTML extraction.
+
+Rust deliberately exposes failures rather than MimeKit's tolerant text/stream
+defaults. `text` strictly decodes; `text_lossy` explicitly reports replacement
+with U+FFFD. Both preserve BOM characters consistently with `Charset`, without
+using BOMs to choose an encoding. Decoded RTF readers validate framing, mode,
+and CRC at EOF, returning `InvalidData` with an inner `RtfDecompressionError`;
+unknown modes are not successful empty bodies. Previously streamed bytes
+remain provisional until a nonempty read successfully returns zero. Empty
+reads and early drop do not validate; terminal validation errors repeat.
+Text collection returns no successful string on decompression failure.
+RAWSIZE is not trusted for allocation; underlying tolerant token/end-boundary
+rules are unchanged.
+
+Twelve tests in `tests/tnef_properties/bodies.rs` adapt the body vectors from
+MimeKit's `TestBodies`/`TestLegacyBody` and add tag rejection, aligned/odd UTF-16,
+embedded/trailing NULs, ownership, independent cursors, short decoded reads,
+late charsets, strict/lossy text, BOMs, invalid compression/CRC, budgets,
+truncation, and source/logger failures. An embedded-reader test covers inherited
+charset/diagnostics and shared budget accounting. Compressed fixtures reuse
+the existing independent upstream-derived reference builder.
+
+This does not yet port the complete message loader: duplicate-body precedence,
+MAPI-over-legacy selection, automatic final charset application, and excluding
+body properties from a loaded message's property set remain future work.
 
 ### TNEF date interpretation
 
@@ -10250,6 +10306,41 @@ logs/reports. The standalone binary's SHA-256 is
 `96DC082C4DA8CD2151105F301AB31AEEED8812E8570CE22734F34EBC6EB5B978`.
 Earlier baselines remain preserved.
 
+#### TNEF owned message bodies
+
+Fifteen original cases under `tnef-bodies/{Construct,Stream,Text}` cover String8
+(Windows-1252), Unicode, binary UTF-8 HTML, dictionary-reference compressed RTF,
+and uncompressed RTF. `Construct` clones prebuilt raw bytes, constructs/trims a
+body, observes its length, and drops it; it does not parse TNEF framing or decode
+text. `Stream` and `Text` use bodies prepared outside measurement and checksum
+their complete output. RTF access includes a fresh filtered reader,
+decompression, EOF validation, and destruction. Throughput counts original raw
+body bytes, not UTF-8 or decompressed output bytes.
+
+The standalone and optional native/Criterion harnesses share
+`benches/support/tnef_bodies.rs`; regression checks compare complete raw,
+decoded, and text output against independently generated expectations before
+measurement. The TNEF metabench now contains 91 cases. These are original
+benchmarks, not ports of a nonexistent upstream TNEF benchmark class.
+
+All 91 smoke cases pass. Native allocation measurements for the new body
+operations are below; each cell is allocation count / total allocated bytes,
+not peak retained memory. Construction includes the input clone.
+
+| Body | Construct | Stream | Text |
+|---|---:|---:|---:|
+| String8 | 1 / 20,482 | 0 / 0 | 1 / 61,434 |
+| Unicode | 1 / 122,884 | 0 / 0 | 1 / 184,321 |
+| Html | 1 / 53,248 | 0 / 0 | 0 / 0 |
+| CompressedRtf | 1 / 12,775 | 15 / 139,384 | 29 / 503,506 |
+| UncompressedRtf | 1 / 61,456 | 3 / 20,560 | 16 / 213,040 |
+
+RTF access includes the boxed filter state and growing output buffers; `Text`
+also collects and decodes all output. No throughput timings have been recorded
+for these new cases. All 76 pre-existing cases retain their prior allocation
+counts and totals. The allocation report is retained in session artifacts under
+`files/tnef-message-bodies-baseline/allocations.json`.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -10261,7 +10352,7 @@ These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 38 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
-six recipient-model cases, and four compressed-RTF cases.
+six recipient-model cases, four compressed-RTF cases, and fifteen body-model cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

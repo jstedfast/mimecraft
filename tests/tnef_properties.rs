@@ -12,6 +12,8 @@ use mimecraft::tnef::{
     TnefValue as Value,
 };
 
+#[path = "tnef_properties/bodies.rs"]
+mod bodies;
 #[path = "tnef_properties/conversions.rs"]
 mod conversions;
 #[path = "tnef_properties/dates.rs"]
