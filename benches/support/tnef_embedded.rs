@@ -11,7 +11,7 @@ use mimecraft::tnef::{
 };
 
 pub const CASES: [&str; 4] = ["Single", "Deep", "Siblings", "ShortReads"];
-const IID: [u8; 16] = [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
+pub(super) const IID: [u8; 16] = [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 
 pub struct Workload {
     pub name: &'static str,
@@ -28,7 +28,7 @@ pub struct Summary {
     pub body_sum: u64,
 }
 
-fn attribute(output: &mut Vec<u8>, tag: Attribute, value: &[u8]) {
+pub(super) fn attribute(output: &mut Vec<u8>, tag: Attribute, value: &[u8]) {
     output.push(if tag == Attribute::ATTACHMENT { 2 } else { 1 });
     output.extend_from_slice(&tag.0.to_le_bytes());
     output.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -39,7 +39,7 @@ fn attribute(output: &mut Vec<u8>, tag: Attribute, value: &[u8]) {
     output.extend_from_slice(&checksum.to_le_bytes());
 }
 
-fn document(tag: Attribute, value: &[u8]) -> Vec<u8> {
+pub(super) fn document(tag: Attribute, value: &[u8]) -> Vec<u8> {
     let mut input = vec![0x78, 0x9f, 0x3e, 0x22, 0, 0];
     attribute(&mut input, tag, value);
     input

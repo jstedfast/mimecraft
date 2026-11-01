@@ -412,6 +412,43 @@ impl<R: Read> TnefReader<R> {
         self.bytes_core(&mut Logger::Borrowed(logger))
     }
 
+    /// Collects a legacy AttachData attribute as owned binary content.
+    ///
+    /// # Errors
+    ///
+    /// Rejects other tags without claiming bytes; otherwise shares
+    /// [`read_value_bytes`](Self::read_value_bytes) errors and limits.
+    pub fn read_attachment_content(
+        &mut self,
+    ) -> Result<super::TnefAttachmentContent, TnefReadError> {
+        self.attachment_content_core(&mut Logger::None)
+    }
+
+    /// Collects legacy attachment content with explicit diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`read_attachment_content`](Self::read_attachment_content) errors;
+    /// logger failures fault the reader.
+    pub fn read_attachment_content_with_logger(
+        &mut self,
+        logger: &mut dyn TnefComplianceLogger,
+    ) -> Result<super::TnefAttachmentContent, TnefReadError> {
+        self.attachment_content_core(&mut Logger::Borrowed(logger))
+    }
+
+    fn attachment_content_core(
+        &mut self,
+        logger: &mut Logger<'_>,
+    ) -> Result<super::TnefAttachmentContent, TnefReadError> {
+        let tag = self.check_unclaimed()?.tag;
+        if tag != Tag::ATTACH_DATA {
+            return Err(TnefReadError::InvalidValueType(tag));
+        }
+        self.bytes_core(logger)
+            .map(super::TnefAttachmentContent::Binary)
+    }
+
     /// Collects the legacy Body attribute as an owned String8 message body.
     ///
     /// # Errors

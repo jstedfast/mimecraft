@@ -24,6 +24,22 @@ mod rtf_compressed_workloads;
 #[path = "../benches/support/tnef_bodies.rs"]
 mod body_workloads;
 
+#[path = "../benches/support/tnef_attachments.rs"]
+mod attachment_workloads;
+
+#[test]
+fn attachment_workloads_match_metadata_and_content() {
+    for name in attachment_workloads::CASES {
+        let case = attachment_workloads::workload(name);
+        case.check();
+        assert!(!case.name.is_empty());
+        assert!(!case.input.is_empty());
+    }
+    for mode in attachment_workloads::MODES {
+        assert!(!mode.name().is_empty());
+    }
+}
+
 #[test]
 fn body_workloads_match_raw_decoded_and_text_references() {
     for name in body_workloads::CASES {

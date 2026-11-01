@@ -29,6 +29,9 @@ mod rtf_compressed_workloads;
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
+#[path = "support/tnef_attachments.rs"]
+mod attachment_workloads;
+
 fn measure(name: &str, size: usize, mut read: impl FnMut()) {
     for _ in 0..3 {
         read();
@@ -215,6 +218,29 @@ fn main() {
                 black_box(rtf_compressed_workloads::read(case));
             },
         );
+    }
+    println!("Attachments: Load parses generated property sets and collects/drops content.");
+    println!(
+        "Access reads preloaded metadata; Stream reads preloaded raw content, excluding IIDs."
+    );
+    println!("One attachment per generated attribute; no whole-message loader or MIME conversion.");
+    let cases: Vec<_> = attachment_workloads::CASES
+        .into_iter()
+        .map(attachment_workloads::workload)
+        .collect();
+    for case in &cases {
+        case.check();
+    }
+    for case in &cases {
+        for mode in attachment_workloads::MODES {
+            measure(
+                &format!("Attachments/{}/{}", mode.name(), case.name),
+                case.input.len(),
+                || {
+                    black_box(attachment_workloads::read(case, mode));
+                },
+            );
+        }
     }
     println!("Bodies: Construct clones raw bytes and trims text terminators; no TNEF parsing.");
     println!("Stream/Text use preloaded bodies; RTF includes decompression and EOF validation.");

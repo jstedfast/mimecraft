@@ -399,6 +399,39 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
         TnefMessageBody::new(tag, content, self.reader.charset)
     }
 
+    /// Collects single-valued Binary/Object AttachData with its content kind.
+    /// Recognized embedded content retains the context needed for detached reads;
+    /// other Object content retains its IID internally but excludes it from
+    /// [`crate::tnef::TnefAttachmentContent::as_bytes`].
+    ///
+    /// Recognition uses [`is_embedded_message`](Self::is_embedded_message) at
+    /// collection time; a later AttachMethod is not applied retrospectively.
+    ///
+    /// # Errors
+    ///
+    /// Rejects other tags before claiming bytes. Shares raw collection limits,
+    /// diagnostics, and failures; recognized messages also enforce nesting limits.
+    pub fn read_attachment_content(&mut self) -> Result<crate::tnef::TnefAttachmentContent, Error> {
+        use crate::tnef::TnefAttachmentContent as Content;
+
+        let tag = self.check_value()?;
+        if tag.id() != Tag::ATTACH_DATA_BIN.id()
+            || tag.is_multi_valued()
+            || !matches!(tag.value_type(), Type::BINARY | Type::OBJECT)
+        {
+            return Err(Error::InvalidPropertyType(tag));
+        }
+        if self.is_embedded_message() {
+            return self.read_embedded_content().map(Content::Embedded);
+        }
+        let bytes = self.read_value_bytes()?;
+        Ok(if tag.value_type() == Type::OBJECT {
+            Content::Object(bytes)
+        } else {
+            Content::Binary(bytes)
+        })
+    }
+
     /// Collects the raw bytes of a string, binary, or object value, without
     /// its DWORD padding. Object interface GUID prefixes are retained.
     /// Physical truncation returns partial bytes and sets the parent's

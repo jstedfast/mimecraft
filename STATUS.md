@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Full message/attachment models and loading, TNEF-to-MIME conversion, and writing remain unported. Benchmarks cover raw/property readers, owned collections/accessors, recipients, dates, borrowed/detached readers, compressed RTF, and bodies. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Full message models and whole-message loading, TNEF-to-MIME conversion, and writing remain unported. Benchmarks cover raw/property readers, owned collections/accessors, recipients, dates, borrowed/detached readers, compressed RTF, bodies, and attachments. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9276,6 +9276,71 @@ This does not yet port the complete message loader: duplicate-body precedence,
 MAPI-over-legacy selection, automatic final charset application, and excluding
 body properties from a loaded message's property set remain future work.
 
+### Owned TNEF attachments
+
+`TnefAttachment`, `TnefAttachmentContent`, `TnefAttachMethod`, and
+`TnefAttachFlags` port MimeKit's attachment model and method/rendering flags.
+Applicable source comments and documented interpretation rules are retained.
+Construction moves a property set and optional content without allocation or
+field validation. Properties remain verbatim, including duplicates: callers
+assembling attachments should collect AttachData separately rather than expect
+the constructor to select or discard it.
+
+`file_name` prefers AttachLongFilename over AttachFilename; `mime_type` and
+`content_id` expose their stored text without parsing or normalization.
+Only absent properties permit fallback. Empty strings remain values;
+incompatible, empty-value, or multivalued properties return the existing typed
+conversion errors. Native strings borrow storage; Binary metadata uses the
+property's captured charset, following existing property-set recovery behavior.
+File names remain untrusted and require sanitization before filesystem use.
+
+`method` honors the first stored AttachMethod, even if it contradicts the
+content. When absent, recognized embedded content defaults to EmbeddedMessage
+and other attachments to ByValue. None=0, ByValue=1, EmbeddedMessage=5, and
+Ole=6 are named variants; unknown signed values round-trip unchanged.
+`flags` defaults to NONE only when absent and retains every original bit,
+including unknown high bits. Named flags cover invisible-in-HTML,
+invisible-in-RTF, and rendered-in-body; bitwise union/intersection and
+contains/intersects follow the existing compliance bitmask conventions.
+
+Content variants distinguish Binary, Object, and captured Embedded content.
+`None` is absent, not the same as an empty present value. `as_bytes` and
+independent seekable `open_read` cursors exclude Object/embedded interface IIDs
+without copying; short Object IIDs expose an empty slice. Binary content is
+never stripped. `into_parts` returns the original property set and content,
+including Object IID bytes or embedded context, without copying.
+
+The root and borrowed embedded readers expose `read_attachment_content` for
+legacy AttachData; the root also accepts an explicit logger. The property
+reader's equivalent accepts single-valued Binary/Object AttachData and captures
+recognized embedded messages through the existing detached-content API.
+Collection shares original value/total byte limits, including IIDs; rejected
+tags, size limits, and nesting limits leave data available for raw streaming.
+Truncation retains the existing partial-content/diagnostic behavior.
+Source/logger failures remain errors and fault the reader, not successful
+attachments with missing content.
+
+`open_embedded_reader` delegates to captured content and survives the original
+parent/source. Each reader retains absolute offsets, depth, charset, and
+options but receives fresh byte/report budgets and fault state; logger
+callbacks are supplied explicitly. Signature and checksum validation remain
+deferred until the respective readers advance. A stored method or manually
+supplied Object IID alone does not establish captured embedded context.
+Recognition happens at collection time, not retrospectively when a later
+AttachMethod appears.
+
+Fourteen tests in `tests/tnef_properties/attachments.rs` adapt MimeKit's
+attachment metadata/content vectors and add unknown methods/flags, priority
+and empty fields, captured Binary charsets, conversion errors, ownership,
+independent raw/detached cursors, IID truncation, property classification,
+recoverable size/nesting limits, shared borrowed-reader diagnostics, and
+source/logger failures. Existing embedded fixture builders are reused.
+
+This is not the whole-message attachment loader. Stream grouping, legacy
+metadata synthesis, MAPI/legacy content precedence, maximum-attachment
+selection, retrospective recognition, and loading a parsed embedded message
+remain unported. Corresponding upstream loader tests are not claimed here.
+
 ### TNEF date interpretation
 
 `TnefDateTime` represents Gregorian years 1 through 9999 with exact
@@ -9392,7 +9457,7 @@ Rust cannot retain the parent's borrowed callback after it is dropped:
 detached operations take an explicit logger through the existing
 `*_with_logger` APIs. Content and its slice-backed readers are Send/Sync.
 Opening a reader does not allocate or consume input. This is serialized content,
-not the still-unported parsed message/attachment model.
+not the still-unported whole-message loader.
 
 `tests/tnef_properties/detached.rs` adapts upstream repeat-load and nesting
 cases from `TnefMessageTests`, with Rust ownership, concurrent cursor, physical
@@ -10320,7 +10385,7 @@ body bytes, not UTF-8 or decompressed output bytes.
 The standalone and optional native/Criterion harnesses share
 `benches/support/tnef_bodies.rs`; regression checks compare complete raw,
 decoded, and text output against independently generated expectations before
-measurement. The TNEF metabench now contains 91 cases. These are original
+measurement. The body-model increment brought the TNEF metabench to 91 cases. These are original
 benchmarks, not ports of a nonexistent upstream TNEF benchmark class.
 
 All 91 smoke cases pass. Native allocation measurements for the new body
@@ -10341,6 +10406,43 @@ for these new cases. All 76 pre-existing cases retain their prior allocation
 counts and totals. The allocation report is retained in session artifacts under
 `files/tnef-message-bodies-baseline/allocations.json`.
 
+#### TNEF owned attachments
+
+Twelve original cases under `tnef-attachments/{Load,Access,Stream}` cover 32
+attachments per generated document: native metadata with mixed Binary/Object
+content, captured-charset Binary metadata, embedded TNEF content, and
+absent/empty content. Fixture generation reuses the existing recipient text
+encoder and embedded-reader attribute/checksum builders.
+
+`Load` parses the generated property-bearing attributes, collects metadata and
+content separately, constructs models, reads their metadata, and drops them.
+This deliberately simple fixture loader assumes one attachment per attribute;
+it is not a production whole-message loader. `Access` reads preloaded metadata
+and content lengths, while `Stream` checksums preloaded raw content through
+independent cursors, excluding IIDs. Embedded streaming returns serialized
+TNEF bytes, not a parsed child. Throughput counts complete original input bytes
+once for all modes, not just content or decoded text.
+
+The standalone and optional native/Criterion harnesses share
+`benches/support/tnef_attachments.rs`; regression checks compare metadata and
+complete content against independent expected values before measurement.
+The TNEF metabench now contains 103 cases.
+
+All 103 smoke and allocation cases passed. Allocation counts and cumulative
+allocated bytes for the previous 91 cases are unchanged. The new cases measured
+the following allocations per operation (count / total bytes, not peak memory):
+
+| Case | Load | Access | Stream |
+| --- | ---: | ---: | ---: |
+| Direct | 500 / 120,590 | 0 / 0 | 0 / 0 |
+| BinaryText | 388 / 118,062 | 32 / 834 | 0 / 0 |
+| Embedded | 500 / 121,390 | 0 / 0 | 0 / 0 |
+| Empty | 4 / 7,680 | 0 / 0 | 0 / 0 |
+
+Binary metadata decoding accounts for the BinaryText access allocations.
+Raw streaming allocates nothing for all four cases. No throughput timings
+were recorded for these new workloads.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -10352,7 +10454,8 @@ These harnesses use the same fixtures, generators, and operations under
 `benches/support`, covering all 38 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
-six recipient-model cases, four compressed-RTF cases, and fifteen body-model cases.
+six recipient-model cases, four compressed-RTF cases, fifteen body-model cases,
+and twelve attachment-model cases.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

@@ -29,6 +29,42 @@ mod rtf_compressed_workloads;
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
+#[path = "support/tnef_attachments.rs"]
+mod attachment_workloads;
+
+fn prepare_attachment(name: &'static str) -> attachment_workloads::Workload {
+    let case = attachment_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(ATTACHMENT_LOAD, "tnef-attachments", "Load")]
+#[bench::Direct(&prepare_attachment("Direct"))]
+#[bench::BinaryText(&prepare_attachment("BinaryText"))]
+#[bench::Embedded(&prepare_attachment("Embedded"))]
+#[bench::Empty(&prepare_attachment("Empty"))]
+fn attachment_load(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
+    attachment_workloads::read(case, attachment_workloads::Mode::Load)
+}
+
+#[metabench::benchmark(ATTACHMENT_ACCESS, "tnef-attachments", "Access")]
+#[bench::Direct(&prepare_attachment("Direct"))]
+#[bench::BinaryText(&prepare_attachment("BinaryText"))]
+#[bench::Embedded(&prepare_attachment("Embedded"))]
+#[bench::Empty(&prepare_attachment("Empty"))]
+fn attachment_access(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
+    attachment_workloads::read(case, attachment_workloads::Mode::Access)
+}
+
+#[metabench::benchmark(ATTACHMENT_STREAM, "tnef-attachments", "Stream")]
+#[bench::Direct(&prepare_attachment("Direct"))]
+#[bench::BinaryText(&prepare_attachment("BinaryText"))]
+#[bench::Embedded(&prepare_attachment("Embedded"))]
+#[bench::Empty(&prepare_attachment("Empty"))]
+fn attachment_stream(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
+    attachment_workloads::read(case, attachment_workloads::Mode::Stream)
+}
+
 fn prepare_body(name: &'static str) -> body_workloads::Workload {
     let case = body_workloads::workload(name);
     case.check();
@@ -342,6 +378,17 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
         }
     }
     group.finish();
+    let mut group = criterion.benchmark_group("tnef-attachments");
+    for name in attachment_workloads::CASES {
+        let case = prepare_attachment(name);
+        group.throughput(Throughput::Bytes(case.input.len() as u64));
+        for mode in attachment_workloads::MODES {
+            group.bench_function(BenchmarkId::new(mode.name(), name), |b| {
+                b.iter(|| attachment_workloads::read(&case, mode));
+            });
+        }
+    }
+    group.finish();
 }
 
 metabench::main!(
@@ -364,6 +411,9 @@ metabench::main!(
         RTF_COMPRESSED,
         BODY_CONSTRUCT,
         BODY_STREAM,
-        BODY_TEXT
+        BODY_TEXT,
+        ATTACHMENT_LOAD,
+        ATTACHMENT_ACCESS,
+        ATTACHMENT_STREAM
     ]
 );

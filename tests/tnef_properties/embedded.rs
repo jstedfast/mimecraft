@@ -5,12 +5,12 @@ use super::*;
 use mimecraft::tnef::{TnefEmbeddedReader, TnefPropertyReader};
 use std::{cell::Cell, rc::Rc};
 
-const IID: [u8; 16] = [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
+pub(super) const IID: [u8; 16] = [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 
 #[path = "detached.rs"]
 mod detached;
 
-fn object(id: u16, kind: Type, value: &[u8]) -> Vec<u8> {
+pub(super) fn object(id: u16, kind: Type, value: &[u8]) -> Vec<u8> {
     let mut bytes = fixed(id, kind, &[]);
     dword(&mut bytes, 1);
     variable(&mut bytes, value);
@@ -23,7 +23,7 @@ fn nested(input: &[u8]) -> Vec<u8> {
     object(0x3701, Type::OBJECT, &value)
 }
 
-fn wrap(input: &[u8]) -> Vec<u8> {
+pub(super) fn wrap(input: &[u8]) -> Vec<u8> {
     document(Attribute::ATTACHMENT, &properties(&[nested(input)]))
 }
 

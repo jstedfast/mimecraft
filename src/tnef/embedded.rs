@@ -197,6 +197,17 @@ impl<'p> TnefEmbeddedReader<'p, '_> {
         self.reader.body_core(&mut self.logger)
     }
 
+    /// Collects legacy attachment content with inherited diagnostics and limits.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`TnefReader::read_attachment_content`] errors.
+    pub fn read_attachment_content(
+        &mut self,
+    ) -> Result<crate::tnef::TnefAttachmentContent, TnefReadError> {
+        self.reader.attachment_content_core(&mut self.logger)
+    }
+
     /// Collects and decodes an attribute string using this message's charset.
     ///
     /// # Errors

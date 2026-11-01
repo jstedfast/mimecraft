@@ -65,7 +65,7 @@ impl Summary {
     }
 }
 
-fn property(tag: Tag, value: &str, kind: Type) -> Vec<u8> {
+pub(super) fn property(tag: Tag, value: &str, kind: Type) -> Vec<u8> {
     let raw: Vec<_> = if kind == Type::UNICODE {
         value
             .encode_utf16()
