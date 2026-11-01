@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     io,
 };
@@ -308,7 +309,9 @@ pub(super) fn validate(
         return Ok(());
     }
     // The reader's max_header_length bounds the number and size of declarations.
-    let mut parameters: HashMap<String, usize> = HashMap::new();
+    // Keep the first name outside the dictionary for single-parameter headers.
+    let mut first: Option<(&str, ParameterState)> = None;
+    let mut parameters: Option<HashMap<Cow<'_, str>, usize>> = None;
     // Preserve declaration order when reporting gaps, independently of hash order.
     let mut states: Vec<ParameterState> = Vec::new();
     let mut scanned = 0;
@@ -363,25 +366,39 @@ pub(super) fn validate(
             }
             continue;
         };
-        let name = declaration.name.to_ascii_lowercase();
-        let filename = name
-            == if header == HeaderId::ContentType {
-                "name"
-            } else {
-                "filename"
-            };
-        let violation = if header == HeaderId::ContentType && name == "boundary" {
+        let name = declaration.name;
+        let filename = name.eq_ignore_ascii_case(if header == HeaderId::ContentType {
+            "name"
+        } else {
+            "filename"
+        });
+        let violation = if header == HeaderId::ContentType && name.eq_ignore_ascii_case("boundary")
+        {
             Violation::RepeatedBoundaryParameter
         } else if filename {
             Violation::RepeatedFilenameParameter
         } else {
             Violation::RepeatedParameter
         };
-        let index = *parameters.entry(name).or_insert_with(|| {
-            states.push(ParameterState::default());
-            states.len() - 1
-        });
-        let state = &mut states[index];
+        let (first_name, first_state) =
+            first.get_or_insert_with(|| (name, ParameterState::default()));
+        let state = if name.eq_ignore_ascii_case(first_name) {
+            first_state
+        } else {
+            let key = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                Cow::Owned(name.to_ascii_lowercase())
+            } else {
+                Cow::Borrowed(name)
+            };
+            let index = *parameters
+                .get_or_insert_with(HashMap::new)
+                .entry(key)
+                .or_insert_with(|| {
+                    states.push(ParameterState::default());
+                    states.len() - 1
+                });
+            &mut states[index]
+        };
         // Capture the first segment's position before later issues advance the cursor.
         if declaration.segment.is_some() && state.segments.is_none() {
             state.missing_segment_issue = Some(create_issue(
@@ -424,7 +441,7 @@ pub(super) fn validate(
             break;
         }
     }
-    for state in states {
+    for state in first.into_iter().map(|(_, state)| state).chain(states) {
         if state.has_missing_segments() {
             logger.log(
                 state
@@ -459,6 +476,141 @@ mod tests {
         });
         result.unwrap();
         (issues, allocated, elapsed)
+    }
+
+    #[test]
+    fn single_parameter_name_does_not_allocate_a_dictionary() {
+        for (header, text, expected) in [
+            (HeaderId::ContentType, "text/plain", 0),
+            (HeaderId::ContentType, "text/plain; charset=utf-8", 0),
+            (
+                HeaderId::ContentType,
+                "text/plain; CHARSET=utf-8; charset=us-ascii",
+                1,
+            ),
+            (
+                HeaderId::ContentDisposition,
+                "attachment; filename=\"report.pdf\"",
+                0,
+            ),
+            (
+                HeaderId::ContentDisposition,
+                "attachment; filename=a; FILENAME*=utf-8''b",
+                0,
+            ),
+        ] {
+            let mut count = 0;
+            let (result, allocated, _) = allocation_tracking::measure(|| {
+                validate(
+                    text.as_bytes(),
+                    header,
+                    MimePosition { offset: 0, line: 1 },
+                    1,
+                    MimeComplianceContext::Transport,
+                    &mut |_| {
+                        count += 1;
+                        Ok(())
+                    },
+                )
+            });
+            result.unwrap();
+            assert_eq!(count, expected, "{text}");
+            assert_eq!(allocated, 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn lowercase_dictionary_keys_borrow_the_input() {
+        let mut short = String::from("text/plain; first=value");
+        let mut long = short.clone();
+        let suffix = "x".repeat(128);
+        for index in 0..128 {
+            short.push_str(&format!("; x{index}=value"));
+            long.push_str(&format!("; x{index}{suffix}=value"));
+        }
+        let (short_issues, short_allocated, _) = measure_validation(short.as_bytes());
+        let (long_issues, long_allocated, _) = measure_validation(long.as_bytes());
+        assert!(short_issues.is_empty());
+        assert!(long_issues.is_empty());
+        assert_eq!(short_allocated, long_allocated);
+    }
+
+    #[test]
+    fn multiple_continuation_families_preserve_order_and_reuse() {
+        for value in [
+            "text/plain; first*2=a;\r\n second*1=b; third*3=c;\r\n first*2=d; second*1=e",
+            "text/plain; FIRST*2=a;\r\n SECOND*1=b; third*3=c;\r\n first*2=d; second*1=e",
+            "text/plain; first*2=a;\r\n second*1=b; third*3=c;\r\n FIRST*2=d; SECOND*1=e",
+        ] {
+            let bytes = format!("xx{value}yy");
+            for _ in 0..2 {
+                let mut issues = Vec::new();
+                validate(
+                    &bytes.as_bytes()[2..2 + value.len()],
+                    HeaderId::ContentType,
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                    &mut |issue| {
+                        issues.push(issue);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                let names = [
+                    "first*2=d",
+                    "second*1=e",
+                    "first*2=a",
+                    "second*1=b",
+                    "third*3=c",
+                ];
+                assert_eq!(issues.len(), names.len());
+                for (i, (issue, name)) in issues.iter().zip(names).enumerate() {
+                    let offset = value.to_ascii_lowercase().find(name).unwrap();
+                    let prefix = &value.as_bytes()[..offset];
+                    assert_eq!(
+                        issue.violation,
+                        if i < 2 {
+                            Violation::RepeatedParameter
+                        } else {
+                            Violation::MissingParameterSegment
+                        }
+                    );
+                    assert_eq!(issue.stream_offset, 100 + offset as u64);
+                    assert_eq!(
+                        issue.line_number,
+                        5 + prefix.iter().filter(|&&b| b == b'\n').count() as u64
+                    );
+                    assert_eq!(
+                        issue.column_number,
+                        prefix
+                            .iter()
+                            .rposition(|&b| b == b'\n')
+                            .map_or(7 + offset, |lf| offset - lf) as u64
+                    );
+                }
+                for clean in [
+                    "text/plain",
+                    "text/plain; first*0=a; second*0=b; first*1=c; second*1=d",
+                ] {
+                    validate(
+                        clean.as_bytes(),
+                        HeaderId::ContentType,
+                        MimePosition {
+                            offset: 100,
+                            line: 5,
+                        },
+                        7,
+                        MimeComplianceContext::Storage,
+                        &mut |_| panic!("complete family"),
+                    )
+                    .unwrap();
+                }
+            }
+        }
     }
 
     #[test]

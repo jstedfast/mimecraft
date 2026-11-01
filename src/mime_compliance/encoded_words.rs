@@ -29,6 +29,7 @@ pub(super) fn is_encoded_word_token(byte: u8) -> bool {
 struct Scanner<'a> {
     text: &'a [u8],
     index: usize,
+    scan_index: usize,
     position: MimePosition,
     column: u64,
     context: MimeComplianceContext,
@@ -37,7 +38,32 @@ struct Scanner<'a> {
     literal: bool,
 }
 
-impl Scanner<'_> {
+impl<'a> Scanner<'a> {
+    fn new(
+        text: &'a [u8],
+        position: MimePosition,
+        column: u64,
+        context: MimeComplianceContext,
+    ) -> Self {
+        Self {
+            text,
+            // With no candidate anywhere in this slice, even address classification
+            // is unnecessary. Do not inspect bytes outside the supplied value.
+            index: if memchr::memmem::find(text, b"=?").is_some() {
+                0
+            } else {
+                text.len()
+            },
+            scan_index: 0,
+            position,
+            column,
+            context,
+            comment_depth: 0,
+            quoted: false,
+            literal: false,
+        }
+    }
+
     fn read_word(&self, location: Location) -> (bool, Option<usize>) {
         let limit = self.index + (self.text.len() - self.index).min(75);
         let mut at = self.index + 2;
@@ -65,6 +91,15 @@ impl Scanner<'_> {
         let mut hex = 0;
         while at < limit {
             let byte = self.text[at];
+            if !base64 && hex == 0 && location == Location::Text && !matches!(byte, b'=' | b'?') {
+                // Ordinary Q text needs only printable-ASCII validation. Keep
+                // escapes, envelope terminators, and nested candidates visible.
+                let tail = &self.text[at..limit];
+                let length = memchr::memchr2(b'=', b'?', tail).unwrap_or(tail.len());
+                valid &= tail[..length].iter().all(|&byte| byte > 32 && byte < 127);
+                at += length;
+                continue;
+            }
             if byte == b'?' && at + 1 < limit && self.text[at + 1] == b'=' {
                 valid &= at != payload
                     && hex == 0
@@ -111,7 +146,19 @@ impl Scanner<'_> {
         })
     }
 
-    fn log(&self, violation: Violation, logger: &mut dyn MimeComplianceLogger) -> io::Result<()> {
+    fn log(
+        &mut self,
+        violation: Violation,
+        logger: &mut dyn MimeComplianceLogger,
+    ) -> io::Result<()> {
+        // Track positions only when reporting, and never rescan an earlier prefix.
+        let prefix = &self.text[self.scan_index..self.index];
+        self.column = memchr::memrchr(b'\n', prefix)
+            .map_or(self.column + prefix.len() as u64, |lf| {
+                (prefix.len() - lf) as u64
+            });
+        self.position = self.position.advance(prefix);
+        self.scan_index = self.index;
         logger.log(MimeComplianceIssue {
             context: self.context,
             violation,
@@ -122,19 +169,6 @@ impl Scanner<'_> {
         })
     }
 
-    fn advance(&mut self, end: usize) {
-        for &byte in &self.text[self.index..end] {
-            if byte == b'\n' {
-                self.position.line += 1;
-                self.column = 1;
-            } else {
-                self.column += 1;
-            }
-        }
-        self.position.offset += (end - self.index) as u64;
-        self.index = end;
-    }
-
     fn validate(
         &mut self,
         end: usize,
@@ -142,16 +176,25 @@ impl Scanner<'_> {
         logger: &mut dyn MimeComplianceLogger,
     ) -> io::Result<()> {
         while self.index < end {
-            let byte = self.text[self.index];
+            let mut byte = self.text[self.index];
             let mut word_context = location;
-            if location != Location::Text {
+            if location == Location::Text {
+                if byte != b'=' {
+                    let Some(next) = memchr::memchr(b'=', &self.text[self.index..end]) else {
+                        self.index = end;
+                        return Ok(());
+                    };
+                    self.index += next;
+                    byte = self.text[self.index];
+                }
+            } else {
                 if self.comment_depth > 0 {
                     word_context = Location::Comment;
                 } else if self.quoted || self.literal {
                     word_context = Location::Forbidden;
                 }
                 if byte == b'\\' && (self.comment_depth > 0 || self.quoted || self.literal) {
-                    self.advance(self.index + (self.text.len() - self.index).min(2));
+                    self.index += (self.text.len() - self.index).min(2);
                     continue;
                 }
                 if byte == b'(' && !self.quoted && !self.literal {
@@ -183,11 +226,11 @@ impl Scanner<'_> {
                     }
                 }
                 if let Some(word_end) = word_end {
-                    self.advance(word_end);
+                    self.index = word_end;
                     continue;
                 }
             }
-            self.advance(self.index + 1);
+            self.index += 1;
         }
         Ok(())
     }
@@ -498,16 +541,10 @@ pub(super) fn validate(
     context: MimeComplianceContext,
     logger: &mut dyn MimeComplianceLogger,
 ) -> io::Result<()> {
-    let mut scanner = Scanner {
-        text,
-        index: 0,
-        position,
-        column,
-        context,
-        comment_depth: 0,
-        quoted: false,
-        literal: false,
-    };
+    let mut scanner = Scanner::new(text, position, column, context);
+    if scanner.index == text.len() {
+        return Ok(());
+    }
     if !address {
         return scanner.validate(text.len(), Location::Text, logger);
     }
@@ -613,6 +650,191 @@ mod tests {
     use super::super::allocation_tracking;
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn ordinary_q_runs_match_scalar_word_validation() {
+        let check = |text: &[u8]| {
+            let scanner = Scanner::new(
+                text,
+                MimePosition { offset: 0, line: 1 },
+                1,
+                MimeComplianceContext::Transport,
+            );
+            // Forbidden placement has the same payload rules as Text, but
+            // retains the byte-at-a-time path used in address tokens.
+            assert_eq!(
+                scanner.read_word(Location::Text),
+                scanner.read_word(Location::Forbidden),
+                "{text:?}"
+            );
+        };
+        for length in [
+            0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 61, 62, 63, 64, 65, 75, 76,
+        ] {
+            let mut text = format!("=?utf-8?Q?{}?=", "a".repeat(length)).into_bytes();
+            check(&text);
+            for offset in 0..length {
+                for byte in 0..=u8::MAX {
+                    text[10 + offset] = byte;
+                    check(&text);
+                }
+                text[10 + offset] = b'a';
+            }
+        }
+        for prefix in [0, 1, 15, 31, 60, 61, 62, 63, 64] {
+            for encoding in ["Q", "q", "QQ", "unknown"] {
+                for special in [
+                    "=20",
+                    "=ZZ",
+                    "=2",
+                    "=?",
+                    "=?x?Q?b?=",
+                    "=??=",
+                    "?x",
+                    "?=",
+                    "\r\n",
+                ] {
+                    let text = format!(
+                        "=?utf-8?{encoding}?{}{special}{}?=",
+                        "a".repeat(prefix),
+                        "z".repeat(64)
+                    );
+                    for end in 10..=text.len() {
+                        check(&text.as_bytes()[..end]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_positions_are_tracked_only_when_reporting() {
+        let valid = "=?utf-8?Q?valid?=";
+        let bad_comment = "=?utf-8?Q?bad=GG?=";
+        let bad_quoted = "=?utf-8?Q?bad=G?=";
+        let bad_folded = "=?utf-8?Q?bad\r\n value?=";
+        let bad_base64 = "=?utf-8?B?YQ?=";
+        for address in [false, true] {
+            let value = if address {
+                format!("{valid} (escaped \\) \\\" text\r\n {bad_comment})\r\n \"{bad_quoted}\"")
+            } else {
+                format!("ordinary text\r\n {valid}\r\n\t{bad_folded}\r\n {bad_base64}")
+            };
+            let bytes = format!("xx{value}yy");
+            for incremental in [false, true] {
+                let mut scanner = Scanner::new(
+                    &bytes.as_bytes()[2..2 + value.len()],
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                );
+                let location = if address {
+                    Location::Phrase
+                } else {
+                    Location::Text
+                };
+                let mut issues = Vec::new();
+                let mut logger = |issue| {
+                    issues.push(issue);
+                    Ok(())
+                };
+                if incremental {
+                    for end in 0..=value.len() {
+                        scanner.validate(end, location, &mut logger).unwrap();
+                    }
+                } else {
+                    scanner
+                        .validate(value.len(), location, &mut logger)
+                        .unwrap();
+                }
+                let expected = if address {
+                    vec![
+                        (bad_comment, Violation::InvalidEncodedWord),
+                        (bad_quoted, Violation::InvalidEncodedWordPlacement),
+                        (bad_quoted, Violation::InvalidEncodedWord),
+                    ]
+                } else {
+                    vec![
+                        (bad_folded, Violation::InvalidEncodedWord),
+                        (bad_base64, Violation::InvalidEncodedWord),
+                    ]
+                };
+                assert_eq!(issues.len(), expected.len());
+                for (issue, (word, violation)) in issues.iter().zip(expected) {
+                    let offset = value.find(word).unwrap();
+                    let prefix = &value.as_bytes()[..offset];
+                    let line = 5 + prefix.iter().filter(|&&b| b == b'\n').count() as u64;
+                    let column = prefix
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map_or(7 + offset, |lf| offset - lf)
+                        as u64;
+                    assert_eq!(
+                        *issue,
+                        MimeComplianceIssue {
+                            context: MimeComplianceContext::Storage,
+                            violation,
+                            stream_offset: 100 + offset as u64,
+                            line_number: line,
+                            column_number: column,
+                            position_kind: MimeCompliancePositionKind::ElementStart,
+                        }
+                    );
+                }
+            }
+        }
+        let text = format!("{}\r\n =?utf-8?Q?valid?=\r\n", "ordinary ".repeat(1024));
+        let mut scanner = Scanner::new(
+            text.as_bytes(),
+            MimePosition { offset: 0, line: 1 },
+            1,
+            MimeComplianceContext::Transport,
+        );
+        scanner
+            .validate(text.len(), Location::Text, &mut |_| panic!("valid word"))
+            .unwrap();
+        assert_eq!(scanner.index, text.len());
+        assert_eq!(scanner.scan_index, 0);
+    }
+
+    #[test]
+    fn plain_slices_skip_scanning_without_inspecting_surrounding_words() {
+        let value = "plain = text\r\n without words";
+        let outside = "=?utf-8?Q?bad=GG?=";
+        let bytes = format!("{outside}{value}{outside}");
+        for location in [Location::Text, Location::Phrase] {
+            let mut scanner = Scanner::new(
+                &bytes.as_bytes()[outside.len()..outside.len() + value.len()],
+                MimePosition { offset: 0, line: 1 },
+                1,
+                MimeComplianceContext::Transport,
+            );
+            for end in 0..=value.len() {
+                scanner
+                    .validate(end, location, &mut |_| panic!("plain slice"))
+                    .unwrap();
+            }
+            assert_eq!(scanner.index, value.len());
+            assert_eq!(scanner.scan_index, 0);
+        }
+        // Plain malformed addresses must not allocate recovery indexes either.
+        let text = "a@[literal] ".repeat(65536);
+        let (result, allocated, _) = allocation_tracking::measure(|| {
+            validate(
+                text.as_bytes(),
+                true,
+                MimePosition { offset: 0, line: 1 },
+                1,
+                MimeComplianceContext::Transport,
+                &mut |_| panic!("plain address"),
+            )
+        });
+        result.unwrap();
+        assert_eq!(allocated, 0);
+    }
 
     #[test]
     fn offsets_and_reuse() {

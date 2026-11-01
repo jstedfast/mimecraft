@@ -1960,6 +1960,12 @@ zero. A balanced tree stores only observed indices, bounding segment tracking
 by declaration count rather than the largest index and avoiding integer hash
 collision behavior. Diagnostics retain declaration order and original positions
 even when later repeated-parameter reports have already been emitted.
+The first parameter name is borrowed and its state stays inline; name dictionaries
+and ordered state vectors allocate only when another distinct name appears.
+Additional lowercase names are borrowed dictionary keys; only names containing
+uppercase ASCII need owned lowercase copies. Dictionary hashing remains randomized.
+Single-name headers without continuation segments require no validator allocations,
+including case-insensitive repeats. Continuation trees remain balanced.
 Repeated Content-Disposition headers are structural checks, enabled even with
 `NONE`, and reset per header block. Reporting does not change selected headers,
 decoded parameters, message bodies, or serialization. Upstream declaration,
@@ -1982,6 +1988,12 @@ unchanged. Bounded word lookahead and cached address range classification avoid
 unbounded rescanning or allocating decoded names and address trees. Only malformed
 lists that re-enter complex lookahead regions allocate a suffix index, with
 storage proportional to the header value length; ordinary scans allocate none.
+Headers without `=?` skip encoded-word scanning and address range classification.
+Ordinary unstructured-text runs use bulk byte searches, and line/column tracking
+advances only when an issue is reported. Incremental scans retain exact original
+positions even when a complete word or quoted pair crosses a scan boundary.
+Ordinary Q payload runs in unstructured headers also use bulk byte searches,
+retaining printable-ASCII checks, escape handling, and the 75-byte lookahead limit.
 
 Deep address syntax validation (`ADDRESS`) is not yet ported. An empty report is
 not a guarantee of full MIME compliance.
@@ -9414,6 +9426,8 @@ cargo bench --bench base64 --no-default-features
 cargo bench --bench base64
 cargo bench --bench mime_reader
 cargo bench --bench mime_reader --no-default-features
+cargo bench --bench mime_compliance
+cargo bench --bench mime_compliance --no-default-features
 cargo bench --bench html
 cargo bench --bench html --no-default-features
 cargo bench --bench rtf
@@ -9431,6 +9445,18 @@ and noisy input. MIME-wrapped input uses CRLF; unwrapped input removes both CR
 and LF. Rates count input bytes and report the median of five timed
 samples after warm-up. These are in-memory microbenchmarks, not message-parser or
 end-to-end I/O throughput, and results depend on the CPU and compiler.
+
+`mime_compliance` ports all 22 workloads from MimeKit's
+`MimeComplianceValidatorBenchmarks`: plain, encoded, folded, sparse, and malformed
+words; display names/comments; and absent, single, repeated, and continued
+parameters, including many distinct names and many segments. The validators are
+private, so these benchmarks use `MimeReader::read_headers_with_logger` rather
+than exposing a benchmark-only public API. Measurements include header parsing,
+reporting setup, and destruction; address cases include range classification.
+They are not isolated validator timings or directly comparable to the upstream
+microbenchmarks. Generated headers and expected diagnostic-count assertions are
+outside timing; only the relevant validator is enabled and reports are counted,
+not retained. Both the standalone and metabench targets share these workloads.
 
 Six additional `stream/*/chunk=4096` cases port MimeKit's
 `Benchmarks/Encodings/Base64DecoderBenchmarks.cs`: `Unwrapped`, `MimeCrlf`,
@@ -10157,13 +10183,13 @@ Earlier baselines remain preserved.
 
 #### Optional metabench targets
 
-The `base64`, `mime_reader`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
+The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
 targets remain available without any benchmark framework. Separate targets
 with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 27 Base64, 27 MIME, twelve HTML, twenty RTF,
+`benches/support`, covering all 27 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, four embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, and four compressed-RTF cases.
@@ -10175,6 +10201,9 @@ lookups. Header lists are prepared outside measurement; each operation performs
 ```text
 cargo bench --features bench-metabench --bench mime_reader_metabench -- --criterion
 cargo bench --features bench-metabench --bench mime_reader_metabench -- --allocations
+cargo bench --features bench-metabench --bench mime_compliance_metabench -- --test
+cargo bench --features bench-metabench --bench mime_compliance_metabench -- --allocations
+cargo bench --features bench-metabench --bench mime_compliance_metabench -- --criterion
 cargo bench --features bench-metabench --bench base64_metabench -- --allocations
 cargo bench --features bench-metabench --bench base64_metabench --bench mime_reader_metabench -- --test
 cargo bench --features bench-metabench --bench html_metabench -- --criterion

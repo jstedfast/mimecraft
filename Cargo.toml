@@ -39,6 +39,15 @@ name = "mime_reader"
 harness = false
 
 [[bench]]
+name = "mime_compliance"
+harness = false
+
+[[bench]]
+name = "mime_compliance_metabench"
+harness = false
+required-features = ["bench-metabench"]
+
+[[bench]]
 name = "html"
 harness = false
 
