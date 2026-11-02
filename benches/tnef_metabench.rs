@@ -38,6 +38,27 @@ mod calendar_workloads;
 #[path = "support/tnef_time_zone.rs"]
 mod time_zone_workloads;
 
+#[path = "support/tnef_recurrence.rs"]
+mod recurrence_workloads;
+
+fn prepare_recurrence(name: &'static str) -> recurrence_workloads::Workload {
+    let case = recurrence_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(RECURRENCE, "tnef-recurrence", "Parse")]
+#[bench::Daily(&prepare_recurrence("Daily"))]
+#[bench::Weekly(&prepare_recurrence("Weekly"))]
+#[bench::MonthNth(&prepare_recurrence("MonthNth"))]
+#[bench::Exceptions(&prepare_recurrence("Exceptions"))]
+#[bench::ManyExceptions(&prepare_recurrence("ManyExceptions"))]
+#[bench::LegacyCharset(&prepare_recurrence("LegacyCharset"))]
+#[bench::TruncatedExceptions(&prepare_recurrence("TruncatedExceptions"))]
+fn parse_recurrence(case: &recurrence_workloads::Workload) -> recurrence_workloads::Summary {
+    recurrence_workloads::run(case)
+}
+
 fn prepare_time_zone(name: &'static str) -> time_zone_workloads::Workload {
     let case = time_zone_workloads::workload(name);
     case.check();
@@ -440,6 +461,15 @@ fn collect(case: &Workload) -> Summary {
 }
 
 fn criterion_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("tnef-recurrence");
+    for name in recurrence_workloads::CASES {
+        let case = prepare_recurrence(name);
+        group.throughput(Throughput::Bytes(case.bytes as u64));
+        group.bench_function(BenchmarkId::new("Parse", name), |b| {
+            b.iter(|| recurrence_workloads::run(&case));
+        });
+    }
+    group.finish();
     let mut group = criterion.benchmark_group("tnef-time-zone");
     for name in time_zone_workloads::CASES {
         let case = prepare_time_zone(name);
@@ -607,6 +637,7 @@ metabench::main!(
         WRITER,
         CALENDAR,
         TIME_ZONE,
+        RECURRENCE,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

@@ -33,6 +33,19 @@ mod calendar_workloads;
 #[path = "../benches/support/tnef_time_zone.rs"]
 mod time_zone_workloads;
 
+#[path = "../benches/support/tnef_recurrence.rs"]
+mod recurrence_workloads;
+
+#[test]
+fn recurrence_workloads_match_independent_fields_text_and_diagnostics() {
+    for name in recurrence_workloads::CASES {
+        let case = recurrence_workloads::workload(name);
+        assert_eq!(case.name, name);
+        assert!(case.bytes > 0);
+        case.check();
+    }
+}
+
 #[test]
 fn time_zone_workloads_match_known_dates_rules_and_calendar_output() {
     for name in time_zone_workloads::CASES {

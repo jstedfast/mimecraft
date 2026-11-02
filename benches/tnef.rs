@@ -38,6 +38,9 @@ mod calendar_workloads;
 #[path = "support/tnef_time_zone.rs"]
 mod time_zone_workloads;
 
+#[path = "support/tnef_recurrence.rs"]
+mod recurrence_workloads;
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -74,6 +77,16 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
 }
 
 fn main() {
+    println!(
+        "Recurrence: 64 parses per batch, including complete field/text observation, diagnostics, and drop; fixture creation and independent expectations are excluded."
+    );
+    for name in recurrence_workloads::CASES {
+        let case = recurrence_workloads::workload(name);
+        case.check();
+        measure(&format!("Recurrence/{}", case.name), case.bytes, || {
+            black_box(recurrence_workloads::run(&case));
+        });
+    }
     println!(
         "Time zones: parse 256 structures, convert 512 prepared dates, or write 128 components per batch; includes result observation and drop."
     );

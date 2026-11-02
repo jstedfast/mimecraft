@@ -1,4 +1,5 @@
 // Adapted from MimeKit's TnefReader.cs, TnefPropertyReader.cs, and TnefPropertyWriter.cs.
+// Recurrence-minute conversion adapted from MimeKit's TnefRecurrence.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{error::Error, fmt};
@@ -203,6 +204,25 @@ impl TnefDateTime {
     /// Changes only the time kind, without converting the calendar coordinates.
     pub const fn with_kind(self, kind: TnefDateTimeKind) -> Self {
         Self { kind, ..self }
+    }
+
+    /// Decodes local recurrence minutes since 1601-01-01 with unspecified kind.
+    ///
+    /// Every `u32` value fits within the supported calendar range. This is not
+    /// a FILETIME conversion: recurrence values describe local coordinates.
+    ///
+    /// ```
+    /// use mimecraft::tnef::{TnefDateTime, TnefDateTimeKind};
+    /// let date = TnefDateTime::from_recurrence_minutes(222751500);
+    /// assert_eq!((date.year(), date.month(), date.day()), (2024, 7, 10));
+    /// assert_eq!((date.hour(), date.minute()), (13, 0));
+    /// assert_eq!(date.kind(), TnefDateTimeKind::Unspecified);
+    /// ```
+    pub const fn from_recurrence_minutes(minutes: u32) -> Self {
+        Self {
+            ticks: FILE_TIME_OFFSET + minutes as u64 * TICKS_PER_SECOND * 60,
+            kind: TnefDateTimeKind::Unspecified,
+        }
     }
 
     /// Adds whole minutes, retaining the time kind and all fractional ticks.
