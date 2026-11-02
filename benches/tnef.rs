@@ -47,6 +47,12 @@ mod recurrence_fixtures;
 #[path = "support/tnef_calendar_recurrence.rs"]
 mod calendar_recurrence_workloads;
 
+#[path = "../tests/support/tnef_calendar.rs"]
+mod calendar_fixtures;
+
+#[path = "support/tnef_calendar_builder.rs"]
+mod calendar_builder_workloads;
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -83,6 +89,16 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
 }
 
 fn main() {
+    println!(
+        "Calendar builder: 8 build/write/observe/drop operations per batch; source loading is excluded."
+    );
+    for name in calendar_builder_workloads::CASES {
+        let case = calendar_builder_workloads::workload(name);
+        case.check();
+        measure(&format!("CalendarBuilder/{}", case.name), 0, || {
+            black_box(calendar_builder_workloads::run(&case));
+        });
+    }
     println!(
         "Calendar recurrence: 64 generations per batch, including full rule/date/error observation and drop; parsing and zone/fixture construction are excluded."
     );

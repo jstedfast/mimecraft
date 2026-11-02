@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. Low-level iCalendar writing and embedded time-zone rules support UTF-8-safe folding, checked UTC/local conversion, and VTIMEZONE output using dependency-free date types. Recurrence parsing retains raw patterns, deleted/modified dates, and merged exceptions with explicit malformed-tail recovery. Calendar recurrence helpers generate validated RRULE values and local EXDATEs. TNEF-to-MIME conversion, complete calendar-event building, and OLE helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, recursive content traversal, calendar output, time zones, recurrence parsing, and recurrence generation. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. Low-level iCalendar writing and embedded time-zone rules support UTF-8-safe folding, checked UTC/local conversion, and VTIMEZONE output using dependency-free date types. Recurrence parsing retains raw patterns, deleted/modified dates, and merged exceptions with explicit malformed-tail recovery. Calendar export assembles complete VCALENDAR snapshots, including recipients, stable UIDs, time zones, alarms, RRULE/EXDATE, exception attachments, explicit losses, and count/byte limits, with a UTF-8 text/calendar MIME-part helper. Broader TNEF-to-MIME conversion and OLE helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, recursive content traversal, calendar output, time zones, recurrence parsing/generation, and complete calendar build/write operations. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9415,7 +9415,95 @@ Default/scalar runs pass all 16 generation, 16 parser, 16 shared benchmark,
 scoped strict all-feature Clippy, and strict all-feature rustdoc pass.
 Eight original shared workloads cover this increment; upstream has no
 corresponding benchmark. Full event assembly, conversion-loss aggregation,
-and exception-attachment mapping remain separate work.
+and exception-attachment mapping are described below.
+
+### Complete calendar export
+
+`tnef::calendar::build_calendar` ports the remaining `TnefCalendarBuilder`
+behavior into an owned, immutable `Calendar` snapshot. `CalendarBuildResult`
+returns the optional calendar and ordered `CalendarLoss` diagnostics together,
+including when malformed data prevents generation. `CalendarOptions` controls
+generation, legacy fallback charset, exception count/byte limits, and an
+optional deterministic fallback DTSTAMP. `build_calendar_with_check` accepts
+a fallible cancellation callback before building and before each attachment
+and modified occurrence. No partial result is published on cancellation.
+The named-property constants on `TnefNameId` cover all calendar numeric
+descriptors; `keywords()` supplies the case-sensitive public-string descriptor.
+
+METHOD follows exact or dot-delimited appointment/request/cancellation/response
+classes, including tentative counter proposals. Master events map timestamps,
+normalized subject/body/location, categories, sensitivity/private status,
+importance/priority, busy status, sequence, Microsoft extensions, and reminders.
+Counter proposals preserve original start/end alongside proposed times.
+Organizer/attendee mapping handles published meetings, replies, recipient flags,
+required/optional/resource roles, PARTSTAT/RSVP, SMTP/search-key sources,
+sent-representing/sender fallback, and `invalid:nomail` for unresolved addresses.
+Bodies use their captured charset or the export fallback, with explicit
+replacement diagnostics and upstream trailing-whitespace cleanup. Like the
+upstream StreamReader, calendar export removes a matching Unicode preamble but
+does not switch encoding on a different BOM. Standalone body APIs are unchanged.
+
+UIDs preserve imported `vCal-Uid` values or encode GlobalObjectId with its
+instance date cleared, preferring CleanGlobalObjectId. Without a usable ID,
+SHA-256 of identifying properties produces MimeKit's deterministic,
+version-5-style UUID with .NET Guid byte ordering. The new `sha2` dependency
+serves only this UID compatibility mapping; date/time and time-zone support
+remain dependency-free. This does not add DKIM/ARC/DMARC support.
+
+Recurring events select recurrence TZDefinition, then legacy TimeZoneStruct,
+then explicitly report a UTC fallback. Single events use start/end display
+definitions. Identical named rules share a VTIMEZONE; conflicting names get
+stable suffixes and are reused. All-day events use local dates or nearest UTC
+midnight without a zone. Standalone recurrence instances derive RECURRENCE-ID
+from replacement time or the GlobalObjectId date and packed recurrence time.
+Invalid definitions and incompatible optional properties receive explicit
+losses rather than silently disappearing. Unrepresentable calendar dates
+discard the calendar, while invalid/unsupported rules retain a single event.
+
+Valid recurring masters include RRULE and EXDATE, then additional VEVENTs
+for modified occurrences. Exceptions share immutable master text/recipients,
+apply blob subject/location/busy/reminder/subtype overrides, then embedded
+calendar overrides. RECURRENCE-ID retains the master's date/time type even
+when the exception changes subtype. Only `AttachmentFlags` exception objects
+with IMessage framing are considered. Matching uses original UTC replacement
+time within strictly less than one minute, or changed local attachment start
+only when replacement time is absent. Attachments are never reused.
+Detached loads retain their existing depth/byte policies; framing and loading
+failures are reported with original attachment indices.
+
+Defaults are 1,024 modified occurrences and 16 MiB of combined serialized
+exception VEVENTs. The byte budget includes UTF-8, escaping, folding, and CRLF,
+but excludes the master and VTIMEZONEs. Measurement precedes acceptance; export
+stops at the first exception that cannot fit. Zero count skips embedded loading.
+The master's deleted-date membership uses all parsed exception originals,
+independent of either limit. Only accepted overrides consume attachment indices.
+Limits bound emitted exceptions, not total source/master memory or time.
+
+`Calendar::write_to` produces repeatable UTF-8/CRLF output and propagates write
+and flush failures. `to_text_part` creates `text/calendar; charset=utf-8` with
+the METHOD parameter. Input messages and attachment bytes are never changed.
+`exception_attachment_indices()` identifies exactly which original attachments
+an eventual MIME converter may remove; every other attachment must be retained.
+Automatic multipart restructuring, other TNEF-to-MIME conversion, and OLE
+handling remain outside this calendar API. The snapshot is not a general
+iCalendar parser/editor or an occurrence-expansion engine.
+
+Twenty-nine builder tests adapt the upstream calendar and robustness cases,
+alongside the existing writer/time-zone/recurrence suites. They cover exact
+meeting output/MIME labeling, an independent .NET SHA-256 UID vector,
+calendar metadata and recipient mappings, malformed properties/IDs/dates,
+time-zone fallback/conflicts, all-day overrides, attachment identity and
+matching boundaries, exact byte thresholds, large counts and description
+amplification, truncation/mutation sweeps, cancellation, and sink failures.
+Applicable specification, compatibility, layout, and boundary comments are
+retained and adapted. Intentional Rust differences include immutable snapshots,
+unsigned limits, explicit recovery results, and a mimecraft PRODID.
+
+Default/scalar runs pass the 29 builder, 17 shared benchmark, 16 recurrence
+generation, 16 recurrence parser, 18 time-zone, 14 calendar writer, and
+149 property tests. All 29 TNEF doctests, scoped strict all-feature Clippy,
+and strict all-feature rustdoc pass. Ten original calendar build/write
+benchmarks supplement the ported tests; upstream has no calendar benchmark.
 
 ### Streamed MAPI property values
 
@@ -11619,6 +11707,46 @@ baseline. Allocated bytes are cumulative, not peak memory. No throughput
 timings were recorded. The report is preserved under session
 `files/tnef-calendar-recurrence-allocations.json`.
 
+#### Complete calendar building and writing
+
+Ten original `tnef-calendar-builder/BuildWrite` workloads are registered in the
+standalone, native/metabench, optional Criterion, and regression harnesses.
+Each batch performs eight complete build/write/observe/drop operations on an
+already-loaded TNEF message. Recurrence parsing, embedded exception loading,
+exact size measurement, serialization, and full output/loss observation are
+included. Source fixture generation, outer message loading, and independent
+correctness checks are excluded. Criterion reports calendar operations;
+standalone output uses batches/s, not fictitious input-byte throughput.
+
+Appointment includes deterministic UID hashing; Meeting covers recipients,
+categories, and description; Counter preserves original times. TimeZone and
+LegacyZone cover display/legacy selection and VTIMEZONE output. Recurrence
+exports eight modified occurrences; Embedded adds attachment overlays and
+consumption. CountLimit exports two overrides; SizeLimit rejects all overrides;
+InvalidRecurrence reports recovery and retains the single event.
+Checks independently verify expected content lines, methods, event/zone counts,
+loss categories, consumed indices, physical folding, and exact exception bytes.
+Both fixtures are shared once per harness.
+
+| Case | Allocations per batch | Allocated bytes per batch |
+| --- | ---: | ---: |
+| Appointment | 272 | 30,560 |
+| Meeting | 424 | 46,768 |
+| Counter | 224 | 28,504 |
+| TimeZone | 328 | 41,016 |
+| LegacyZone | 344 | 40,888 |
+| Recurrence | 2,072 | 301,680 |
+| Embedded | 2,176 | 317,464 |
+| CountLimit | 952 | 84,320 |
+| SizeLimit | 688 | 64,576 |
+| InvalidRecurrence | 200 | 30,264 |
+
+All 198 unique native smoke/allocation cases pass. Every previous 188 allocation
+count and cumulative byte total is unchanged from the calendar-recurrence
+baseline. Allocated bytes are cumulative, not peak memory. No throughput
+timings were recorded. The report is preserved under session
+`files/tnef-calendar-builder-allocations.json`.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -11636,7 +11764,8 @@ cases, plus eleven attribute-writer, seven native property-writer, six
 property-value stream, six compressed-RTF property, six embedded-message,
 and four typed date/currency writer cases (40 TNEF writer cases), plus seven
 calendar writer, seven embedded time-zone, seven recurrence parser, and eight
-calendar recurrence generation cases, for 188 TNEF cases in total.
+calendar recurrence generation cases, and ten calendar build/write cases,
+for 198 TNEF cases in total.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

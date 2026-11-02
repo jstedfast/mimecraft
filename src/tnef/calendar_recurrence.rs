@@ -15,7 +15,7 @@ use super::{
 /// A recurrence that cannot be represented by the calendar rule generator.
 ///
 /// Unsupported calendars are distinguished from invalid patterns and date
-/// overflow so a future converter can report the appropriate loss.
+/// overflow so the calendar builder can report the appropriate loss.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecurrenceRuleError {
     /// The pattern/calendar combination needs non-Gregorian recurrence support.

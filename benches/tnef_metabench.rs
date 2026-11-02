@@ -47,6 +47,35 @@ mod recurrence_fixtures;
 #[path = "support/tnef_calendar_recurrence.rs"]
 mod calendar_recurrence_workloads;
 
+#[path = "../tests/support/tnef_calendar.rs"]
+mod calendar_fixtures;
+
+#[path = "support/tnef_calendar_builder.rs"]
+mod calendar_builder_workloads;
+
+fn prepare_calendar_builder(name: &'static str) -> calendar_builder_workloads::Workload {
+    let case = calendar_builder_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(CALENDAR_BUILDER, "tnef-calendar-builder", "BuildWrite")]
+#[bench::Appointment(&prepare_calendar_builder("Appointment"))]
+#[bench::Meeting(&prepare_calendar_builder("Meeting"))]
+#[bench::Counter(&prepare_calendar_builder("Counter"))]
+#[bench::TimeZone(&prepare_calendar_builder("TimeZone"))]
+#[bench::LegacyZone(&prepare_calendar_builder("LegacyZone"))]
+#[bench::Recurrence(&prepare_calendar_builder("Recurrence"))]
+#[bench::Embedded(&prepare_calendar_builder("Embedded"))]
+#[bench::CountLimit(&prepare_calendar_builder("CountLimit"))]
+#[bench::SizeLimit(&prepare_calendar_builder("SizeLimit"))]
+#[bench::InvalidRecurrence(&prepare_calendar_builder("InvalidRecurrence"))]
+fn build_write_calendar(
+    case: &calendar_builder_workloads::Workload,
+) -> calendar_builder_workloads::Summary {
+    calendar_builder_workloads::run(case)
+}
+
 fn prepare_calendar_recurrence(name: &'static str) -> calendar_recurrence_workloads::Workload {
     let case = calendar_recurrence_workloads::workload(name);
     case.check();
@@ -488,6 +517,15 @@ fn collect(case: &Workload) -> Summary {
 }
 
 fn criterion_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("tnef-calendar-builder");
+    for name in calendar_builder_workloads::CASES {
+        let case = prepare_calendar_builder(name);
+        group.throughput(Throughput::Elements(case.operations as u64));
+        group.bench_function(BenchmarkId::new("BuildWrite", name), |b| {
+            b.iter(|| calendar_builder_workloads::run(&case));
+        });
+    }
+    group.finish();
     let mut group = criterion.benchmark_group("tnef-calendar-recurrence");
     for name in calendar_recurrence_workloads::CASES {
         let case = prepare_calendar_recurrence(name);
@@ -675,6 +713,7 @@ metabench::main!(
         TIME_ZONE,
         RECURRENCE,
         CALENDAR_RECURRENCE,
+        CALENDAR_BUILDER,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

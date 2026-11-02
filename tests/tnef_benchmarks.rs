@@ -42,6 +42,22 @@ mod recurrence_fixtures;
 #[path = "../benches/support/tnef_calendar_recurrence.rs"]
 mod calendar_recurrence_workloads;
 
+#[path = "support/tnef_calendar.rs"]
+mod calendar_fixtures;
+
+#[path = "../benches/support/tnef_calendar_builder.rs"]
+mod calendar_builder_workloads;
+
+#[test]
+fn calendar_builder_workloads_match_output_losses_and_limits() {
+    for name in calendar_builder_workloads::CASES {
+        let case = calendar_builder_workloads::workload(name);
+        assert_eq!(case.name, name);
+        assert_eq!(case.operations, 8);
+        case.check();
+    }
+}
+
 #[test]
 fn calendar_recurrence_workloads_match_independent_rules_dates_and_errors() {
     for name in calendar_recurrence_workloads::CASES {

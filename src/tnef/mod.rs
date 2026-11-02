@@ -23,6 +23,8 @@
 //! Embedded time-zone rules support checked UTC/local conversion and VTIMEZONE writing.
 //! Recurrence patterns preserve local dates and report discarded malformed exceptions.
 //! Calendar recurrence helpers generate checked RRULE values and local EXDATEs.
+//! Calendar export assembles master/exception events, recipients, alarms and zones,
+//! with explicit losses, resource limits, and a UTF-8 text/calendar MIME-part helper.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -32,6 +34,8 @@ use std::{error::Error, fmt, io};
 
 mod attachment;
 pub mod calendar;
+mod calendar_builder;
+mod calendar_names;
 mod calendar_recurrence;
 mod date_time;
 mod embedded_writer;
