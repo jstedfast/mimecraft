@@ -8,7 +8,7 @@ use mimecraft::{
     MimeComplianceViolation as Violation, MimeReader,
 };
 
-pub const CASES: [&str; 22] = [
+pub const CASES: [&str; 27] = [
     "PlainSubject",
     "LongPlainSubject",
     "ShortQ",
@@ -31,12 +31,18 @@ pub const CASES: [&str; 22] = [
     "ParameterRepeated",
     "ParameterManyNames",
     "ParameterManySegments",
+    "ContentIdSingle",
+    "ContentIdRepeated",
+    "ContentIdFolded",
+    "ContentIdMany",
+    "ContentIdNoLogger",
 ];
 
 pub struct Workload {
     pub data: Vec<u8>,
     validators: Validators,
     expected: usize,
+    logging: bool,
 }
 
 impl Workload {
@@ -48,6 +54,8 @@ impl Workload {
 pub fn workload(name: &str) -> Workload {
     let mut field = if name.starts_with("Parameter") {
         "Content-Type"
+    } else if name.starts_with("ContentId") {
+        "Content-Id"
     } else {
         "Subject"
     };
@@ -129,16 +137,36 @@ pub fn workload(name: &str) -> Workload {
             text.push_str("\r\n");
             text
         }
+        "ContentIdSingle" => " <first@example.com>\r\n".into(),
+        "ContentIdRepeated" => {
+            expected = 1;
+            " <same@example.com>\r\nContent-Id: <same@example.com>\r\n".into()
+        }
+        "ContentIdFolded" => {
+            field = "X-Prefix";
+            expected = 2;
+            " \u{e9}\r\nContent-ID:\r\n <first@example.com>\r\ncOnTeNt-Id: <second@example.com>\r\nContent-Id: <third@example.com>\r\n".into()
+        }
+        "ContentIdMany" | "ContentIdNoLogger" => {
+            expected = if name == "ContentIdMany" { 255 } else { 0 };
+            format!(
+                " <first@example.com>\r\n{}",
+                "Content-Id: <same@example.com>\r\n".repeat(255)
+            )
+        }
         _ => panic!("unknown compliance workload: {name}"),
     };
     Workload {
         data: format!("{field}:{text}\r\n").into_bytes(),
         validators: if name.starts_with("Parameter") {
             Validators::PARAMETERS
+        } else if name.starts_with("ContentId") {
+            Validators::NONE
         } else {
             Validators::ENCODED_WORDS
         },
         expected,
+        logging: name != "ContentIdNoLogger",
     }
 }
 
@@ -151,6 +179,10 @@ pub fn validate(case: &Workload) -> usize {
         max_issues_per_violation: 0,
         ..Default::default()
     });
+    if !case.logging {
+        reader.read_headers(|_| Ok(())).unwrap();
+        return 0;
+    }
     let mut count = 0;
     reader
         .read_headers_with_logger(
@@ -166,6 +198,7 @@ pub fn validate(case: &Workload) -> usize {
                         | Violation::RepeatedBoundaryParameter
                         | Violation::RepeatedFilenameParameter
                         | Violation::MissingParameterSegment
+                        | Violation::RepeatedContentId
                 ) {
                     count += 1;
                 }

@@ -59,9 +59,11 @@ The queued performance work is:
    This remains deferred; `HeaderList::with_capacity` and pre-sized indexing
    when constructing a list from a vector already exist.
 
-After the TNEF port is complete, port MimeKit commit
-`7908d7d10a4ec4a5bc7129178d472b5af5555ba6` (repeated Content-Id diagnostics
-and compact reader state), including its regression tests.
+Porting has temporarily switched from TNEF to recent MIME compliance features.
+MimeKit commit `7908d7d10a4ec4a5bc7129178d472b5af5555ba6` (repeated Content-Id
+diagnostics and compact reader state) is ported with its regression tests.
+Next is `3376ca9f093f0603c34a5adeb39535fccbe304d5` (Base64 pad-bit validation
+in encoded words and MIME content). The remaining TNEF work above stays queued.
 
 Cryptography, including DKIM, ARC, and DMARC, is excluded from the current scope.
 `LegacyMimeParser` and its event-argument types will not be ported. These are
@@ -1914,7 +1916,7 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `1044247a`. Numeric identifiers
+and remarks are ported through MimeKit commit `7908d7d1`. Numeric identifiers
 match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
@@ -1933,6 +1935,23 @@ findings, in addition to the configurable per-violation quotas.
 type and before any parameter separator. This structural check remains enabled
 with `NONE`; parameter syntax failures alone do not trigger it. Tolerant reader
 recovery and raw serialization are unchanged, and typed getters remain strict.
+
+`RepeatedContentId` reports every Content-Id header after the first within each
+MIME entity, including identical, empty, and invalid values. It is a major
+interoperability/security issue in both contexts, positioned at the repeated
+header's start (`ElementStart`, column 1). This structural check remains enabled
+with `NONE`. Identical IDs in different entities are not repetitions; folded
+continuations and incomplete records without a colon are not additional fields.
+Raw headers, first-value identifier selection, and serialization are unchanged.
+Ordinary message-header and current resent-block tracking now share one 32-bit
+mask; ending a resent block preserves the ordinary header bits.
+
+The adapted upstream regressions cover entity/message/header-only reading,
+one-byte input, UTF-8 prefixes, nested multiparts and embedded messages, mbox
+resets, reporting limits and contexts, and unchanged owned-message loading.
+Additional cases cover logger errors and source replacement. The upstream
+Content-Length range regressions also pass with the existing checked signed
+32-bit parser and first-valid-value precedence; no length-parser change is needed.
 
 Parameter validation inspects every raw Content-Type and Content-Disposition
 header independently of decoded-value precedence. It reports repeated boundary,
@@ -10063,6 +10082,11 @@ They are not isolated validator timings or directly comparable to the upstream
 microbenchmarks. Generated headers and expected diagnostic-count assertions are
 outside timing; only the relevant validator is enabled and reports are counted,
 not retained. Both the standalone and metabench targets share these workloads.
+Five original Content-Id cases bring the shared inventory to 27: a single
+identifier, identical duplicates, folded/mixed-case fields with a UTF-8 prefix,
+256 fields with unlimited reporting, and the same 256-field input without a
+logger. These cases disable deeper validators; the no-logger baseline uses
+`read_headers` and does not allocate compliance reporting state.
 
 Six additional `stream/*/chunk=4096` cases port MimeKit's
 `Benchmarks/Encodings/Base64DecoderBenchmarks.cs`: `Unwrapped`, `MimeCrlf`,
@@ -11171,7 +11195,7 @@ with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 38 Base64, 27 MIME, 22 compliance, twelve HTML, twenty RTF,
+`benches/support`, covering all 38 Base64, 27 MIME, 27 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,

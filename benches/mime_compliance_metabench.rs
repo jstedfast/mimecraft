@@ -41,6 +41,11 @@ fn prepare(name: &str) -> Workload {
 #[bench::ParameterRepeated(&prepare("ParameterRepeated"))]
 #[bench::ParameterManyNames(&prepare("ParameterManyNames"))]
 #[bench::ParameterManySegments(&prepare("ParameterManySegments"))]
+#[bench::ContentIdSingle(&prepare("ContentIdSingle"))]
+#[bench::ContentIdRepeated(&prepare("ContentIdRepeated"))]
+#[bench::ContentIdFolded(&prepare("ContentIdFolded"))]
+#[bench::ContentIdMany(&prepare("ContentIdMany"))]
+#[bench::ContentIdNoLogger(&prepare("ContentIdNoLogger"))]
 fn validate(case: &Workload) -> usize {
     workloads::validate(case)
 }

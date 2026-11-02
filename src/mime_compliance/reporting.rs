@@ -238,10 +238,12 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
         message: bool,
         toplevel: bool,
     ) -> io::Result<()> {
+        // Upper bits track the current resent block; lower bits track the whole message.
+        const MESSAGE_HEADERS_MASK: u32 = (1 << 12) - 1;
         let mut seen = 0u32;
-        let mut resent = 0u32;
         let mut content_type = None;
         let mut content_disposition = false;
+        let mut content_id = false;
         let mut encoding = None;
         let mut mime_version = false;
         let mut end_column = 1;
@@ -425,19 +427,29 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                 if index.is_none_or(|index| index < 12) {
                     // Resent fields for a single resending are grouped together.
                     // Any other field ends that block, but not ordinary counts.
-                    resent = 0;
+                    seen &= MESSAGE_HEADERS_MASK;
                 }
                 if let (Some(violation), Some(index)) = (repeated, index) {
-                    let flags = if index < 12 { &mut seen } else { &mut resent };
                     let mask = 1 << index;
-                    let duplicate = *flags & mask != 0;
-                    *flags |= mask;
+                    let duplicate = seen & mask != 0;
+                    seen |= mask;
                     if duplicate {
                         self.issue(violation, start, 1, PositionKind::ElementStart)?;
                     }
                 }
             }
             match header.id() {
+                HeaderId::ContentId => {
+                    if content_id {
+                        self.issue(
+                            Violation::RepeatedContentId,
+                            start,
+                            1,
+                            PositionKind::ElementStart,
+                        )?;
+                    }
+                    content_id = true;
+                }
                 HeaderId::ContentDisposition => {
                     if content_disposition {
                         self.issue(

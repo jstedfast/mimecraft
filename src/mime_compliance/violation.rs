@@ -6,7 +6,7 @@ use super::{MimeComplianceCategories, MimeComplianceContext, MimeComplianceSever
 /// A MIME compliance defect, or notification that reporting was capped.
 ///
 /// Numeric values match MimeKit's unreleased enum, including its renumbering in
-/// commit `1044247a`. They are not yet stable persisted identifiers.
+/// commit `7908d7d1`. They are not yet stable persisted identifiers.
 /// Rust does not need MimeKit's uninitialized `None` sentinel.
 /// The enum includes checks not yet implemented by the reader; see
 /// [`crate::MimeReader::read_message_with_logger`] for reporting coverage.
@@ -40,187 +40,189 @@ pub enum MimeComplianceViolation {
     RepeatedContentType = 12,
     /// A MIME part contained multiple Content-Disposition headers.
     RepeatedContentDisposition = 13,
+    /// A MIME part contained multiple Content-Id headers.
+    RepeatedContentId = 14,
     /// A MIME part contained multiple Content-Transfer-Encoding headers.
-    RepeatedContentTransferEncoding = 14,
+    RepeatedContentTransferEncoding = 15,
     /// The message contained more than one Date header field.
-    RepeatedDate = 15,
+    RepeatedDate = 16,
     /// The message contained more than one From header field.
-    RepeatedFrom = 16,
+    RepeatedFrom = 17,
     /// The message contained more than one Sender header field.
-    RepeatedSender = 17,
+    RepeatedSender = 18,
     /// The message contained more than one Reply-To header field.
-    RepeatedReplyTo = 18,
+    RepeatedReplyTo = 19,
     /// The message contained more than one To header field.
-    RepeatedTo = 19,
+    RepeatedTo = 20,
     /// The message contained more than one Cc header field.
-    RepeatedCc = 20,
+    RepeatedCc = 21,
     /// The message contained more than one Bcc header field.
-    RepeatedBcc = 21,
+    RepeatedBcc = 22,
     /// The message contained more than one Message-Id header field.
-    RepeatedMessageId = 22,
+    RepeatedMessageId = 23,
     /// The message contained more than one In-Reply-To header field.
-    RepeatedInReplyTo = 23,
+    RepeatedInReplyTo = 24,
     /// The message contained more than one References header field.
-    RepeatedReferences = 24,
+    RepeatedReferences = 25,
     /// The message contained more than one Subject header field.
-    RepeatedSubject = 25,
+    RepeatedSubject = 26,
     /// The message contained more than one Return-Path header field.
-    RepeatedReturnPath = 26,
+    RepeatedReturnPath = 27,
     /// A block of resent header fields contained more than one Resent-Date header field.
-    RepeatedResentDate = 27,
+    RepeatedResentDate = 28,
     /// A block of resent header fields contained more than one Resent-From header field.
-    RepeatedResentFrom = 28,
+    RepeatedResentFrom = 29,
     /// A block of resent header fields contained more than one Resent-Sender header field.
-    RepeatedResentSender = 29,
+    RepeatedResentSender = 30,
     /// A block of resent header fields contained more than one Resent-To header field.
-    RepeatedResentTo = 30,
+    RepeatedResentTo = 31,
     /// A block of resent header fields contained more than one Resent-Cc header field.
-    RepeatedResentCc = 31,
+    RepeatedResentCc = 32,
     /// A block of resent header fields contained more than one Resent-Bcc header field.
-    RepeatedResentBcc = 32,
+    RepeatedResentBcc = 33,
     /// A block of resent header fields contained more than one Resent-Message-Id header field.
-    RepeatedResentMessageId = 33,
+    RepeatedResentMessageId = 34,
     /// The message did not contain a Date header field.
-    MissingDate = 34,
+    MissingDate = 35,
     /// The message did not contain a From header field.
-    MissingFrom = 35,
+    MissingFrom = 36,
     /// The message did not contain a Message-Id header field.
-    MissingMessageId = 36,
+    MissingMessageId = 37,
     /// The message contained MIME header fields but no MIME-Version header field.
-    MissingMimeVersion = 37,
+    MissingMimeVersion = 38,
     /// A Content-Type header value was not valid.
-    InvalidContentType = 38,
+    InvalidContentType = 39,
     /// A Content-Transfer-Encoding header value was not valid.
-    InvalidContentTransferEncoding = 39,
+    InvalidContentTransferEncoding = 40,
     /// A Content-Transfer-Encoding header for a message/rfc822 part contained an illegal value.
-    IllegalMessageRfc822ContentTransferEncoding = 40,
+    IllegalMessageRfc822ContentTransferEncoding = 41,
     /// A Content-Transfer-Encoding header for a multipart contained an illegal value.
-    IllegalMultipartContentTransferEncoding = 41,
+    IllegalMultipartContentTransferEncoding = 42,
     /// A boundary parameter was missing from a multipart Content-Type header.
-    MissingMultipartBoundaryParameter = 42,
+    MissingMultipartBoundaryParameter = 43,
     /// A boundary parameter in a multipart Content-Type header was not valid.
-    InvalidMultipartBoundaryParameter = 43,
+    InvalidMultipartBoundaryParameter = 44,
     /// A MIME parameter declaration was malformed.
-    InvalidParameter = 44,
+    InvalidParameter = 45,
     /// An RFC 2231 encoded parameter value was malformed.
-    InvalidRfc2231Parameter = 45,
+    InvalidRfc2231Parameter = 46,
     /// A MIME parameter value contained RFC 2047 encoded-word syntax.
-    EncodedWordInParameter = 46,
+    EncodedWordInParameter = 47,
     /// A Content-Type header contained repeated boundary parameter declarations.
-    RepeatedBoundaryParameter = 47,
+    RepeatedBoundaryParameter = 48,
     /// A Content-Type name or Content-Disposition filename parameter was repeated.
-    RepeatedFilenameParameter = 48,
+    RepeatedFilenameParameter = 49,
     /// A MIME parameter other than a boundary or filename parameter was repeated.
-    RepeatedParameter = 49,
+    RepeatedParameter = 50,
     /// An RFC 2231 parameter continuation was missing one or more segments.
-    MissingParameterSegment = 50,
+    MissingParameterSegment = 51,
     /// A header contained malformed RFC 2047 encoded-word syntax.
-    InvalidEncodedWord = 51,
+    InvalidEncodedWord = 52,
     /// An address header contained an encoded-word in a prohibited location.
-    InvalidEncodedWordPlacement = 52,
+    InvalidEncodedWordPlacement = 53,
     /// An address contained more angle brackets than the one pair that delimits an angle-addr.
-    ExcessiveAngleBracketsInAddress = 53,
+    ExcessiveAngleBracketsInAddress = 54,
     /// An address had an opening angle bracket without a closing one, or a closing bracket without an opening one.
-    UnbalancedAngleBracketsInAddress = 54,
+    UnbalancedAngleBracketsInAddress = 55,
     /// An address contained a quoted-string that was never closed.
-    UnbalancedQuotesInAddress = 55,
+    UnbalancedQuotesInAddress = 56,
     /// An address contained an unbalanced parenthesis in a comment.
-    UnbalancedParenthesesInAddress = 56,
+    UnbalancedParenthesesInAddress = 57,
     /// The display-name of an address contained a special character that should have been quoted.
-    UnquotedDisplayName = 57,
+    UnquotedDisplayName = 58,
     /// The display-name of a mailbox was itself shaped like an address.
-    AddressInDisplayName = 58,
+    AddressInDisplayName = 59,
     /// The unquoted display-name of a mailbox was itself shaped like an address.
-    UnquotedAddressInDisplayName = 59,
+    UnquotedAddressInDisplayName = 60,
     /// The display-name of an address group was itself shaped like an address.
-    AddressInGroupDisplayName = 60,
+    AddressInGroupDisplayName = 61,
     /// The unquoted display-name of an address group was itself shaped like an address.
-    UnquotedAddressInGroupDisplayName = 61,
+    UnquotedAddressInGroupDisplayName = 62,
     /// The local-part of an address was not a valid dot-atom or quoted-string.
-    InvalidLocalPart = 62,
+    InvalidLocalPart = 63,
     /// Two addresses in an address list were not separated by a comma.
-    MissingAddressSeparator = 63,
+    MissingAddressSeparator = 64,
     /// An address list contained two addresses whose boundary was ambiguous.
-    AmbiguousMailboxBoundary = 64,
+    AmbiguousMailboxBoundary = 65,
     /// An address list contained a comma that did not separate two addresses.
-    ExtraneousCommaInAddressList = 65,
+    ExtraneousCommaInAddressList = 66,
     /// An address used the obsolete source route syntax.
-    ObsoleteRouteAddress = 66,
+    ObsoleteRouteAddress = 67,
     /// An address consisted of a local-part with no domain.
-    AddressWithoutDomain = 67,
+    AddressWithoutDomain = 68,
     /// The domain of an address used the obsolete syntax that allows comments and whitespace between its parts.
-    ObsoleteDomainSyntax = 68,
+    ObsoleteDomainSyntax = 69,
     /// The domain of an address was not a valid dot-atom.
-    InvalidDomain = 69,
+    InvalidDomain = 70,
     /// The domain of an address ended with a dot.
-    TrailingDotInDomain = 70,
+    TrailingDotInDomain = 71,
     /// A domain-literal contained whitespace.
-    WhitespaceInDomainLiteral = 71,
+    WhitespaceInDomainLiteral = 72,
     /// A domain-literal contained a character that the domain-literal syntax does not permit.
-    InvalidCharacterInDomainLiteral = 72,
+    InvalidCharacterInDomainLiteral = 73,
     /// An address contained 8-bit bytes that were not valid UTF-8.
-    Invalid8BitAddress = 73,
+    Invalid8BitAddress = 74,
     /// An address group was not terminated with a semi-colon.
-    MissingGroupTerminator = 74,
+    MissingGroupTerminator = 75,
     /// An address did not conform to the address syntax defined by rfc5322.
-    NonConformantAddress = 75,
+    NonConformantAddress = 76,
     /// An address contained a null byte.
-    NullByteInAddress = 76,
+    NullByteInAddress = 77,
     /// The display-name of an address or group contained a null byte.
-    NullByteInDisplayName = 77,
+    NullByteInDisplayName = 78,
     /// A line break appeared inside a local-part or domain.
-    LineBreakInAddress = 78,
+    LineBreakInAddress = 79,
     /// An address contained a control character.
-    ControlCharacterInAddress = 79,
+    ControlCharacterInAddress = 80,
     /// The local-part of an address contained an ISO-2022 shift or escape sequence.
-    Iso2022SequenceInLocalPart = 80,
+    Iso2022SequenceInLocalPart = 81,
     /// An address group had an empty name.
-    EmptyGroupName = 81,
+    EmptyGroupName = 82,
     /// An address group was nested inside another address group.
-    NestedAddressGroup = 82,
+    NestedAddressGroup = 83,
     /// An empty line separating the headers from the body was missing.
-    MissingBodySeparator = 83,
+    MissingBodySeparator = 84,
     /// A multipart boundary was missing.
-    MissingMultipartBoundary = 84,
+    MissingMultipartBoundary = 85,
     /// The MIME structure was nested more deeply than the parser allows.
-    MimeDepthLimitExceeded = 85,
+    MimeDepthLimitExceeded = 86,
     /// The base64 encoded content of a MIME part ended with an incomplete quantum.
-    IncompleteBase64Quantum = 86,
+    IncompleteBase64Quantum = 87,
     /// The base64 encoded content of a MIME part contained invalid characters.
-    InvalidBase64Character = 87,
+    InvalidBase64Character = 88,
     /// The base64 encoded content of a MIME part contained invalid padding.
-    InvalidBase64Padding = 88,
+    InvalidBase64Padding = 89,
     /// The base64 encoded content of a MIME part contained characters after the padding.
-    Base64CharactersAfterPadding = 89,
+    Base64CharactersAfterPadding = 90,
     /// The base64 encoded content of a MIME part contained an obsolete comment.
-    ObsoleteBase64Comment = 90,
+    ObsoleteBase64Comment = 91,
     /// The quoted-printable encoded content of a MIME part contained an invalid hex sequence after an '=' character.
-    InvalidQuotedPrintableEncoding = 91,
+    InvalidQuotedPrintableEncoding = 92,
     /// The quoted-printable encoded content of a MIME part contained an invalid soft-break sequence.
-    InvalidQuotedPrintableSoftBreak = 92,
+    InvalidQuotedPrintableSoftBreak = 93,
     /// The uuencoded content of a MIME part contained non-whitespace content before the begin marker.
-    InvalidUUEncodePretext = 93,
+    InvalidUUEncodePretext = 94,
     /// The uuencoded content of a MIME part had an invalid file mode in the begin marker.
-    InvalidUUEncodeFileMode = 94,
+    InvalidUUEncodeFileMode = 95,
     /// The uuencoded content of a MIME part contained invalid characters or was otherwise malformed.
-    InvalidUUEncodedContent = 95,
+    InvalidUUEncodedContent = 96,
     /// The uuencoded content of a MIME part had an invalid encoded line length.
-    InvalidUUEncodedLineLength = 96,
+    InvalidUUEncodedLineLength = 97,
     /// The uuencoded content of a MIME part contained an incomplete encoded line.
-    IncompleteUUEncodedLine = 97,
+    IncompleteUUEncodedLine = 98,
     /// The uuencoded content of a MIME part had extra data beyond the end of a uuencoded line.
-    InvalidUUEncodedLineExtraData = 98,
+    InvalidUUEncodedLineExtraData = 99,
     /// The uuencoded content of a MIME part contained non-whitespace content after the end marker.
-    InvalidUUEncodeEndMarker = 99,
+    InvalidUUEncodeEndMarker = 100,
     /// The uuencoded content of a MIME part did not properly end.
-    IncompleteUUEncodedContent = 100,
+    IncompleteUUEncodedContent = 101,
     /// Too many compliance issues were detected and the remainder were suppressed.
     TooManyComplianceIssues = 2147483647,
 }
 
 impl MimeComplianceViolation {
     /// All supported diagnostic identifiers, including the truncation marker.
-    pub const ALL: [Self; 101] = [
+    pub const ALL: [Self; 102] = [
         Self::BareCarriageReturnInHeader,
         Self::BareLinefeedInHeader,
         Self::BareLinefeedInBody,
@@ -234,6 +236,7 @@ impl MimeComplianceViolation {
         Self::BlankHeaderContinuationLine,
         Self::RepeatedContentType,
         Self::RepeatedContentDisposition,
+        Self::RepeatedContentId,
         Self::RepeatedContentTransferEncoding,
         Self::RepeatedDate,
         Self::RepeatedFrom,
@@ -376,6 +379,7 @@ impl MimeComplianceViolation {
             // mail client can still be made to disagree about who a message was addressed to or
             // what it claims to be about.
             Self::RepeatedContentDisposition
+            | Self::RepeatedContentId
             | Self::RepeatedFilenameParameter
             | Self::RepeatedParameter
             | Self::MissingParameterSegment
@@ -531,6 +535,7 @@ impl MimeComplianceViolation {
             Self::InvalidContentType
             | Self::RepeatedContentType
             | Self::RepeatedContentDisposition
+            | Self::RepeatedContentId
             | Self::RepeatedBoundaryParameter
             | Self::RepeatedFilenameParameter
             | Self::RepeatedParameter
@@ -730,6 +735,7 @@ impl MimeComplianceViolation {
             Self::RepeatedContentDisposition => {
                 "A MIME part contained multiple Content-Disposition headers."
             }
+            Self::RepeatedContentId => "A MIME part contained multiple Content-Id headers.",
             Self::RepeatedBoundaryParameter => {
                 "A Content-Type header contained repeated boundary parameter declarations."
             }
@@ -988,6 +994,9 @@ impl MimeComplianceViolation {
             }
             Self::RepeatedContentDisposition => {
                 "Repeated Content-Disposition headers can cause MIME parsers to disagree about a part's filename or whether it should be displayed inline or treated as an attachment."
+            }
+            Self::RepeatedContentId => {
+                "Repeated Content-Id headers can cause MIME parsers to disagree about a part's identifier and which content a reference to that identifier selects. Each header after the first is reported, even when its value is identical or invalid. The check is per MIME part, not a comparison of identifiers across different parts."
             }
             Self::RepeatedBoundaryParameter => {
                 "Competing boundary values can cause MIME parsers to discover different body parts. Ordinary and extended values compete, as do repeated RFC 2231 continuation indices. Distinct segments of a single continued value are not repetitions."

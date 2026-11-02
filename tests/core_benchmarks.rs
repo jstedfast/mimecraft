@@ -14,6 +14,16 @@ mod filters;
 #[path = "../benches/support/message.rs"]
 mod message;
 
+#[path = "../benches/support/mime_compliance.rs"]
+mod mime_compliance;
+
+#[test]
+fn compliance_workloads_report_expected_diagnostics() {
+    for name in mime_compliance::CASES {
+        mime_compliance::workload(name).check();
+    }
+}
+
 #[test]
 fn address_workloads_match_upstream() {
     for name in headers::CASES {
