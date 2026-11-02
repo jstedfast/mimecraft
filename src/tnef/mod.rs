@@ -14,6 +14,10 @@
 //! Whole-message loading maps legacy metadata, selects bodies, and groups attachments.
 //! Attribute writing enforces ordering and supplies framing, codepage, and checksums.
 //! Buffered attribute streams support unknown lengths and caller-owned scratch storage.
+//! Property writing supplies native values, named IDs, recipient rows, and checked snapshots.
+//! Binary/object value streams append to attribute scratch with checked explicit completion.
+//! RTF property encoders write LZFu/MELA directly to that scratch without a second buffer.
+//! Embedded writers add IMessage framing, inherit codepages, and support runtime recursion.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
@@ -24,11 +28,14 @@ use std::{error::Error, fmt, io};
 
 mod attachment;
 mod date_time;
+mod embedded_writer;
 mod message;
 mod message_body;
+mod property_rtf_writer;
 mod property_set;
 mod property_tags;
 mod property_types;
+mod property_writer;
 mod reader;
 mod recipient;
 mod rtf_compressed;
@@ -37,12 +44,15 @@ mod value_conversion;
 mod writer;
 pub use attachment::{TnefAttachFlags, TnefAttachMethod, TnefAttachment, TnefAttachmentContent};
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
+pub use embedded_writer::{TnefEmbeddedSink, TnefEmbeddedWriter};
 pub use message::TnefMessage;
 pub use message_body::{TnefBodyError, TnefBodyReader, TnefMessageBody, TnefMessageBodyFormat};
+pub use property_rtf_writer::TnefRtfPropertyWriter;
 pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{
     TnefName, TnefNameId, TnefPropertyInfo, TnefPropertyTag, TnefPropertyType, TnefValue,
 };
+pub use property_writer::{TnefPropertyValueWriter, TnefPropertyWriter};
 pub use reader::{TnefEmbeddedContent, TnefEmbeddedReader, TnefEmbeddedSource};
 pub use reader::{TnefPropertyReader, TnefPropertyValueReader, TnefReader, TnefValueReader};
 pub use recipient::{TnefRecipient, TnefRecipientType};
@@ -53,6 +63,7 @@ pub use writer::{TnefAttributeWriter, TnefWriter};
 
 const SIGNATURE: u32 = 0x223e9f78;
 const VERSION: u32 = 0x00010000;
+const MESSAGE_IID: [u8; 16] = [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 
 fn checksum(previous: u16, bytes: &[u8]) -> u16 {
     // Addition modulo 65536 is associative. Accumulate at full width and

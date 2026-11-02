@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. TNEF-to-MIME conversion, property writing, and embedded-message writing remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. TNEF-to-MIME conversion and calendar/decimal write helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9030,7 +9030,8 @@ Short/interrupted buffer operations are handled. Buffer errors, early EOF,
 changed lengths, zero writes, and sink errors are terminal; over-limit writes
 are rejected before scratch I/O and leave the child usable.
 
-Property/value writers, embedded-message writers, and async/cancellation APIs
+Property writing, its Binary/Object value streams, RTF encoders, and embedded
+message writers use this buffer as described below. Async/cancellation APIs
 remain separate work.
 
 Attribute lengths are limited to `i32::MAX`. Unsupported codepages, codepage
@@ -9065,11 +9066,228 @@ A compile-fail doctest checks exclusive parent borrowing. Applicable upstream
 comments are retained with Rust-specific ownership/finalization explanations.
 Eleven original benchmark workloads have independent framing/full-content checks.
 
-The default/scalar scoped suites, including `MemoryBlockStream`, pass 255 tests
-with one existing ignored raw-reader test. Strict scoped Clippy, fourteen TNEF
-doctests, strict rustdoc, and all 130 native benchmark smoke/allocation cases
-pass. TNEF conversion and the property-writing layer are still pending; this
-does not complete the TNEF port.
+The default/scalar scoped suites, including `MemoryBlockStream` and the property
+writers below, each pass 310 tests with one existing ignored raw-reader test.
+Strict scoped Clippy, twenty-two TNEF doctests, strict rustdoc, and all 155 native
+benchmark smoke/allocation cases pass. This does not complete the TNEF port.
+
+### MAPI property and recipient-row writing
+
+`TnefWriter::open_properties` and `open_properties_with_buffer` return an
+exclusively borrowed `TnefPropertyWriter` for `MAPI_PROPERTIES`, `ATTACHMENT`,
+or `RECIPIENT_TABLE`. They reuse the attribute writer's default memory block
+stream or caller-supplied readable/writable/seekable storage. The parent sink
+remains forward-only. Attribute grammar and buffer validation are checked
+before opening; failure to write the initial count placeholder is terminal.
+
+`write_tag` begins an ordinary property and `write_named_tag` begins a named
+one. `write_value(&TnefValue)` appends an exact native variant; scalar properties
+require exactly one value, Null has no wire value, and supported multivalues
+may be empty. Unspecified/unknown types and multivalued Null, Error, Boolean,
+or Object are rejected. `begin_row` is mandatory before recipient properties,
+closes the preceding row, and preserves empty rows. Property, row, and value
+counts and all lengths are bounded by `i32::MAX`; attribute capacity is checked
+before appending each logical operation.
+
+The writer supplies little-endian tags/counts, variable-value byte lengths,
+String8/UTF-16LE terminators, and DWORD padding. Integers and float bits remain
+native, currency accepts its exact scaled integer without decimal conversion,
+GUIDs retain Windows byte order, and objects require their 16-byte IID.
+FILETIME/OLE values are checked against the existing date decoder's range and
+retain their original wire numbers. Calendar-to-wire date helpers and decimal
+currency rounding are not included: synthesized `TnefValue::DateTime` values
+are explicitly rejected. String8 uses the output codepage with strict encoding.
+
+Named IDs span 0x8000-0xfffe, allocated lazily on the parent writer and shared
+across its property attributes and recipient rows. Reusing the same GUID and
+case-sensitive numeric/string name reuses the ID, independently of value type.
+Unknown name kinds and exhausted new IDs are rejected; existing names remain
+usable at exhaustion. Name descriptors include the terminated UTF-16LE byte
+length and padding. `TnefName` and `TnefNameId` now implement `Hash` consistently
+with their existing equality.
+
+`write_property` copies owned reader snapshots, remaps named IDs, and re-encodes
+text in the destination codepage. It prevalidates every value, name, count, and
+the aggregate byte requirement before changing scratch data or assigning an ID.
+Snapshots with invalid native values, names, or cardinality are rejected;
+already-lost reader data cannot be reconstructed. Empty Null snapshots and the
+reader's single `TnefValue::Null` representation both write only the Null tag.
+
+Counts are patched in scratch storage without changing accepted byte counts.
+Short/interrupted seek/write/read operations are handled; patch failures and
+other scratch/output failures permanently fault the child and parent.
+`flush` flushes scratch only. Consuming `finish` checks the last scalar, patches
+counts, emits the attribute immediately, and returns scratch at its end.
+The parent still requires its own `finish`. Unfinished drop, `into_inner`, and
+even forgotten children cannot permit successful parent completion. Borrowing
+scratch preserves ownership on errors; owned buffers retain their normal drop
+behavior, and there is no writer drop I/O.
+
+Ten tests in `tests/tnef_writer/properties.rs` adapt upstream all-native-type,
+multivalue, named-property, snapshot-copy, recipient-row, empty-table, validation,
+and incomplete-writer cases. They add independent byte-exact framing, every
+padding remainder, strict encoding, non-BMP names/text, cross-attribute IDs,
+float bit preservation, invalid raw dates, and forgotten borrowed children.
+Five tests in the existing buffered test module cover initial/partial scratch
+writes, count-patch failures, short/interrupted patches and replay, and every
+partial sink-write boundary while retaining borrowed scratch. Three internal
+tests cover invalid snapshot preflight, count/capacity limits without large
+allocations, and all 32,767 named IDs. A compile-fail doctest checks exclusive
+parent borrowing. Applicable upstream tag/count, Null, name layout, padding,
+FILETIME, and snapshot-validation comments are retained.
+
+Seven original property-writing benchmarks share the existing writer harness.
+Binary/Object value streams, compressed-RTF integration, and embedded-message
+writers are described below. Calendar/decimal write helpers and TNEF-to-MIME
+conversion remain pending.
+
+### Streamed MAPI property values
+
+`TnefPropertyWriter::open_value` returns an exclusively borrowed
+`TnefPropertyValueWriter` for one Binary or Object value. It writes a length
+placeholder and then appends payload directly to the existing attribute scratch
+buffer, without another buffer or per-value heap allocation. The value child
+implements append-only `Write`, not `Read` or `Seek`; `len` and `is_empty` report
+acknowledged payload bytes, excluding framing/padding. Object data must include
+the 16-byte interface IID. Binary multivalues may mix streamed and native values,
+including explicitly completed empty streams.
+
+Opening checks the property type, scalar cardinality, value-count limit, and
+minimum capacity before I/O. Each write reserves both requested bytes and final
+DWORD padding within the signed 32-bit attribute/value limits before touching
+scratch. Short writes update only acknowledged length; Interrupted I/O is
+retried. Size/validation errors before mutation leave a value usable, while
+scratch errors and zero writes are terminal.
+
+Consuming `finish` rejects undersized Objects, patches the payload length, adds
+padding, and then increments the property value count. It neither flushes scratch
+nor emits the attribute; the property writer and its parent still require their
+own explicit completion. `flush` flushes scratch only. The property writer is
+blocked from the moment a value opens until successful finish, including when a
+child is dropped or forgotten. Thus abandoning an empty multivalue cannot
+silently omit it and report success. Failed consuming finish also leaves it
+blocked. No I/O or scratch destruction occurs on value drop; property
+`into_inner` can recover unfinished storage.
+
+Seven tests in `tests/tnef_writer/value_streams.rs` adapt upstream streamed
+multivalues, required child completion, and three-attachment loading with
+metadata and full content. They also cover byte-exact scalar Binary/Object
+framing across all padding remainders and block boundaries, split writes,
+empty values, named recipient rows, borrowed scratch, recoverable invalid opens,
+every undersized IID, and forgotten children. Four buffered tests cover every
+partial scalar/multivalue scratch write, length-patch seek/write/restore and
+padding failures, zero writes, flush errors, short/interrupted operations, and
+no drop I/O. The existing file-backed test now also streams a 100,000-byte
+property value into borrowed file scratch. Two internal regressions exercise
+exact value/padding/count limits without large allocations. Ordinary and
+compile-fail doctests demonstrate explicit completion and exclusive borrowing.
+Applicable upstream variable-value finalization and empty-multivalue comments
+are retained, with disposal callbacks adapted to explicit Rust finish.
+
+Six original stream-writing workloads extend all existing writer benchmark
+harnesses. Compressed-RTF integration and embedded-message writers are described
+below.
+
+### Compressed-RTF property writing
+
+`TnefPropertyWriter::open_rtf_compressed(mode)` returns an exclusively borrowed
+`TnefRtfPropertyWriter` for a Binary value. Compressed LZFu and uncompressed MELA
+reuse the existing MS-OXRTFCP encoder, including its inline dictionary and input
+buffers. Encoding writes directly to attribute scratch without a second payload
+buffer. The public child remains append-only `Write`; a private bounded seek
+adapter permits only overwrites within that value and restores the scratch append
+position after each header patch. Named and multivalued Binary properties work
+in property lists, attachment properties, and recipient rows. The property need
+not have the built-in `RTF_COMPRESSED` tag. Input bytes are not charset-converted,
+and RTF syntax is not validated.
+
+Opening rejects non-Binary types, unknown compression modes, scalar/count
+violations, and insufficient minimum header/end-marker capacity before changing
+scratch. `raw_size` reports acknowledged input; `compression_mode` and
+`is_faulted` expose encoder state. `flush` encodes available input and flushes
+scratch without discarding lookahead or completing the value. Consuming `finish`
+first completes compression, patches the RTF sizes/mode/CRC, and flushes scratch;
+then it patches the enclosing Binary length, appends padding, and counts the
+value. Neither operation emits the attribute. The property writer and parent
+still need their own completion. Failed finalization, dropped children, and
+forgotten children leave properties blocked, even for empty multivalues.
+Scratch/encoding I/O failures are terminal; no I/O occurs on drop.
+
+Seven tests in `tests/tnef_writer/rtf.rs` adapt MimeKit's 500-line RTF body and
+compressed-multivalue cases. The body test requires complete compressed TNEF
+output to be smaller than one quarter of raw input and checks whole-message
+text recovery. Further coverage includes both modes, every input split with
+intermediate flushes, empty/tail/block-boundary inputs, exact framing between
+neighboring properties, mixed native/encoded multivalues, named IDs across
+attributes and rows, invalid opens, and abandoned children. Four buffered tests
+exercise every partial scratch-write boundary, header/value patch seek/restore
+failures, zero writes, flush failures, encoding errors after accepted input,
+short/interrupted I/O, and ownership. The existing file-backed test encodes and
+decodes 100,000 bytes in both modes using borrowed file scratch. A private
+regression checks bounded seeks/overwrites without changing accepted length or
+surrounding bytes. Ordinary and compile-fail doctests cover explicit completion
+and exclusive borrowing. Applicable upstream comments are retained and disposal
+callbacks are adapted to explicit Rust finalization.
+
+Six original shared benchmark workloads cover both modes, Cursor scratch,
+one-byte input, seven-byte scratch writes, and separately encoded multivalues.
+Embedded-message writing is described below. Calendar/decimal helpers and
+TNEF-to-MIME conversion remain pending.
+
+### Embedded-message writing
+
+`TnefPropertyWriter::open_embedded_message` returns an exclusively borrowed
+`TnefEmbeddedWriter` for one Object value, writes the IMessage IID automatically,
+and inherits the enclosing message's codepage. The `_with_codepage` variant
+selects a different supported codepage. Embedded legacy keys are zero.
+Type, codepage, scalar/count, and minimum empty-message capacity validation
+precede mutation. The codepage check retains MimeKit's rationale: an invalid
+embedded open must leave the property usable without a partial value.
+
+The child exposes ordinary `TnefWriter` operations through `Deref`/`DerefMut`.
+Its `TnefEmbeddedSink` erases the enclosing writer/scratch types through a
+borrowed trait object, matching the reader's runtime-recursion approach without
+boxing or an extra message buffer. Output appends to the existing Object value
+using the same checked length/padding logic as raw streams. Nested buffered
+attributes have independent scratch storage: memory blocks by default, or
+explicit owned/borrowed buffers, including files. This replaces upstream stream
+factory inheritance with the existing Rust per-attribute scratch API.
+
+Each embedded message has its own named-property ID table, as in the upstream
+implementation. The upstream test named `TestNamedPropertyIdsAreSharedByEmbeddedMessages`
+checks named-property recovery inside an embedded message, not cross-message ID
+allocation; its constructors actually allocate separate dictionaries. The
+earlier proposed shared nested-ID work is therefore not needed for parity.
+Names still share IDs across attributes and recipient rows within each message.
+
+Consuming `finish` completes the embedded TNEF header/attributes, flushes enclosing
+scratch, and only then patches the Object length, padding, and value count.
+`flush` does not finish the Object or emit its enclosing attribute. Finishing
+only the dereferenced `TnefWriter` is insufficient; the wrapper must also finish.
+Incomplete nested properties, failed scratch I/O, dropped children, and forgotten
+children leave all enclosing writers blocked. There is no drop I/O. Borrowed
+scratch survives errors; successfully finished attributes return owned scratch
+for explicit reuse or destruction.
+
+Seven tests in `tests/tnef_writer/embedded.rs` adapt upstream nested attachments,
+codepage inheritance/override, invalid-codepage recovery, incomplete-child
+errors, and embedded named properties. They also cover exact IID/header/value
+framing and padding, neighboring properties, empty messages, nested compressed
+RTF, strict invalid
+types, named Object recipient values, independent nested IDs, abandoned and
+inner-only-finished writers, and runtime-recursive writing through a stable
+sink type. Five buffered tests exercise every partial scratch write, zero
+writes, final flush/length-patch/seek/restore/padding failures, nested scratch
+failures, short/interrupted operations, no drop I/O, and independent owned
+scratch. The existing file test now writes and reads a 100,000-byte nested
+property through borrowed file scratch. Ordinary and compile-fail doctests
+demonstrate explicit completion and the upstream parent-blocking rule.
+Applicable upstream inline comments are retained with Rust ownership adaptations.
+
+Six shared benchmark workloads cover large embedded values, Cursor scratch,
+seven-byte scratch writes, eight levels of runtime nesting, Windows-1251
+encoding, and many sibling messages. Calendar/decimal convenience conversions,
+TNEF-to-MIME conversion, and remaining calendar/OLE helpers remain separate work.
 
 ### MAPI properties and recipient rows
 
@@ -10777,7 +10995,8 @@ the attachment payload. Buffered cases additionally include fresh scratch
 allocation, append operations, flush/length validation/rewind, replay into the
 parent, and destruction of returned scratch storage.
 
-All 130 smoke and allocation cases pass. Per-operation allocations and
+The buffered-attribute baseline passed all 130 smoke and allocation cases.
+Per-operation allocations and
 cumulative allocated bytes (not peak memory) are:
 
 | Case | Allocations | Allocated bytes |
@@ -10805,6 +11024,145 @@ No throughput timings were recorded for this increment. The schema-v9 report
 is preserved under session
 `files/tnef-buffered-attributes-baseline/allocations.json`.
 
+#### TNEF property writing
+
+Seven further `tnef-writer/Write` cases share the same standalone,
+native/metabench, Criterion, and regression-test harnesses. Properties emits
+4,096 fixed-width properties; PropertyCursor uses a growing `Cursor<Vec<u8>>`
+instead of memory blocks. PropertyCopy copies 4,096 owned snapshots prepared
+outside measurement. PropertyBinary writes a 1 MiB value, MultiValueProperties
+writes 256 thirty-two-byte binary values, NamedProperties writes 256 properties
+reusing sixteen numeric names, and Recipients writes 512 two-property rows.
+
+Measurements include fresh writer/scratch/output storage, native validation
+and serialization, named-ID allocation, text encoding, count patching,
+finalization/replay/checksums, full-output observation, and destruction.
+Snapshot copying includes temporary prevalidated-value storage. Input values,
+snapshots, independent expected framing, and complete attribute/property/row
+reader checks are outside measurement. Throughput counts complete serialized
+output bytes once; filesystem performance is not measured.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| Properties | 27 | 98,551 |
+| PropertyCopy | 4,123 | 622,839 |
+| PropertyCursor | 20 | 193,359 |
+| PropertyBinary | 526 | 3,181,247 |
+| MultiValueProperties | 12 | 39,663 |
+| NamedProperties | 527 | 38,375 |
+| Recipients | 1,557 | 116,215 |
+
+The property-writer baseline passed all 137 unique smoke/allocation cases.
+Every previous 130 allocation count and cumulative byte total was unchanged
+from the buffered-attribute baseline. Counts include scratch/output growth and temporary encoded/preflight
+storage, not just retained data; allocated bytes are cumulative, not peak memory.
+No throughput timings were recorded. The schema-v9 report is preserved under
+session `files/tnef-property-writer-baseline/allocations.json`.
+
+#### TNEF property value streams
+
+Six additional `tnef-writer/Write` cases use the same shared harnesses.
+PropertyStream writes a 1 MiB Binary value in 4 KiB chunks;
+PropertyStreamCursor uses a growing `Cursor<Vec<u8>>` instead of memory blocks.
+PropertyStreamShortChunks writes one byte at a time, while
+PropertyStreamShortWrites limits scratch writes to seven bytes. ObjectStream
+writes a 1 MiB Object value including its IID, and MultiValueStreams completes
+256 thirty-two-byte Binary values.
+
+Measurements include fresh parent/attribute storage and output, streamed length
+placeholders, payload writes, value-length and count patches, padding, attribute
+replay/finalization, full-output observation, and destruction. The value child
+adds no separate storage. Input preparation, independent expected-wire building,
+and complete property-reader checks remain outside measurement. Throughput
+counts serialized output bytes once; filesystem performance is not measured.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| PropertyStream | 533 | 3,217,895 |
+| PropertyStreamCursor | 22 | 4,219,471 |
+| PropertyStreamShortChunks | 533 | 3,217,895 |
+| PropertyStreamShortWrites | 533 | 3,217,895 |
+| MultiValueStreams | 12 | 39,663 |
+| ObjectStream | 533 | 3,217,895 |
+
+The value-stream baseline passed all 143 unique smoke/allocation cases. Every
+previous 137 allocation count and cumulative byte total was unchanged from the
+property-writer baseline.
+Counts include scratch/output growth, not just retained data; byte totals are
+cumulative allocations, not peak memory. No throughput timings were recorded.
+The schema-v9 report is preserved under session
+`files/tnef-property-value-streams-baseline/allocations.json`.
+
+#### TNEF compressed-RTF property writing
+
+Six additional `tnef-writer/Write` cases share all existing writer harnesses.
+RtfProperty compresses the upstream 500-line RTF body in 4 KiB input chunks;
+RtfPropertyUncompressed uses MELA. RtfPropertyCursor uses a growing
+`Cursor<Vec<u8>>`, RtfPropertyShortChunks supplies one-byte input, and
+RtfPropertyShortWrites limits scratch writes to seven bytes. RtfMultiValues
+encodes 256 separately finalized small RTF values.
+
+Measurements include fresh writer/scratch/output storage, inline encoder
+initialization and raw-input encoding, bounded RTF-header patches, value
+length/count/padding, attribute replay/finalization, full-output observation,
+and destruction. Input preparation and standalone-encoder expected payloads
+are outside measurement. Checks compare exact output against independently
+framed expected properties, inspect MS-OXRTFCP headers, independently calculate
+CRC, and fully decompress each value. Compressed body cases also enforce the
+complete-TNEF one-quarter size threshold. Throughput counts serialized output
+bytes once; filesystem performance is not measured.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| RtfProperty | 7 | 11,299 |
+| RtfPropertyUncompressed | 18 | 81,399 |
+| RtfPropertyCursor | 14 | 15,291 |
+| RtfPropertyShortChunks | 7 | 11,299 |
+| RtfPropertyShortWrites | 7 | 11,299 |
+| RtfMultiValues | 11 | 23,083 |
+
+The compressed-RTF property baseline passed all 149 unique smoke/allocation cases.
+Every previous 143 allocation count and cumulative byte total was unchanged
+from the value-stream baseline. Counts
+include scratch/output growth; the encoder adds no separate heap buffer.
+Allocated bytes are cumulative, not peak memory. No throughput timings were
+recorded. The schema-v9 report is preserved under session
+`files/tnef-rtf-property-writing-baseline/allocations.json`.
+
+#### TNEF embedded-message writing
+
+Six additional `tnef-writer/Write` cases share the standalone, native/metabench,
+optional Criterion, and regression harnesses. EmbeddedMessage writes a 1 MiB
+raw body inside an Object value; EmbeddedCursor uses growing `Cursor<Vec<u8>>`
+outer scratch, and EmbeddedShortWrites limits outer scratch writes to seven
+bytes. EmbeddedNested writes eight nested messages around a 4 KiB body.
+EmbeddedCodepage uses Windows-1251, a Cyrillic subject, and a 4 KiB body.
+EmbeddedMany completes 64 sibling messages, each with a 128-byte body.
+
+Measurements include fresh root/embedded writers, outer and per-level attribute
+scratch, IMessage prefixes, headers, subject encoding, raw body writes, Object
+length/count patches and padding, recursive replay/checksums, full-output
+observation, and destruction. The type-erased sink has no allocation of its own.
+Input generation, independently constructed complete expected wire bytes, and
+recursive reader checks of subjects/codepages/body bytes/child counts/checksums
+are outside measurement. Throughput counts complete serialized output bytes once.
+These are memory-backed cases, not filesystem measurements.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| EmbeddedMessage | 526 | 3,181,247 |
+| EmbeddedCursor | 18 | 5,264,509 |
+| EmbeddedShortWrites | 533 | 3,217,895 |
+| EmbeddedNested | 36 | 62,475 |
+| EmbeddedCodepage | 9 | 18,827 |
+| EmbeddedMany | 15 | 45,807 |
+
+All 155 unique smoke/allocation cases pass. Every previous 149 allocation count
+and cumulative byte total is unchanged from the compressed-RTF property baseline.
+Counts include scratch/output growth and encoding; allocated bytes are cumulative,
+not peak memory. No throughput timings were recorded. The schema-v9 report is
+preserved under session `files/tnef-embedded-writing-baseline/allocations.json`.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -10818,7 +11176,9 @@ These harnesses use the same fixtures, generators, and operations under
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,
 fifteen body-model cases, twelve attachment-model cases, and ten whole-message
-cases, plus eleven attribute-writer cases (130 TNEF cases in total).
+cases, plus eleven attribute-writer, seven native property-writer, six
+property-value stream, six compressed-RTF property, and six embedded-message
+writer cases (36 writer cases; 155 TNEF cases in total).
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

@@ -90,7 +90,7 @@ impl TnefPropertyTag {
 }
 
 /// The identifier portion of a named MAPI property.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TnefName {
     /// A numeric name.
     Id(i32),
@@ -101,7 +101,7 @@ pub enum TnefName {
 }
 
 /// A named-property descriptor.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TnefNameId {
     /// Property-set GUID in Windows wire order (first three fields little-endian).
     pub guid: [u8; 16],

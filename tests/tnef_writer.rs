@@ -13,6 +13,14 @@ use std::{
 
 #[path = "tnef_writer/buffered.rs"]
 mod buffered;
+#[path = "tnef_writer/embedded.rs"]
+mod embedded;
+#[path = "tnef_writer/properties.rs"]
+mod properties;
+#[path = "tnef_writer/rtf.rs"]
+mod rtf;
+#[path = "tnef_writer/value_streams.rs"]
+mod value_streams;
 
 fn attribute(output: &mut Vec<u8>, level: u8, tag: Tag, value: &[u8]) {
     output.push(level);
@@ -640,7 +648,7 @@ fn drop_and_into_inner_do_not_write_and_borrowed_sinks_remain_usable() {
     assert_eq!(&output[46..], b"suffix");
 }
 
-fn assert_faulted(writer: &mut TnefWriter<Sink>) {
+fn assert_faulted<W: Write>(writer: &mut TnefWriter<W>) {
     let broken = io::ErrorKind::BrokenPipe;
     assert_eq!(
         writer.write_attribute(Tag::BODY, &[]).unwrap_err().kind(),

@@ -1,14 +1,27 @@
 // Ported from MimeKit's Tnef/TnefWriter.cs and TnefValueWriteStream.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::{
+    collections::HashMap,
+    io::{self, Read, Seek, SeekFrom, Write},
+};
 
 use super::{
     SIGNATURE, TnefAttributeLevel as Level, TnefAttributeTag as Tag, TnefAttributeType as Type,
-    TnefDateTime, VERSION, checksum,
+    TnefDateTime, TnefNameId, TnefPropertyWriter, VERSION, checksum,
 };
 use crate::charsets::{self, Charset};
 use crate::io::MemoryBlockStream;
+
+pub(super) fn get_charset(codepage: u32) -> io::Result<Charset> {
+    // Codepage 0 (CP_ACP) would select a platform-dependent encoding.
+    if matches!(codepage, 0 | 1200 | 1201 | 12000 | 12001) {
+        return Err(invalid(
+            "the TNEF codepage must not be zero or UTF-16/UTF-32",
+        ));
+    }
+    charsets::from_codepage(codepage).ok_or_else(|| invalid("unsupported TNEF codepage"))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -43,7 +56,9 @@ enum State {
 /// payload with a fixed 4 KiB buffer. [`open_attribute`](Self::open_attribute)
 /// buffers unknown-length values in a memory block stream; custom memory/file
 /// storage can be supplied with [`open_attribute_with_buffer`](Self::open_attribute_with_buffer).
-/// Property construction is not implemented yet.
+/// [`open_properties`](Self::open_properties) constructs MAPI property lists
+/// and recipient tables in the same buffered storage. Property writers can open
+/// embedded messages with automatic Object framing and independent named IDs.
 ///
 /// Call `finish` explicitly to observe final flush errors. Neither drop nor
 /// [`into_inner`](Self::into_inner) performs writer I/O or finishes the stream;
@@ -76,6 +91,7 @@ pub struct TnefWriter<W> {
     legacy_key: u16,
     state: State,
     header_written: bool,
+    named_ids: HashMap<TnefNameId, u16>,
 }
 
 impl<W: Write> TnefWriter<W> {
@@ -87,14 +103,7 @@ impl<W: Write> TnefWriter<W> {
     /// Rejects unsupported codepages, platform-dependent codepage zero, and
     /// UTF-16/UTF-32 codepages that encode characters using zero bytes.
     pub fn new(inner: W, codepage: u32, legacy_key: u16) -> io::Result<Self> {
-        // Codepage 0 (CP_ACP) would select a platform-dependent encoding.
-        if matches!(codepage, 0 | 1200 | 1201 | 12000 | 12001) {
-            return Err(invalid(
-                "the TNEF codepage must not be zero or UTF-16/UTF-32",
-            ));
-        }
-        let charset = charsets::from_codepage(codepage)
-            .ok_or_else(|| invalid("unsupported TNEF codepage"))?;
+        let charset = get_charset(codepage)?;
         Ok(Self {
             inner,
             charset,
@@ -102,6 +111,7 @@ impl<W: Write> TnefWriter<W> {
             legacy_key,
             state: State::Message,
             header_written: false,
+            named_ids: HashMap::new(),
         })
     }
 
@@ -133,6 +143,41 @@ impl<W: Write> TnefWriter<W> {
     /// Whether an I/O failure or unfinished buffered attribute prevents further operations.
     pub fn is_faulted(&self) -> bool {
         self.state == State::Faulted
+    }
+
+    /// Opens a MAPI property list or recipient table in a memory block stream.
+    ///
+    /// # Errors
+    ///
+    /// Only `MAPI_PROPERTIES`, `ATTACHMENT`, and `RECIPIENT_TABLE` are accepted.
+    /// Attribute ordering and completion follow [`open_attribute`](Self::open_attribute).
+    pub fn open_properties(&mut self, tag: Tag) -> io::Result<TnefPropertyWriter<'_, W>> {
+        self.open_properties_with_buffer(tag, MemoryBlockStream::new())
+    }
+
+    /// Opens a property writer with owned or borrowed, empty scratch storage.
+    ///
+    /// # Errors
+    ///
+    /// Shares [`open_properties`](Self::open_properties) and
+    /// [`open_attribute_with_buffer`](Self::open_attribute_with_buffer) validation.
+    /// After opening, scratch write errors fault the parent, including failure
+    /// to write the initial property/row-count placeholder.
+    pub fn open_properties_with_buffer<B: Read + Write + Seek>(
+        &mut self,
+        tag: Tag,
+        buffer: B,
+    ) -> io::Result<TnefPropertyWriter<'_, W, B>> {
+        self.next_attribute(tag)?;
+        if !matches!(
+            tag,
+            Tag::MAPI_PROPERTIES | Tag::ATTACHMENT | Tag::RECIPIENT_TABLE
+        ) {
+            return Err(invalid("the attribute does not contain MAPI properties"));
+        }
+        let charset = self.charset;
+        let stream = self.open_attribute_with_buffer(tag, buffer)?;
+        TnefPropertyWriter::new(stream, charset, tag == Tag::RECIPIENT_TABLE)
     }
 
     /// Opens an unknown-length raw attribute backed by a [`MemoryBlockStream`].
@@ -548,6 +593,42 @@ pub struct TnefAttributeWriter<'a, W, B = MemoryBlockStream> {
 }
 
 impl<W: Write, B: Read + Write + Seek> TnefAttributeWriter<'_, W, B> {
+    pub(super) fn codepage(&self) -> u32 {
+        self.parent.codepage
+    }
+
+    pub(super) fn named_id(&mut self, name: &TnefNameId) -> io::Result<u16> {
+        if let Some(&id) = self.parent.named_ids.get(name) {
+            return Ok(id);
+        }
+        if self.parent.named_ids.len() >= 0x7fff {
+            return Err(invalid(
+                "the TNEF stream contains too many named properties",
+            ));
+        }
+        let id = 0x8000 + self.parent.named_ids.len() as u16;
+        self.parent.named_ids.insert(name.clone(), id);
+        Ok(id)
+    }
+
+    pub(super) fn patch_u32(&mut self, offset: u64, value: u32) -> io::Result<()> {
+        self.patch_bytes(offset, &value.to_le_bytes())
+    }
+
+    pub(super) fn patch_bytes(&mut self, offset: u64, value: &[u8]) -> io::Result<()> {
+        self.check_faulted()?;
+        if offset > self.length || value.len() as u64 > self.length - offset {
+            return Err(invalid("the TNEF patch is outside the buffered attribute"));
+        }
+        let end = self.length;
+        self.run(|buffer| {
+            retry(|| buffer.seek(SeekFrom::Start(offset)))?;
+            buffer.write_all(value)?;
+            retry(|| buffer.seek(SeekFrom::Start(end)))?;
+            Ok(())
+        })
+    }
+
     /// Number of bytes acknowledged by successful writes.
     pub fn len(&self) -> u64 {
         self.length
@@ -600,7 +681,7 @@ impl<W: Write, B: Read + Write + Seek> TnefAttributeWriter<'_, W, B> {
         Ok(self.buffer)
     }
 
-    fn check_faulted(&self) -> io::Result<()> {
+    pub(super) fn check_faulted(&self) -> io::Result<()> {
         if self.faulted {
             Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -662,6 +743,28 @@ fn retry<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_ids_cover_the_wire_range_and_existing_names_survive_exhaustion() {
+        let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+        let mut stream = writer.open_attribute(Tag::BODY).unwrap();
+        let name = |id| TnefNameId {
+            guid: [0; 16],
+            name: super::super::TnefName::Id(id),
+        };
+        for id in 0..0x7fff {
+            assert_eq!(stream.named_id(&name(id)).unwrap(), 0x8000 + id as u16);
+        }
+        assert_eq!(
+            stream.named_id(&name(0x7fff)).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(stream.named_id(&name(0)).unwrap(), 0x8000);
+        assert_eq!(stream.named_id(&name(0x7ffe)).unwrap(), 0xfffe);
+        assert!(!stream.is_faulted());
+        stream.finish().unwrap();
+        writer.finish().unwrap();
+    }
 
     #[test]
     fn attribute_length_boundaries_do_not_require_large_allocations() {

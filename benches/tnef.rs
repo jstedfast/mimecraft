@@ -71,7 +71,16 @@ fn main() {
         "Throughput counts complete serialized output bytes once; Stream uses a 4 KiB buffer, ShortReads/ShortWrites seven-byte I/O."
     );
     println!(
-        "Buffered cases include fresh scratch storage and replay; BufferedShortChunks uses one-byte input, BufferedShortReads/Writes seven-byte scratch I/O."
+        "Buffered/property cases include fresh scratch storage and replay; BufferedShortChunks uses one-byte input, BufferedShortReads/Writes seven-byte scratch I/O."
+    );
+    println!(
+        "PropertyStream cases append directly to attribute scratch; ShortChunks uses one-byte input, ShortWrites seven-byte scratch writes."
+    );
+    println!(
+        "RtfProperty cases encode LZFu/MELA in attribute scratch; raw input preparation and decoding checks are outside measurement."
+    );
+    println!(
+        "Embedded cases include nested framing and per-level scratch replay; fixture preparation and recursive reader checks are outside measurement."
     );
     for name in writer_workloads::CASES {
         let case = writer_workloads::workload(name);

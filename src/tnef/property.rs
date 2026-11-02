@@ -134,7 +134,7 @@ impl<'a, R: Read> TnefPropertyReader<'a, R> {
         // (0x3705) usually follows AttachDataObject (0x3701), so the IID is the
         // only reliable indicator when properties are emitted in ID order.
         if kind == Type::OBJECT && self.object_iid != [0; 16] {
-            return self.object_iid == [7, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
+            return self.object_iid == crate::tnef::MESSAGE_IID;
         }
         self.reader.attach_method == 5 && matches!(kind, Type::OBJECT | Type::BINARY)
     }
