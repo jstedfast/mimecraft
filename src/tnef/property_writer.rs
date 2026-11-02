@@ -23,9 +23,11 @@ use crate::{charsets::Charset, io::MemoryBlockStream};
 /// Counts, variable lengths, terminators, and DWORD padding are automatic.
 ///
 /// `write_value` uses [`Value`]'s exact native types, without numeric coercion:
-/// currency is a scaled integer, dates are checked raw FILETIME/OLE numbers,
-/// and object bytes include their 16-byte interface IID. Synthesized `DateTime`
-/// values are not wire-native and are rejected. String8 uses the parent's
+/// currency is a scaled integer, dates may be checked raw FILETIME/OLE numbers,
+/// and object bytes include their 16-byte interface IID. Typed `DateTime`
+/// values convert to SysTime (assuming UTC) or AppTime (as-is).
+/// [`write_currency`](Self::write_currency) scales exact decimal inputs with
+/// midpoint-to-even rounding. String8 uses the parent's
 /// codepage and strict encoding, not .NET replacement/best-fit fallback.
 ///
 /// `finish` consumes this child, emits the attribute immediately, and returns
@@ -181,7 +183,10 @@ impl<'a, W: Write, B: Read + Write + Seek> TnefPropertyWriter<'a, W, B> {
         self.start(Tag::new(id, kind), &descriptor)
     }
 
-    /// Appends an exact native value to the current property.
+    /// Appends a native value or a typed date to the current property.
+    ///
+    /// `DateTime` converts to SysTime or AppTime using
+    /// [`super::TnefDateTime::to_file_time`] or [`super::TnefDateTime::to_oa_date`].
     ///
     /// # Errors
     ///
@@ -196,6 +201,24 @@ impl<'a, W: Write, B: Read + Write + Seek> TnefPropertyWriter<'a, W, B> {
         self.emit(&encoded)?;
         self.current.as_mut().unwrap().values = count;
         Ok(())
+    }
+
+    /// Appends exact currency from `coefficient * 10^(-scale)`.
+    ///
+    /// Uses [`Value::currency_from_decimal`] to scale by 10000 and round
+    /// midpoint ties to even, without binary floating-point conversion.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing or non-Currency tag, a second scalar value, or a rounded
+    /// result outside `i64` before writing. Shares `write_value` I/O and size limits.
+    pub fn write_currency(&mut self, coefficient: i128, scale: u32) -> io::Result<()> {
+        if self.check_value()?.tag.value_type() != Type::CURRENCY {
+            return Err(invalid("the current property is not Currency"));
+        }
+        let value = Value::currency_from_decimal(coefficient, scale)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        self.write_value(&value)
     }
 
     /// Opens an append-only stream for one Binary or Object value.
@@ -777,6 +800,20 @@ fn encode(charset: Charset, kind: Type, value: &Value) -> io::Result<Encoded<'_>
             bytes[..8].copy_from_slice(&value.to_le_bytes());
             8
         }
+        (Type::APP_TIME, Value::DateTime(value)) => {
+            let value = value
+                .to_oa_date()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            bytes[..8].copy_from_slice(&value.to_le_bytes());
+            8
+        }
+        (Type::SYS_TIME, Value::DateTime(value)) => {
+            let value = value
+                .to_file_time()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            bytes[..8].copy_from_slice(&value.to_le_bytes());
+            8
+        }
         (Type::BOOLEAN, Value::Bool(value)) => {
             bytes[0] = u8::from(*value);
             4
@@ -894,6 +931,57 @@ mod tests {
             values,
             crate::charsets::from_codepage(1252).unwrap(),
         )
+    }
+
+    #[test]
+    fn typed_date_snapshots_preflight_every_value_before_assigning_named_ids() {
+        use crate::tnef::{TnefDateTime as Date, TnefDateTimeKind as Kind};
+        let name = TnefNameId {
+            guid: [0; 16],
+            name: TnefName::Id(7),
+        };
+        for (kind, ticks, invalid_ticks, bits) in [
+            (
+                Type::APP_TIME,
+                637135310450001234,
+                864000000000,
+                0x40e56704173ac902u64,
+            ),
+            (Type::SYS_TIME, 637586501500000123, 0, 132675269500000123),
+        ] {
+            let tag = Tag::new(0x8020, Type(kind.0 | Type::MULTI_VALUED.0));
+            let valid = Value::DateTime(Date::from_ticks(ticks, Kind::Unspecified).unwrap());
+            let invalid =
+                Value::DateTime(Date::from_ticks(invalid_ticks, Kind::Unspecified).unwrap());
+            let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+            let mut properties = writer.open_properties(A::MAPI_PROPERTIES).unwrap();
+            let bad = snapshot(tag, Some(name.clone()), vec![valid.clone(), invalid]);
+            assert_eq!(
+                properties.write_property(&bad).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(properties.property_count(), 0);
+            assert_eq!(properties.get_ref().to_vec().unwrap(), [0; 4]);
+            let raw = if kind == Type::SYS_TIME {
+                Value::SysTime(bits as i64)
+            } else {
+                Value::AppTime(f64::from_bits(bits))
+            };
+            let good = snapshot(tag, Some(name.clone()), vec![valid, raw]);
+            properties.write_property(&good).unwrap();
+            let bytes = properties.finish().unwrap().to_vec().unwrap();
+            assert_eq!(&bytes[..4], &1u32.to_le_bytes());
+            assert_eq!(
+                &bytes[4..8],
+                &Tag::new(0x8000, Type(kind.0 | Type::MULTI_VALUED.0))
+                    .0
+                    .to_le_bytes()
+            );
+            assert_eq!(&bytes[32..36], &2u32.to_le_bytes());
+            assert_eq!(&bytes[36..44], &bits.to_le_bytes());
+            assert_eq!(&bytes[44..], &bits.to_le_bytes());
+            writer.finish().unwrap();
+        }
     }
 
     #[test]

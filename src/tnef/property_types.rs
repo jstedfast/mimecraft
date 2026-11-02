@@ -147,8 +147,10 @@ pub enum TnefValue {
     AppTime(f64),
     /// Raw FILETIME.
     SysTime(i64),
-    /// A date synthesized from a legacy attribute, retaining its unspecified
-    /// time zone. Unlike SysTime, this is not a raw FILETIME wire number.
+    /// A typed calendar date, also synthesized when reading legacy attributes.
+    /// Unlike SysTime, this is not a raw FILETIME wire number. Property writing
+    /// converts it to AppTime or SysTime; the latter assumes unspecified dates
+    /// are UTC, matching MimeKit.
     DateTime(super::TnefDateTime),
     /// Error code with its original bits.
     Error(u32),
@@ -166,7 +168,7 @@ pub enum TnefValue {
 
 impl TnefValue {
     /// Converts AppTime or SysTime to a checked date without changing the raw value,
-    /// or returns a synthesized legacy DateTime with its original time kind.
+    /// or returns a typed DateTime with its original time kind.
     /// AppTime uses .NET-compatible millisecond rounding and an unspecified zone;
     /// FILETIME retains 100-nanosecond precision and is always UTC.
     ///

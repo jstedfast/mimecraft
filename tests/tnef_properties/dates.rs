@@ -1,5 +1,6 @@
 // Adapted from MimeKit's TnefPropertyReaderCoercionTests,
 // TnefPropertyReaderRobustnessTests, TnefPropertySetTests, and TnefMessageTests.
+// Date writing also adapts TnefWriterTests and .NET DateTime reference vectors.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use super::*;
@@ -14,6 +15,71 @@ fn legacy(parts: [u16; 7]) -> Vec<u8> {
 
 const FILE_TIME_EPOCH: u64 = 504911232000000000;
 const MAX_FILE_TIME: i64 = 2650467743999999999;
+
+#[test]
+fn filetime_writing_preserves_ticks_and_assumes_unspecified_is_utc() {
+    for kind in [Kind::Utc, Kind::Unspecified] {
+        for value in [0, 1, 9_999_999, 132675269500000000, MAX_FILE_TIME] {
+            let date = Date::from_ticks(FILE_TIME_EPOCH + value as u64, kind).unwrap();
+            assert_eq!(date.to_file_time(), Ok(value));
+            assert_eq!(date.kind(), kind);
+            assert_eq!(Date::from_file_time(value).unwrap().ticks(), date.ticks());
+        }
+        for ticks in [0, FILE_TIME_EPOCH - 1] {
+            assert_eq!(
+                Date::from_ticks(ticks, kind).unwrap().to_file_time(),
+                Err(DateError::OutOfRange)
+            );
+        }
+    }
+}
+
+#[test]
+fn oa_writing_matches_dotnet_time_only_truncation_and_negative_date_vectors() {
+    // Captured from DateTime.ToOADate on .NET 10, including the year-1
+    // compatibility case, year-100 bound, and ticks either side of the epoch.
+    let cases = [
+        (0, Some(0x0000000000000000)),
+        (1, Some(0x0000000000000000)),
+        (9999, Some(0x0000000000000000)),
+        (10000, Some(0x3e48daea1d7f4cf7)),
+        (216000000000, Some(0x3fd0000000000000)),
+        (863999999999, Some(0x3feffffff9c94579)),
+        (864000000000, None),
+        (31241375999999999, None),
+        (31241376000000000, Some(0xc124103400000000)),
+        (31241376000000001, Some(0xc124103400000063)),
+        (599263487999999999, Some(0xbff0000000000000)),
+        (599263488000000000, Some(0xbff0000000000000)),
+        (599263488000000001, Some(0xbff00000031b5d44)),
+        (599263704000000000, Some(0xbff4000000000000)),
+        (599264351999989999, Some(0xbffffffffce4a2bc)),
+        (599264351999990000, Some(0xbffffffffce4a2bc)),
+        (599264351999990001, Some(0x0000000000000000)),
+        (599264351999999999, Some(0x0000000000000000)),
+        (599264352000000000, Some(0x0000000000000000)),
+        (599264352000000001, Some(0x0000000000000000)),
+        (599264352000009999, Some(0x0000000000000000)),
+        (599264352000010000, Some(0x3e48daea1d7f4cf7)),
+        (599264568000000000, Some(0x3fd0000000000000)),
+        (630821952000000000, Some(0x40e1d5a000000000)),
+        (637135310450000000, Some(0x40e56704173ac902)),
+        (637135310450001234, Some(0x40e56704173ac902)),
+        (3155378975999999999, Some(0x41469240ffffffe7)),
+    ];
+    for kind in [Kind::Unspecified, Kind::Utc] {
+        for (ticks, expected) in cases {
+            let date = Date::from_ticks(ticks, kind).unwrap();
+            assert_eq!(
+                date.to_oa_date().map(f64::to_bits),
+                expected.ok_or(DateError::OutOfRange),
+                "{ticks}, {kind:?}"
+            );
+            assert_eq!(date.ticks(), ticks);
+            assert_eq!(date.kind(), kind);
+        }
+    }
+}
 
 #[test]
 fn filetime_keeps_utc_kind_and_every_hundred_nanoseconds() {

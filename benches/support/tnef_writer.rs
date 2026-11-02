@@ -14,7 +14,7 @@ use std::{
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
 };
 
-pub const CASES: [&str; 36] = [
+pub const CASES: [&str; 40] = [
     "Typed",
     "ManySmall",
     "LargeValue",
@@ -51,6 +51,10 @@ pub const CASES: [&str; 36] = [
     "EmbeddedNested",
     "EmbeddedCodepage",
     "EmbeddedMany",
+    "PropertySysTime",
+    "PropertyAppTime",
+    "PropertyCurrency",
+    "PropertyCurrencyRounded",
 ];
 
 pub struct Workload {
@@ -150,8 +154,16 @@ fn attribute(bytes: &mut Vec<u8>, level: u8, tag: Tag, value: &[u8]) {
 pub fn workload(name: &'static str) -> Workload {
     assert!(CASES.contains(&name));
     let size = match name {
-        "Typed" | "Properties" | "PropertyCopy" | "PropertyCursor" | "NamedProperties"
-        | "Recipients" => 0,
+        "Typed"
+        | "Properties"
+        | "PropertyCopy"
+        | "PropertyCursor"
+        | "NamedProperties"
+        | "Recipients"
+        | "PropertySysTime"
+        | "PropertyAppTime"
+        | "PropertyCurrency"
+        | "PropertyCurrencyRounded" => 0,
         "ManySmall" | "MultiValueProperties" | "MultiValueStreams" => 32,
         "EmbeddedNested" | "EmbeddedCodepage" => 4096,
         "EmbeddedMany" => 128,
@@ -178,6 +190,12 @@ pub fn workload(name: &'static str) -> Workload {
         &[0xe4, 4, 0, 0, 0, 0, 0, 0],
     );
     let value = match name {
+        "PropertySysTime" => Value::DateTime(
+            TnefDateTime::from_ticks(637586501500000123, TnefDateTimeKind::Utc).unwrap(),
+        ),
+        "PropertyAppTime" => Value::DateTime(
+            TnefDateTime::from_ticks(637135310450001234, TnefDateTimeKind::Unspecified).unwrap(),
+        ),
         name if name.starts_with("Rtf") => {
             // Only expected compressed bytes are prepared here. Measurements
             // encode raw input through the property writer, not a snapshot copy.
@@ -237,11 +255,32 @@ pub fn workload(name: &'static str) -> Workload {
         | "PropertyStreamShortChunks"
         | "PropertyStreamShortWrites"
         | "MultiValueStreams"
-        | "ObjectStream" => {
+        | "ObjectStream"
+        | "PropertySysTime"
+        | "PropertyAppTime"
+        | "PropertyCurrency"
+        | "PropertyCurrencyRounded" => {
             let mut data = Vec::new();
             let word =
                 |data: &mut Vec<u8>, value: u32| data.extend_from_slice(&value.to_le_bytes());
             match name {
+                "PropertySysTime"
+                | "PropertyAppTime"
+                | "PropertyCurrency"
+                | "PropertyCurrencyRounded" => {
+                    let (kind, bits) = match name {
+                        "PropertySysTime" => (Type::SYS_TIME, 132675269500000123u64),
+                        "PropertyAppTime" => (Type::APP_TIME, 0x40e56704173ac902),
+                        "PropertyCurrency" => (Type::CURRENCY, 123456789),
+                        "PropertyCurrencyRounded" => (Type::CURRENCY, (-123456790i64) as u64),
+                        _ => unreachable!(),
+                    };
+                    word(&mut data, 4096);
+                    for _ in 0..4096 {
+                        word(&mut data, P::new(0x6000, kind).0);
+                        data.extend_from_slice(&bits.to_le_bytes());
+                    }
+                }
                 "Properties" | "PropertyCopy" | "PropertyCursor" => {
                     word(&mut data, 4096);
                     for i in 0..4096 {
@@ -410,6 +449,10 @@ fn encode(case: &Workload) -> Vec<u8> {
         "Properties"
         | "PropertyCopy"
         | "PropertyCursor"
+        | "PropertySysTime"
+        | "PropertyAppTime"
+        | "PropertyCurrency"
+        | "PropertyCurrencyRounded"
         | "PropertyBinary"
         | "MultiValueProperties"
         | "NamedProperties"
@@ -711,6 +754,25 @@ fn write_properties<W: Write, B: Read + Write + Seek>(
     case: &Workload,
 ) {
     match case.name {
+        "PropertySysTime" | "PropertyAppTime" | "PropertyCurrency" | "PropertyCurrencyRounded" => {
+            let kind = match case.name {
+                "PropertySysTime" => Type::SYS_TIME,
+                "PropertyAppTime" => Type::APP_TIME,
+                _ => Type::CURRENCY,
+            };
+            for _ in 0..4096 {
+                properties.write_tag(P::new(0x6000, kind)).unwrap();
+                match case.name {
+                    "PropertyCurrency" => properties
+                        .write_currency(black_box(123456789), black_box(4))
+                        .unwrap(),
+                    "PropertyCurrencyRounded" => properties
+                        .write_currency(black_box(-1234567895), black_box(5))
+                        .unwrap(),
+                    _ => properties.write_value(black_box(&case.value)).unwrap(),
+                }
+            }
+        }
         name if name.starts_with("Rtf") => {
             let count = if name == "RtfMultiValues" { 256 } else { 1 };
             properties
@@ -872,6 +934,10 @@ impl Workload {
                 "Properties"
                     | "PropertyCopy"
                     | "PropertyCursor"
+                    | "PropertySysTime"
+                    | "PropertyAppTime"
+                    | "PropertyCurrency"
+                    | "PropertyCurrencyRounded"
                     | "PropertyBinary"
                     | "MultiValueProperties"
                     | "NamedProperties"
@@ -903,6 +969,29 @@ impl Workload {
                     while properties.read_next_property().unwrap() {
                         let property = properties.read_property().unwrap();
                         match self.name {
+                            "PropertySysTime"
+                            | "PropertyAppTime"
+                            | "PropertyCurrency"
+                            | "PropertyCurrencyRounded" => {
+                                let (kind, value) = match self.name {
+                                    "PropertySysTime" => {
+                                        (Type::SYS_TIME, Value::SysTime(132675269500000123))
+                                    }
+                                    "PropertyAppTime" => (
+                                        Type::APP_TIME,
+                                        Value::AppTime(f64::from_bits(0x40e56704173ac902)),
+                                    ),
+                                    "PropertyCurrency" => {
+                                        (Type::CURRENCY, Value::Currency(123456789))
+                                    }
+                                    "PropertyCurrencyRounded" => {
+                                        (Type::CURRENCY, Value::Currency(-123456790))
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                assert_eq!(property.tag(), P::new(0x6000, kind));
+                                assert_eq!(property.value(), Some(&value));
+                            }
                             name if name.starts_with("Rtf") => {
                                 assert_eq!(
                                     property.values().len(),
@@ -997,7 +1086,13 @@ impl Workload {
                     assert_eq!(
                         count,
                         match self.name {
-                            "Properties" | "PropertyCopy" | "PropertyCursor" => 4096,
+                            "Properties"
+                            | "PropertyCopy"
+                            | "PropertyCursor"
+                            | "PropertySysTime"
+                            | "PropertyAppTime"
+                            | "PropertyCurrency"
+                            | "PropertyCurrencyRounded" => 4096,
                             "NamedProperties" => 256,
                             "Recipients" => 2,
                             _ => 1,

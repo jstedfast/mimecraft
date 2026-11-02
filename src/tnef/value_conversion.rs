@@ -1,4 +1,4 @@
-// Adapted from MimeKit's TnefProperty.cs.
+// Adapted from MimeKit's TnefProperty.cs and TnefPropertyWriter.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{error::Error, fmt};
@@ -10,7 +10,7 @@ use super::{TnefDateTimeError, TnefValue};
 pub enum TnefValueConversionError {
     /// The native type does not support the requested conversion.
     InvalidType,
-    /// A floating-point value cannot be represented as a signed 64-bit integer.
+    /// A numeric conversion or scaled currency does not fit a signed 64-bit integer.
     OutOfRange,
     /// The property has no value.
     NoValue,
@@ -44,6 +44,48 @@ impl Error for TnefValueConversionError {
 }
 
 impl TnefValue {
+    /// Constructs exact currency from `coefficient * 10^(-scale)`.
+    ///
+    /// MS-OXCDATA currency stores a signed integer in units of 1/10000.
+    /// Scaling rounds to the nearest integer, with midpoint ties to even, as
+    /// MimeKit does. No binary floating-point or decimal dependency is used.
+    /// All scales are supported; sufficiently small magnitudes round to zero.
+    ///
+    /// ```
+    /// use mimecraft::tnef::TnefValue;
+    /// assert_eq!(TnefValue::currency_from_decimal(123456789, 4)?, TnefValue::Currency(123456789));
+    /// assert_eq!(TnefValue::currency_from_decimal(-15, 5)?, TnefValue::Currency(-2));
+    /// # Ok::<(), mimecraft::tnef::TnefValueConversionError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `OutOfRange` if the rounded scaled value does not fit `i64`.
+    pub fn currency_from_decimal(
+        coefficient: i128,
+        scale: u32,
+    ) -> Result<Self, TnefValueConversionError> {
+        let scaled = if scale <= 4 {
+            coefficient
+                .checked_mul(10i128.pow(4 - scale))
+                .ok_or(TnefValueConversionError::OutOfRange)?
+        } else if scale > 42 {
+            // 10^39 exceeds twice any i128 magnitude, so every value rounds to zero.
+            0
+        } else {
+            let divisor = 10i128.pow(scale - 4);
+            let mut quotient = coefficient / divisor;
+            let remainder = (coefficient % divisor).abs();
+            if remainder > divisor / 2 || (remainder == divisor / 2 && quotient % 2 != 0) {
+                quotient += coefficient.signum();
+            }
+            quotient
+        };
+        i64::try_from(scaled)
+            .map(Self::Currency)
+            .map_err(|_| TnefValueConversionError::OutOfRange)
+    }
+
     /// Converts a boolean, integer, error code, or currency value to a boolean.
     /// Nonzero currency fractions are true, even when integer conversion is zero.
     ///

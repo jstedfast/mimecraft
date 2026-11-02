@@ -1,4 +1,4 @@
-// Adapted from MimeKit's TnefReader.cs and TnefPropertyReader.cs.
+// Adapted from MimeKit's TnefReader.cs, TnefPropertyReader.cs, and TnefPropertyWriter.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::{error::Error, fmt};
@@ -27,7 +27,8 @@ pub enum TnefDateTimeKind {
 /// A Gregorian date in years 1 through 9999, with 100-nanosecond precision.
 ///
 /// This is not a local-time-zone or date arithmetic API. Unspecified dates
-/// are not implicitly interpreted as UTC. Equality includes the time kind.
+/// retain their calendar coordinates; FILETIME writing assumes they are UTC,
+/// matching MimeKit. Equality includes the time kind.
 /// Property wire numbers remain available separately in [`super::TnefValue`].
 ///
 /// ```
@@ -36,6 +37,7 @@ pub enum TnefDateTimeKind {
 /// assert_eq!((date.year(), date.month(), date.day()), (1601, 1, 1));
 /// assert_eq!(date.nanosecond(), 100);
 /// assert_eq!(date.kind(), TnefDateTimeKind::Utc);
+/// assert_eq!(date.to_file_time()?, 1);
 /// # Ok::<(), mimecraft::tnef::TnefDateTimeError>(())
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -97,6 +99,23 @@ impl TnefDateTime {
         Self::from_ticks(value as u64 + FILE_TIME_OFFSET, TnefDateTimeKind::Utc)
     }
 
+    /// Encodes a FILETIME, preserving all 100-nanosecond ticks.
+    ///
+    /// UTC and unspecified dates are both assumed to be UTC, matching MimeKit's
+    /// writer. No machine-local time-zone conversion is performed.
+    ///
+    /// # Errors
+    ///
+    /// Rejects dates before 1601-01-01.
+    pub fn to_file_time(self) -> Result<i64, TnefDateTimeError> {
+        // MS-OXCDATA defines PtypTime as a FILETIME: the number of
+        // 100-nanosecond intervals since January 1, 1601 UTC.
+        self.ticks
+            .checked_sub(FILE_TIME_OFFSET)
+            .map(|ticks| ticks as i64)
+            .ok_or(TnefDateTimeError::OutOfRange)
+    }
+
     /// Decodes an OLE Automation date, with an unspecified time zone.
     ///
     /// Matches MimeKit's .NET millisecond rounding, including negative dates'
@@ -121,6 +140,37 @@ impl TnefDateTime {
             return Err(TnefDateTimeError::OutOfRange);
         }
         Self::from_ticks(millis as u64 * 10_000, TnefDateTimeKind::Unspecified)
+    }
+
+    /// Encodes an OLE Automation date without converting the time zone.
+    ///
+    /// Matches .NET's `ToOADate`: submillisecond differences from the epoch
+    /// truncate toward zero, and negative dates retain an absolute fractional
+    /// time of day. For compatibility, 0001-01-01 is treated as a time-only
+    /// value on 1899-12-30, so zero ticks encodes as zero.
+    ///
+    /// # Errors
+    ///
+    /// Rejects dates before 0100-01-01, except the time-only case above.
+    pub fn to_oa_date(self) -> Result<f64, TnefDateTimeError> {
+        let offset = OA_DAYS * TICKS_PER_DAY as i64;
+        let mut ticks = self.ticks as i64;
+        // .NET preserves Visual Basic's time-only values on the first day.
+        if ticks < TICKS_PER_DAY as i64 {
+            ticks += offset;
+        }
+        if ticks < days_before_year(100) * TICKS_PER_DAY as i64 {
+            return Err(TnefDateTimeError::OutOfRange);
+        }
+        let mut millis = (ticks - offset) / 10_000;
+        if millis < 0 {
+            let fraction = millis % MILLIS_PER_DAY;
+            if fraction != 0 {
+                // Before the epoch, -1.25 denotes the previous day at 06:00.
+                millis -= 2 * (MILLIS_PER_DAY + fraction);
+            }
+        }
+        Ok(millis as f64 / MILLIS_PER_DAY as f64)
     }
 
     pub(super) fn from_attribute(bytes: &[u8; 14]) -> Result<Self, TnefDateTimeError> {

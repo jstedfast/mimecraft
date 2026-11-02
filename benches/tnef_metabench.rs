@@ -75,6 +75,10 @@ fn prepare_writer(name: &'static str) -> writer_workloads::Workload {
 #[bench::EmbeddedNested(&prepare_writer("EmbeddedNested"))]
 #[bench::EmbeddedCodepage(&prepare_writer("EmbeddedCodepage"))]
 #[bench::EmbeddedMany(&prepare_writer("EmbeddedMany"))]
+#[bench::PropertySysTime(&prepare_writer("PropertySysTime"))]
+#[bench::PropertyAppTime(&prepare_writer("PropertyAppTime"))]
+#[bench::PropertyCurrency(&prepare_writer("PropertyCurrency"))]
+#[bench::PropertyCurrencyRounded(&prepare_writer("PropertyCurrencyRounded"))]
 fn write(case: &writer_workloads::Workload) -> writer_workloads::Summary {
     writer_workloads::write(case)
 }

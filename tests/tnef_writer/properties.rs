@@ -3,8 +3,8 @@
 
 use super::{Tag as Attribute, TnefWriter, attribute, header};
 use mimecraft::tnef::{
-    TnefName, TnefNameId, TnefProperty, TnefPropertyTag as Tag, TnefPropertyType as Type,
-    TnefReader, TnefValue as Value,
+    TnefDateTime as Date, TnefDateTimeKind as Kind, TnefName, TnefNameId, TnefProperty,
+    TnefPropertyTag as Tag, TnefPropertyType as Type, TnefReader, TnefValue as Value,
 };
 use std::io::{self, Cursor, Seek};
 
@@ -432,6 +432,206 @@ fn invalid_tags_values_and_incomplete_transitions_are_recoverable() {
     properties.write_value(&Value::Object(vec![0; 16])).unwrap();
     properties.write_tag(Tag::new(0x6000, Type::NULL)).unwrap();
     assert!(properties.write_value(&Value::Null).is_err());
+    properties.finish().unwrap();
+    writer.finish().unwrap();
+    assert_eq!(
+        read_sets(writer.get_ref(), Attribute::MAPI_PROPERTIES)[0].len(),
+        3
+    );
+}
+
+#[test]
+fn typed_dates_match_upstream_scalar_and_multivalue_wires() {
+    for selected in [
+        Attribute::MAPI_PROPERTIES,
+        Attribute::RECIPIENT_TABLE,
+        Attribute::ATTACHMENT,
+    ] {
+        for kind in [Kind::Utc, Kind::Unspecified] {
+            let cases = [
+                (
+                    Type::APP_TIME,
+                    vec![
+                        (637135310450000000, 0x40e56704173ac902u64),
+                        (630821952000000000, 0x40e1d5a000000000),
+                        (599263704000000000, (-1.25f64).to_bits()),
+                        (0, 0),
+                    ],
+                ),
+                (
+                    Type::SYS_TIME,
+                    vec![
+                        (637586501500000000, 132675269500000000),
+                        (504911232000000000, 0),
+                        (662380416000000000, 157469184000000000),
+                        (637586501500000123, 132675269500000123),
+                    ],
+                ),
+            ];
+            let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+            let mut expected = header(1252, 0);
+            let level = if selected == Attribute::ATTACHMENT {
+                writer
+                    .write_attribute(Attribute::ATTACH_RENDER_DATA, &[0; 14])
+                    .unwrap();
+                attribute(&mut expected, 2, Attribute::ATTACH_RENDER_DATA, &[0; 14]);
+                2
+            } else {
+                1
+            };
+            let mut properties = writer.open_properties(selected).unwrap();
+            let mut data = Vec::new();
+            if properties.is_table() {
+                properties.begin_row().unwrap();
+                word(&mut data, 1);
+            }
+            word(&mut data, 4);
+            let mut native = Vec::new();
+            for (value_type, values) in &cases {
+                for many in [false, true] {
+                    let tag = Tag::new(
+                        0x6000,
+                        if many {
+                            multi(*value_type)
+                        } else {
+                            *value_type
+                        },
+                    );
+                    properties.write_tag(tag).unwrap();
+                    word(&mut data, tag.0);
+                    let values = if many {
+                        values.as_slice()
+                    } else {
+                        &values[..1]
+                    };
+                    if many {
+                        word(&mut data, values.len() as u32);
+                    }
+                    let mut decoded = Vec::new();
+                    for &(ticks, bits) in values {
+                        properties
+                            .write_value(&Value::DateTime(Date::from_ticks(ticks, kind).unwrap()))
+                            .unwrap();
+                        data.extend_from_slice(&bits.to_le_bytes());
+                        decoded.push(if *value_type == Type::SYS_TIME {
+                            Value::SysTime(bits as i64)
+                        } else {
+                            Value::AppTime(f64::from_bits(bits))
+                        });
+                    }
+                    native.push(decoded);
+                }
+            }
+            properties.finish().unwrap();
+            writer.finish().unwrap();
+            attribute(&mut expected, level, selected, &data);
+            assert_eq!(writer.get_ref(), &expected);
+            let sets = read_sets(writer.get_ref(), selected);
+            assert_eq!(sets.len(), 1);
+            assert_eq!(sets[0].len(), 4);
+            for (property, values) in sets[0].iter().zip(native) {
+                assert_eq!(property.values(), values);
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_currency_writes_upstream_values_and_rounding_without_partial_errors() {
+    let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+    let mut properties = writer.open_properties(Attribute::MAPI_PROPERTIES).unwrap();
+    assert!(properties.write_currency(1, 0).is_err());
+    properties
+        .write_tag(Tag::new(0x6000, Type::CURRENCY))
+        .unwrap();
+    let before = properties.get_ref().to_vec().unwrap();
+    for (coefficient, scale) in [
+        (79228162514264337593543950335, 0),
+        (92233720368547758075, 5),
+        (-92233720368547758086, 5),
+        (i128::MIN, 0),
+    ] {
+        assert_eq!(
+            properties
+                .write_currency(coefficient, scale)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(properties.get_ref().to_vec().unwrap(), before);
+    }
+    properties.write_currency(123456789, 4).unwrap();
+    assert!(properties.write_currency(0, 0).is_err());
+    properties
+        .write_tag(Tag::new(0x6001, multi(Type::CURRENCY)))
+        .unwrap();
+    let cases = [
+        (-15, 1, -15000i64),
+        (0, 0, 0),
+        (i64::MAX as i128, 4, i64::MAX),
+        (5, 5, 0),
+        (15, 5, 2),
+        (25, 5, 2),
+        (-15, 5, -2),
+        (92233720368547758074, 5, i64::MAX),
+        (-92233720368547758085, 5, i64::MIN),
+        (i128::MIN, u32::MAX, 0),
+    ];
+    let mut expected = Vec::new();
+    word(&mut expected, 2);
+    word(&mut expected, Tag::new(0x6000, Type::CURRENCY).0);
+    expected.extend_from_slice(&123456789i64.to_le_bytes());
+    word(&mut expected, Tag::new(0x6001, multi(Type::CURRENCY)).0);
+    word(&mut expected, cases.len() as u32);
+    for (coefficient, scale, scaled) in cases {
+        let before = properties.get_ref().to_vec().unwrap();
+        assert!(properties.write_currency(i128::MAX, 0).is_err());
+        assert_eq!(properties.get_ref().to_vec().unwrap(), before);
+        properties.write_currency(coefficient, scale).unwrap();
+        expected.extend_from_slice(&scaled.to_le_bytes());
+    }
+    properties.finish().unwrap();
+    writer.finish().unwrap();
+    assert_eq!(
+        writer.get_ref(),
+        &document(Attribute::MAPI_PROPERTIES, &expected)
+    );
+    let sets = read_sets(writer.get_ref(), Attribute::MAPI_PROPERTIES);
+    assert_eq!(sets[0][0].values(), [Value::Currency(123456789)]);
+    assert_eq!(
+        sets[0][1].values(),
+        cases.map(|(_, _, v)| Value::Currency(v))
+    );
+}
+
+#[test]
+fn typed_value_failures_preserve_state_and_allow_subsequent_writes() {
+    let mut writer = TnefWriter::new(Vec::new(), 1252, 0).unwrap();
+    let mut properties = writer.open_properties(Attribute::MAPI_PROPERTIES).unwrap();
+    let valid = Value::DateTime(Date::new(2021, 6, 7, 8, 9, 10, Kind::Utc).unwrap());
+    assert!(properties.write_value(&valid).is_err());
+    for (value_type, ticks) in [
+        (Type::SYS_TIME, 504911231999999999),
+        (Type::APP_TIME, 864000000000),
+    ] {
+        properties.write_tag(Tag::new(0x6000, value_type)).unwrap();
+        let before = properties.get_ref().to_vec().unwrap();
+        assert!(properties.write_currency(1, 0).is_err());
+        let invalid = Value::DateTime(Date::from_ticks(ticks, Kind::Unspecified).unwrap());
+        assert_eq!(
+            properties.write_value(&invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(properties.get_ref().to_vec().unwrap(), before);
+        properties.write_value(&valid).unwrap();
+        assert!(properties.write_value(&valid).is_err());
+    }
+    properties.write_tag(Tag::IMPORTANCE).unwrap();
+    let before = properties.get_ref().to_vec().unwrap();
+    assert!(properties.write_value(&valid).is_err());
+    assert!(properties.write_currency(1, 0).is_err());
+    assert_eq!(properties.get_ref().to_vec().unwrap(), before);
+    properties.write_value(&Value::I32(1)).unwrap();
     properties.finish().unwrap();
     writer.finish().unwrap();
     assert_eq!(

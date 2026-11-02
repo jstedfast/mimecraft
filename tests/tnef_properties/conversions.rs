@@ -1,4 +1,5 @@
 // Adapted from MimeKit's TnefPropertySetTests and TnefPropertyReaderCoercionTests.
+// Currency writing adapts TnefWriterTests and adds exact decimal boundaries.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use std::borrow::Cow;
@@ -14,6 +15,90 @@ use mimecraft::{
         TnefValueConversionError as ConversionError,
     },
 };
+
+#[test]
+fn exact_currency_rounds_midpoints_to_even_and_checks_signed_limits() {
+    for scale in 0..=4 {
+        let factor = 10i64.pow(4 - scale);
+        for coefficient in [i64::MIN / factor, -1, 0, 1, i64::MAX / factor] {
+            assert_eq!(
+                Value::currency_from_decimal(coefficient as i128, scale),
+                Ok(Value::Currency(coefficient * factor))
+            );
+        }
+        for coefficient in [
+            (i64::MIN / factor) as i128 - 1,
+            (i64::MAX / factor) as i128 + 1,
+        ] {
+            assert_eq!(
+                Value::currency_from_decimal(coefficient, scale),
+                Err(ConversionError::OutOfRange)
+            );
+        }
+    }
+    for (coefficient, scale, expected) in [
+        (123456789, 4, 123456789),
+        (-15, 1, -15000),
+        (0, 0, 0),
+        (1, 0, 10000),
+        (i64::MAX as i128, 4, i64::MAX),
+        (i64::MIN as i128, 4, i64::MIN),
+        (92233720368547758074, 5, i64::MAX),
+        (-92233720368547758085, 5, i64::MIN),
+        (i128::MAX, 42, 2),
+        (i128::MIN, 42, -2),
+        (i128::MAX, 43, 0),
+        (i128::MIN, 43, 0),
+        (i128::MAX, u32::MAX, 0),
+        (i128::MIN, u32::MAX, 0),
+    ] {
+        assert_eq!(
+            Value::currency_from_decimal(coefficient, scale),
+            Ok(Value::Currency(expected)),
+            "{coefficient}, {scale}"
+        );
+    }
+    // Exhaust the last decimal digit around even/odd quotients, both signs,
+    // and every supported divisor, including i128's largest power of ten.
+    for scale in 5..=42 {
+        let divisor = 10i128.pow(scale - 4);
+        for quotient in 0..=3i128 {
+            for tenth in 0..10i128 {
+                let Some(coefficient) = quotient
+                    .checked_mul(divisor)
+                    .and_then(|q| q.checked_add(tenth * (divisor / 10)))
+                else {
+                    continue;
+                };
+                let rounded = quotient + i128::from(tenth > 5 || (tenth == 5 && quotient % 2 != 0));
+                for sign in [-1, 1] {
+                    assert_eq!(
+                        Value::currency_from_decimal(coefficient * sign, scale),
+                        Ok(Value::Currency((rounded * sign) as i64))
+                    );
+                }
+            }
+        }
+    }
+    for (coefficient, scale) in [
+        (92233720368547758075, 5),
+        (-92233720368547758086, 5),
+        (i64::MAX as i128 + 1, 4),
+        (i64::MIN as i128 - 1, 4),
+        (79228162514264337593543950335, 0), // decimal.MaxValue in MimeKit's test.
+        (i128::MAX, 0),
+        (i128::MIN, 0),
+        (i128::MAX, 4),
+        (i128::MIN, 4),
+        (i128::MAX, 5),
+        (i128::MIN, 5),
+    ] {
+        assert_eq!(
+            Value::currency_from_decimal(coefficient, scale),
+            Err(ConversionError::OutOfRange)
+        );
+    }
+}
 
 #[test]
 fn core_tag_constants_match_upstream_wire_tags() {

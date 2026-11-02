@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. TNEF-to-MIME conversion and calendar/decimal write helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. TNEF-to-MIME conversion and remaining calendar/time-zone/OLE helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9116,7 +9116,7 @@ remains forward-only. Attribute grammar and buffer validation are checked
 before opening; failure to write the initial count placeholder is terminal.
 
 `write_tag` begins an ordinary property and `write_named_tag` begins a named
-one. `write_value(&TnefValue)` appends an exact native variant; scalar properties
+one. `write_value(&TnefValue)` appends a native variant or typed date; scalar properties
 require exactly one value, Null has no wire value, and supported multivalues
 may be empty. Unspecified/unknown types and multivalued Null, Error, Boolean,
 or Object are rejected. `begin_row` is mandatory before recipient properties,
@@ -9126,12 +9126,12 @@ before appending each logical operation.
 
 The writer supplies little-endian tags/counts, variable-value byte lengths,
 String8/UTF-16LE terminators, and DWORD padding. Integers and float bits remain
-native, currency accepts its exact scaled integer without decimal conversion,
+native, currency continues to accept its exact scaled integer,
 GUIDs retain Windows byte order, and objects require their 16-byte IID.
 FILETIME/OLE values are checked against the existing date decoder's range and
-retain their original wire numbers. Calendar-to-wire date helpers and decimal
-currency rounding are not included: synthesized `TnefValue::DateTime` values
-are explicitly rejected. String8 uses the output codepage with strict encoding.
+retain their original wire numbers. Typed date conversion and exact decimal
+currency rounding are described below. String8 uses the output codepage with
+strict encoding.
 
 Named IDs span 0x8000-0xfffe, allocated lazily on the parent writer and shared
 across its property attributes and recipient rows. Reusing the same GUID and
@@ -9173,8 +9173,46 @@ FILETIME, and snapshot-validation comments are retained.
 
 Seven original property-writing benchmarks share the existing writer harness.
 Binary/Object value streams, compressed-RTF integration, and embedded-message
-writers are described below. Calendar/decimal write helpers and TNEF-to-MIME
-conversion remain pending.
+writers are described below. TNEF-to-MIME conversion and remaining
+calendar/time-zone/OLE helpers remain pending.
+
+### Typed property dates and currency
+
+`TnefDateTime::to_file_time` preserves all 100-nanosecond ticks and rejects dates
+before 1601-01-01. Both UTC and unspecified input are assumed to be UTC, matching
+MimeKit's writer without depending on the host's local time zone.
+`to_oa_date` writes calendar coordinates as-is, matching .NET's negative
+fractional-day interpretation and submillisecond truncation toward zero relative
+to the epoch. Dates before year 100 are rejected except 0001-01-01, which .NET
+treats as a time-only value on 1899-12-30; zero ticks therefore writes zero.
+
+`write_value` now accepts `TnefValue::DateTime` for SysTime and AppTime. The
+shared encoder also handles typed dates in snapshot preflight, scalar values,
+multivalues, named properties, attachments, and recipient rows. Range/type
+errors do not change scratch bytes, counts, or named-ID assignment. Raw SysTime
+and AppTime inputs retain their previous validation and exact wire bits.
+
+`TnefValue::currency_from_decimal(coefficient: i128, scale: u32)` constructs
+currency from `coefficient * 10^(-scale)`. `TnefPropertyWriter::write_currency`
+uses the same conversion after checking the current property. Scaling to
+1/10000 units uses exact integer arithmetic with midpoint-to-even rounding,
+including negative ties and both signed-i64 endpoints. Overflow is explicit
+and recoverable. Every scale is supported; magnitudes smaller than half a wire
+unit round to zero without constructing an overflowing power of ten.
+No decimal dependency, floating-point currency conversion, or local-time
+support is introduced.
+
+Seven new tests adapt MimeKit's scalar/multivalue date and decimal fixtures,
+range checks, and recovery. They add 27 exact-bit .NET date-writing vectors,
+time-only and year-100 boundaries, FILETIME tick precision, both date kinds,
+all decimal divisor scales and signed rounding boundaries, byte-exact output,
+all three property attribute types, and atomic named snapshot preflight.
+Applicable upstream comments are retained. Four original shared workloads cover
+typed SysTime/AppTime and exact/rounded currency property writing.
+
+Default and scalar TNEF integration suites each pass 258 tests, with one
+pre-existing ignored case. Twelve internal TNEF tests pass in both modes;
+23 TNEF doctests, strict scoped Clippy, and strict all-feature rustdoc pass.
 
 ### Streamed MAPI property values
 
@@ -9266,8 +9304,8 @@ callbacks are adapted to explicit Rust finalization.
 
 Six original shared benchmark workloads cover both modes, Cursor scratch,
 one-byte input, seven-byte scratch writes, and separately encoded multivalues.
-Embedded-message writing is described below. Calendar/decimal helpers and
-TNEF-to-MIME conversion remain pending.
+Embedded-message writing is described below. TNEF-to-MIME conversion and
+remaining calendar/time-zone/OLE helpers remain pending.
 
 ### Embedded-message writing
 
@@ -9321,8 +9359,9 @@ Applicable upstream inline comments are retained with Rust ownership adaptations
 
 Six shared benchmark workloads cover large embedded values, Cursor scratch,
 seven-byte scratch writes, eight levels of runtime nesting, Windows-1251
-encoding, and many sibling messages. Calendar/decimal convenience conversions,
-TNEF-to-MIME conversion, and remaining calendar/OLE helpers remain separate work.
+encoding, and many sibling messages. Typed date/currency conversions are
+described above; TNEF-to-MIME conversion and remaining calendar/time-zone/OLE
+helpers remain separate work.
 
 ### MAPI properties and recipient rows
 
@@ -9828,7 +9867,8 @@ distinguishes UTC from unspecified time; equality includes the kind.
 FILETIME conversion preserves every tick since January 1, 1601 UTC, without
 machine-local conversion. OLE Automation conversion matches .NET's millisecond
 rounding and negative fractional-day interpretation, including rounded boundary
-cases. AppTime and legacy attribute dates remain unspecified, not assumed UTC.
+cases. Reading AppTime and legacy attribute dates preserves their unspecified
+kind. Explicit FILETIME writing assumes UTC as described above.
 Existing checked calendar helpers are reused without adding a dependency.
 
 Attribute `read_value_datetime` and its logger variant decode the first seven
@@ -11212,6 +11252,33 @@ Counts include scratch/output growth and encoding; allocated bytes are cumulativ
 not peak memory. No throughput timings were recorded. The schema-v9 report is
 preserved under session `files/tnef-embedded-writing-baseline/allocations.json`.
 
+#### Typed date/currency property writing
+
+Four additional `tnef-writer/Write` cases share standalone, native/metabench,
+optional Criterion, and regression harnesses. Each writes 4,096 scalar
+properties: PropertySysTime preserves fractional FILETIME ticks, PropertyAppTime
+converts a typed calendar date with submillisecond input, PropertyCurrency scales
+an exact four-decimal input, and PropertyCurrencyRounded rounds a negative
+midpoint to even.
+
+Measurements include fresh writers, decimal/date conversion, property tags and
+values, scratch/output growth, final counts and checksums, full-output
+observation, and destruction. Typed date construction, independent expected
+wire fixtures, and conformant-reader checks are outside measurement.
+Throughput counts the complete serialized output once.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| PropertySysTime | 36 | 181,255 |
+| PropertyAppTime | 36 | 181,255 |
+| PropertyCurrency | 36 | 181,255 |
+| PropertyCurrencyRounded | 36 | 181,255 |
+
+All 159 unique native smoke/allocation cases pass. Every previous 155 allocation
+count and cumulative byte total is unchanged from the embedded-writing baseline.
+No throughput timings were recorded. The report is preserved under session
+`files/tnef-typed-writing-allocations.json`.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -11226,8 +11293,8 @@ These harnesses use the same fixtures, generators, and operations under
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,
 fifteen body-model cases, twelve attachment-model cases, and ten whole-message
 cases, plus eleven attribute-writer, seven native property-writer, six
-property-value stream, six compressed-RTF property, and six embedded-message
-writer cases (36 writer cases; 155 TNEF cases in total).
+property-value stream, six compressed-RTF property, six embedded-message,
+and four typed date/currency writer cases (40 writer cases; 159 TNEF cases in total).
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs
