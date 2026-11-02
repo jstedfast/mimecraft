@@ -35,6 +35,27 @@ mod writer_workloads;
 #[path = "support/tnef_calendar.rs"]
 mod calendar_workloads;
 
+#[path = "support/tnef_time_zone.rs"]
+mod time_zone_workloads;
+
+fn prepare_time_zone(name: &'static str) -> time_zone_workloads::Workload {
+    let case = time_zone_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(TIME_ZONE, "tnef-time-zone", "Process")]
+#[bench::ParseStruct(&prepare_time_zone("ParseStruct"))]
+#[bench::ParseDefinition(&prepare_time_zone("ParseDefinition"))]
+#[bench::UtcToLocal(&prepare_time_zone("UtcToLocal"))]
+#[bench::LocalToUtc(&prepare_time_zone("LocalToUtc"))]
+#[bench::WriteFixed(&prepare_time_zone("WriteFixed"))]
+#[bench::WriteDaylight(&prepare_time_zone("WriteDaylight"))]
+#[bench::WriteShort(&prepare_time_zone("WriteShort"))]
+fn process_time_zone(case: &time_zone_workloads::Workload) -> time_zone_workloads::Summary {
+    time_zone_workloads::run(case)
+}
+
 fn prepare_calendar(name: &'static str) -> calendar_workloads::Workload {
     let case = calendar_workloads::workload(name);
     case.check();
@@ -419,6 +440,19 @@ fn collect(case: &Workload) -> Summary {
 }
 
 fn criterion_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("tnef-time-zone");
+    for name in time_zone_workloads::CASES {
+        let case = prepare_time_zone(name);
+        group.throughput(if case.bytes == 0 {
+            Throughput::Elements(case.operations as u64)
+        } else {
+            Throughput::Bytes(case.bytes as u64)
+        });
+        group.bench_function(BenchmarkId::new("Process", name), |b| {
+            b.iter(|| time_zone_workloads::run(&case));
+        });
+    }
+    group.finish();
     let mut group = criterion.benchmark_group("tnef-calendar");
     for name in calendar_workloads::CASES {
         let case = prepare_calendar(name);
@@ -572,6 +606,7 @@ metabench::main!(
         RTF_WRITER,
         WRITER,
         CALENDAR,
+        TIME_ZONE,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

@@ -200,6 +200,25 @@ impl TnefDateTime {
         self.kind
     }
 
+    /// Changes only the time kind, without converting the calendar coordinates.
+    pub const fn with_kind(self, kind: TnefDateTimeKind) -> Self {
+        Self { kind, ..self }
+    }
+
+    /// Adds whole minutes, retaining the time kind and all fractional ticks.
+    ///
+    /// # Errors
+    ///
+    /// Rejects results outside years 1 through 9999.
+    pub fn checked_add_minutes(self, minutes: i32) -> Result<Self, TnefDateTimeError> {
+        let delta = i64::from(minutes) * (TICKS_PER_SECOND * 60) as i64;
+        let ticks = self
+            .ticks
+            .checked_add_signed(delta)
+            .ok_or(TnefDateTimeError::OutOfRange)?;
+        Self::from_ticks(ticks, self.kind)
+    }
+
     /// Returns the calendar year.
     pub fn year(self) -> u16 {
         self.date_parts().0

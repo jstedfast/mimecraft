@@ -30,6 +30,19 @@ mod writer_workloads;
 #[path = "../benches/support/tnef_calendar.rs"]
 mod calendar_workloads;
 
+#[path = "../benches/support/tnef_time_zone.rs"]
+mod time_zone_workloads;
+
+#[test]
+fn time_zone_workloads_match_known_dates_rules_and_calendar_output() {
+    for name in time_zone_workloads::CASES {
+        let case = time_zone_workloads::workload(name);
+        assert_eq!(case.name, name);
+        assert!(case.operations > 0);
+        case.check();
+    }
+}
+
 #[test]
 fn calendar_writer_workloads_match_independent_utf8_content_lines() {
     for name in calendar_workloads::CASES {

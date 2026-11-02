@@ -35,6 +35,9 @@ mod writer_workloads;
 #[path = "support/tnef_calendar.rs"]
 mod calendar_workloads;
 
+#[path = "support/tnef_time_zone.rs"]
+mod time_zone_workloads;
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -59,14 +62,31 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
         *sample = count as f64 / start.elapsed().as_secs_f64();
     }
     samples.sort_by(f64::total_cmp);
-    println!(
-        "{name:28} {:9.1} MiB/s {:10.1} documents/s (median of 5)",
-        samples[2] * size as f64 / 1048576.0,
-        samples[2]
-    );
+    if size == 0 {
+        println!("{name:28} {:10.1} batches/s (median of 5)", samples[2]);
+    } else {
+        println!(
+            "{name:28} {:9.1} MiB/s {:10.1} documents/s (median of 5)",
+            samples[2] * size as f64 / 1048576.0,
+            samples[2]
+        );
+    }
 }
 
 fn main() {
+    println!(
+        "Time zones: parse 256 structures, convert 512 prepared dates, or write 128 components per batch; includes result observation and drop."
+    );
+    println!(
+        "Conversion batches exclude date/zone construction and have no byte throughput. Writing includes a fresh sink, finish/flush, and optional seven-byte writes."
+    );
+    for name in time_zone_workloads::CASES {
+        let case = time_zone_workloads::workload(name);
+        case.check();
+        measure(&format!("TimeZone/{}", case.name), case.bytes, || {
+            black_box(time_zone_workloads::run(&case));
+        });
+    }
     println!(
         "Calendar writing includes a fresh writer/sink, escaping, UTF-8 folding, finalization, full-output observation, and drop."
     );

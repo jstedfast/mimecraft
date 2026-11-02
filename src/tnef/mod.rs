@@ -20,6 +20,7 @@
 //! Embedded writers add IMessage framing, inherit codepages, and support runtime recursion.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
 //! Low-level iCalendar writing provides escaping, UTF-8-safe folding, and formatting.
+//! Embedded time-zone rules support checked UTC/local conversion and VTIMEZONE writing.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -42,6 +43,7 @@ mod reader;
 mod recipient;
 mod rtf_compressed;
 mod rtf_compressed_writer;
+mod time_zone;
 mod value_conversion;
 mod writer;
 pub use attachment::{TnefAttachFlags, TnefAttachMethod, TnefAttachment, TnefAttachmentContent};
@@ -60,6 +62,7 @@ pub use reader::{TnefPropertyReader, TnefPropertyValueReader, TnefReader, TnefVa
 pub use recipient::{TnefRecipient, TnefRecipientType};
 pub use rtf_compressed::{RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError};
 pub use rtf_compressed_writer::RtfCompressedWriter;
+pub use time_zone::{TnefSystemTime, TnefTimeZone, TnefTimeZoneError};
 pub use value_conversion::TnefValueConversionError;
 pub use writer::{TnefAttributeWriter, TnefWriter};
 

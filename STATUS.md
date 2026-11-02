@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. TNEF-to-MIME conversion and remaining calendar/time-zone/OLE helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, and recursive content traversal. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. Low-level iCalendar writing and embedded time-zone rules support UTF-8-safe folding, checked UTC/local conversion, and VTIMEZONE output using dependency-free date types. TNEF-to-MIME conversion, recurrence/calendar building, and OLE helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, recursive content traversal, calendar output, and time zones. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -9174,7 +9174,7 @@ FILETIME, and snapshot-validation comments are retained.
 Seven original property-writing benchmarks share the existing writer harness.
 Binary/Object value streams, compressed-RTF integration, and embedded-message
 writers are described below. TNEF-to-MIME conversion and remaining
-calendar/time-zone/OLE helpers remain pending.
+recurrence/calendar/OLE helpers remain pending.
 
 ### Typed property dates and currency
 
@@ -9240,8 +9240,9 @@ no I/O; recovering storage discards any unfinished logical line.
 formatting. Date-times use whole seconds; the explicit UTC flag selects only
 the `Z` suffix, without kind inspection or time-zone conversion. Offset
 formatting allows large hour fields but rejects `i32::MIN` explicitly.
-Component nesting, property grammar, time-zone/recurrence handling, calendar
-building, OLE helpers, and full TNEF-to-MIME conversion remain outside this port.
+Component nesting, property grammar, and calendar building remain outside this
+low-level writer. Embedded time-zone rules are described below; recurrence,
+OLE helpers, and full TNEF-to-MIME conversion remain pending.
 
 All seven upstream CalendarWriter tests are adapted, with seven additional
 regressions for control filtering, exact octet boundaries, UTF-8 widths, name
@@ -9250,6 +9251,64 @@ failures, and no-I/O storage recovery. All 14 calendar tests and 13 shared TNEF
 benchmark tests pass in default and scalar builds. The 24 TNEF doctests, scoped
 all-feature Clippy, and strict all-feature rustdoc pass. Upstream has no calendar
 writer benchmark; seven original shared workloads cover this implementation.
+
+### Embedded time-zone rules and conversion
+
+`TnefSystemTime`, `TnefTimeZone`, and `TnefTimeZoneError` port MimeKit's embedded
+Outlook time-zone support without a date/time crate, operating-system lookup,
+or IANA database. The existing `TnefDateTime` gains `with_kind` for explicit
+relabeling and `checked_add_minutes` for exact, kind-preserving arithmetic.
+Both conversion directions retain all 100-nanosecond ticks.
+
+`TnefSystemTime::read` preserves all eight raw little-endian fields.
+`get_transition` computes a relative weekday occurrence (5 means last) or an
+absolute day in a supplied year. Absolute days are clamped to the month's end;
+the stored absolute year and milliseconds do not affect calculation, matching
+MimeKit. Invalid transition fields and requested years return explicit errors.
+
+`TnefTimeZone::new` validates each Windows bias within -1440 through 1440
+minutes. Combined UTC-to-local offsets can reach +/-2880 minutes. If either
+transition's month is zero, the zone uses only standard time and discards both
+transition dates. Names can be changed independently; `has_same_rules` ignores
+names and inactive daylight fields.
+
+`from_time_zone_struct` reads the 48-byte legacy structure, including its
+unaligned SYSTEMTIMEs at offsets 14 and 32. `from_time_zone_definition` checks
+the header and selects the first effective rule, otherwise the last complete
+declared rule; partial trailing rules are ignored if a usable rule exists.
+UTF-16 keys replace unpaired surrogates, strip trailing NULs, and trim whitespace.
+Unavailable or blank keys use the trimmed fallback ID, then a generated numeric
+ID. Invalid headers, missing rules, biases, and paired transitions return typed
+errors rather than an absent value. Applicable upstream layout, recovery,
+transition, bias-sign, and calendar comments are retained.
+
+`is_daylight_time`, `get_offset`, `to_local_time`, and `to_universal_time` use
+the embedded rules, not the host time zone. Transition years are taken from
+local standard time and clamped to 2 through 9998, preserving upstream behavior
+at the supported range's ends. Repeated local times prefer the daylight
+candidate; skipped local times use standard time. Date-range overflow is
+explicit, including overflow in intermediate candidates. Local results have
+unspecified kind and universal results UTC kind; input coordinates are
+interpreted according to the method rather than converted using their kind.
+
+`write_to` emits VTIMEZONE with escaped TZID, STANDARD/DAYLIGHT observances,
+local DTSTART in 1601, yearly RRULEs, and numeric offsets. Fixed-offset zones
+emit one STANDARD observance. The caller retains responsibility for finishing
+the calendar writer; this method neither flushes nor finishes it, and sink
+errors preserve the exact emitted prefix and fault the writer.
+
+Eighteen tests adapt the upstream rule/equality tests, Eastern binary fixtures
+and exact VTIMEZONE output, and two 2,000-candidate robustness tests. Additional
+coverage includes 168,000 relative transitions across a full Gregorian cycle,
+every definition truncation, rule selection and ID recovery, raw-field bounds,
+100-nanosecond transition edges, northern/southern seasons, negative/non-hour/
+zero daylight shifts, gap/fold policy, date-range errors, and every partial
+VTIMEZONE sink-write failure. The legacy fuzz fixture uses the actual offset
+14 rather than the upstream test's offset 16 to exercise valid paired rules.
+Default/scalar runs pass all 18 time-zone, 14 calendar, 14 shared benchmark,
+and 149 existing property tests. Twenty-five TNEF doctests, scoped strict
+Clippy, and strict all-feature rustdoc pass. Recurrence parsing, calendar
+building, OLE helpers, and full TNEF-to-MIME conversion remain separate work.
 
 ### Streamed MAPI property values
 
@@ -9397,7 +9456,7 @@ Applicable upstream inline comments are retained with Rust ownership adaptations
 Six shared benchmark workloads cover large embedded values, Cursor scratch,
 seven-byte scratch writes, eight levels of runtime nesting, Windows-1251
 encoding, and many sibling messages. Typed date/currency conversions are
-described above; TNEF-to-MIME conversion and remaining calendar/time-zone/OLE
+described above; TNEF-to-MIME conversion and remaining recurrence/calendar/OLE
 helpers remain separate work.
 
 ### MAPI properties and recipient rows
@@ -11348,6 +11407,41 @@ Allocated bytes are cumulative, not peak memory. No throughput timings were
 recorded. The report is preserved under session
 `files/tnef-calendar-writing-allocations.json`.
 
+#### Embedded time-zone processing
+
+Seven original `tnef-time-zone/Process` cases share standalone, native/metabench,
+optional Criterion, and regression harnesses. No corresponding upstream
+benchmark exists. ParseStruct and ParseDefinition each parse 256 prepared
+legacy/modern structures, including owned IDs, full rule/ID observation, and
+destruction. UtcToLocal and LocalToUtc each convert 512 prepared dates across
+seasons, transition boundaries, repeated/skipped times, and year boundaries,
+retaining fractional ticks and observing result kinds and ticks. Date and zone
+construction are outside conversion measurement.
+
+WriteFixed, WriteDaylight, and WriteShort each write 128 VTIMEZONE components.
+Measurements include a fresh calendar writer and growing output vector,
+transition/offset formatting, finish/flush, full-output observation, and drop.
+WriteShort limits sink writes to seven bytes. Input/zone construction,
+independent expected dates and literal output fixtures, and correctness checks
+are excluded. Parse/write throughput counts bytes once; conversions use
+elements in Criterion and 512-date batches in the standalone harness.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| ParseStruct | 256 | 1,792 |
+| ParseDefinition | 512 | 3,840 |
+| UtcToLocal | 0 | 0 |
+| LocalToUtc | 0 | 0 |
+| WriteFixed | 143 | 62,505 |
+| WriteDaylight | 1,297 | 147,049 |
+| WriteShort | 1,298 | 155,248 |
+
+All 173 unique native smoke/allocation cases pass. Every previous 166 allocation
+count and cumulative byte total is unchanged from the calendar-writing
+baseline. Allocated bytes are cumulative, not peak memory. No throughput
+timings were recorded. The report is preserved under session
+`files/tnef-time-zone-allocations.json`.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -11364,7 +11458,7 @@ fifteen body-model cases, twelve attachment-model cases, and ten whole-message
 cases, plus eleven attribute-writer, seven native property-writer, six
 property-value stream, six compressed-RTF property, six embedded-message,
 and four typed date/currency writer cases (40 TNEF writer cases), plus seven
-calendar writer cases, for 166 TNEF cases in total.
+calendar writer and seven embedded time-zone cases, for 173 TNEF cases in total.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs
