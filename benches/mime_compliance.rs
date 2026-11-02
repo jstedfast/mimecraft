@@ -10,12 +10,12 @@ mod workloads;
 
 fn main() {
     timing::heading();
-    println!("Compliance reporting through fresh header readers, including parsing/setup/drop.");
+    println!("Compliance reporting through fresh readers, including parsing/setup/drop.");
     for name in workloads::CASES {
         let case = workloads::workload(name);
         case.check();
         timing::measure(
-            &format!("mime/MimeCompliance_ValidateHeaders/{name}"),
+            &format!("mime/{}/{name}", case.benchmark_name()),
             case.data.len(),
             || {
                 black_box(workloads::validate(&case));

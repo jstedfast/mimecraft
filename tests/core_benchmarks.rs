@@ -20,7 +20,16 @@ mod mime_compliance;
 #[test]
 fn compliance_workloads_report_expected_diagnostics() {
     for name in mime_compliance::CASES {
-        mime_compliance::workload(name).check();
+        let case = mime_compliance::workload(name);
+        assert_eq!(
+            case.benchmark_name(),
+            if name.starts_with("Base64Body") {
+                "MimeCompliance_ValidateBody"
+            } else {
+                "MimeCompliance_ValidateHeaders"
+            }
+        );
+        case.check();
     }
 }
 

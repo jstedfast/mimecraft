@@ -62,8 +62,9 @@ The queued performance work is:
 Porting has temporarily switched from TNEF to recent MIME compliance features.
 MimeKit commit `7908d7d10a4ec4a5bc7129178d472b5af5555ba6` (repeated Content-Id
 diagnostics and compact reader state) is ported with its regression tests.
-Next is `3376ca9f093f0603c34a5adeb39535fccbe304d5` (Base64 pad-bit validation
-in encoded words and MIME content). The remaining TNEF work above stays queued.
+Commit `3376ca9f093f0603c34a5adeb39535fccbe304d5` is also ported: Base64
+pad-bit validation in encoded words and MIME content. The remaining TNEF work
+above stays queued.
 
 Cryptography, including DKIM, ARC, and DMARC, is excluded from the current scope.
 `LegacyMimeParser` and its event-argument types will not be ported. These are
@@ -1916,7 +1917,7 @@ same quota mechanism for independent use. Loggers retaining issues should
 also limit their own storage.
 
 The complete violation identifiers, severity/category mappings, descriptions,
-and remarks are ported through MimeKit commit `7908d7d1`. Numeric identifiers
+and remarks are ported through MimeKit commit `3376ca9f`. Numeric identifiers
 match its unreleased enum, including that commit's renumbering, and are not
 yet stable persisted identifiers. Issues carry original offsets, one-based lines and
 byte columns, and an exact/line-start/element-start position kind. Reporting
@@ -2000,9 +2001,18 @@ only (55).
 Quoted-printable literal runs use bulk byte searches; UU scanning skips whole
 runs where classification is no longer needed. Base64 validation currently uses
 MimeKit's table-driven scalar logic, not its separate SIMD validator kernels.
+Nonzero unused bits before Base64 padding report `InvalidBase64Padding` at the
+first `=` (`Exact`), even across chunks, line breaks, or ignored bytes. The last
+alphabet character is recovered only at chunk ends and padding, avoiding a
+per-byte tracking update. This diagnostic does not stop validation: incomplete
+quantums, extra padding, and trailing content still produce their existing issues.
 `ENCODED_WORDS` independently checks RFC 2047 syntax in address headers, Subject,
 Comments, Content-Description, and X- fields. `InvalidEncodedWord` covers envelopes,
 B/Q payloads, the 75-byte limit, separation, and phrase/comment restrictions.
+For B payloads it also checks unused pad bits, reporting at the word's start;
+canonical padded values, complete unpadded quantums, and Q payloads are unchanged.
+`BASE64` and `ENCODED_WORDS` gate body and header checks independently. Both use
+the decoder's existing rank table without making decoding stricter.
 `InvalidEncodedWordPlacement` reports complete envelopes in quoted strings and
 addr-specs, even when their payloads are malformed; incomplete addr-spec lookalikes
 are left alone. Positions identify each candidate's start. The scanner neither
@@ -2017,6 +2027,12 @@ advances only when an issue is reported. Incremental scans retain exact original
 positions even when a complete word or quoted pair crosses a scan boundary.
 Ordinary Q payload runs in unstructured headers also use bulk byte searches,
 retaining printable-ASCII checks, escape handling, and the 75-byte lookahead limit.
+Pad-bit regressions cover all 64 ranks with both padding lengths, short and
+block-boundary chunks, whitespace-only and empty writes, ignored invalid bytes,
+bounded slices, existing report caps and logger errors. Upstream guard-page
+pointer cases are adapted to safe slices with surrounding alphabet-byte sentinels.
+Owned, streaming, and sans-I/O parsing retain permissive subject/address/body
+decoding and byte-identical serialization with these diagnostics enabled.
 
 Deep address syntax validation (`ADDRESS`) is not yet ported. An empty report is
 not a guarantee of full MIME compliance.
@@ -10082,11 +10098,20 @@ They are not isolated validator timings or directly comparable to the upstream
 microbenchmarks. Generated headers and expected diagnostic-count assertions are
 outside timing; only the relevant validator is enabled and reports are counted,
 not retained. Both the standalone and metabench targets share these workloads.
-Five original Content-Id cases bring the shared inventory to 27: a single
+Five original Content-Id cases cover a single
 identifier, identical duplicates, folded/mixed-case fields with a UTF-8 prefix,
 256 fields with unlimited reporting, and the same 256-field input without a
 logger. These cases disable deeper validators; the no-logger baseline uses
 `read_headers` and does not allocate compliance reporting state.
+Seven original pad-bit cases bring the shared inventory to 34. Three header
+cases compare canonical two-pad B words with nonzero one- and two-pad words.
+Four `MimeCompliance_ValidateBody` cases read roughly 80 KiB of wrapped Base64:
+a canonical tail, a nonzero two-pad tail, a nonzero one-pad tail separated from
+padding by more than 8 KiB of whitespace-only lines, and a no-logger baseline.
+Body cases use `read_entity_with_logger` or `read_entity`, including body framing
+and raw-byte checks but no decoded body allocation. Input generation and expected
+diagnostic-count checks remain outside measurement, and throughput counts full
+encoded input including headers and whitespace.
 
 Six additional `stream/*/chunk=4096` cases port MimeKit's
 `Benchmarks/Encodings/Base64DecoderBenchmarks.cs`: `Unwrapped`, `MimeCrlf`,
@@ -11195,7 +11220,7 @@ with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 38 Base64, 27 MIME, 27 compliance, twelve HTML, twenty RTF,
+`benches/support`, covering all 38 Base64, 27 MIME, 34 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,

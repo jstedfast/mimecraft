@@ -74,6 +74,189 @@ fn base64_quantums_padding_and_per_line_latches() {
 }
 
 #[test]
+fn base64_pad_bits_all_ranks_and_chunk_boundaries() {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for padding in [1, 2] {
+        for (rank, &byte) in ALPHABET.iter().enumerate() {
+            for prefix in [0, 12, 28, 60] {
+                for whitespace in [String::new(), format!(" \t\r\n{}\r\n\t", " ".repeat(64))] {
+                    let text = format!(
+                        "{}{}{whitespace}{}",
+                        "A".repeat(prefix + 3 - padding),
+                        char::from(byte),
+                        "=".repeat(padding)
+                    );
+                    for chunk in [1, 2, 3, 15, 16, 17, 31, 32, 33, 4096] {
+                        let mut validator = EncodingValidator::new(
+                            ContentEncoding::Base64,
+                            Default::default(),
+                            MimePosition {
+                                offset: 100,
+                                line: 7,
+                            },
+                        )
+                        .unwrap();
+                        let mut issues = Vec::new();
+                        let mut logger = |issue| {
+                            issues.push(issue);
+                            Ok(())
+                        };
+                        for bytes in text.as_bytes().chunks(chunk) {
+                            validator.write(bytes, &mut logger).unwrap();
+                        }
+                        validator.finish(&mut logger).unwrap();
+                        let canonical = rank % if padding == 2 { 16 } else { 4 } == 0;
+                        assert_eq!(
+                            issues.len(),
+                            usize::from(!canonical),
+                            "{text:?}, chunk={chunk}"
+                        );
+                        if !canonical {
+                            let offset = text.find('=').unwrap();
+                            let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
+                            assert_eq!(
+                                issues[0],
+                                MimeComplianceIssue {
+                                    violation: Violation::InvalidBase64Padding,
+                                    context: MimeComplianceContext::Transport,
+                                    stream_offset: 100 + offset as u64,
+                                    line_number: if whitespace.is_empty() { 7 } else { 9 },
+                                    column_number: (offset - line_start + 1) as u64,
+                                    position_kind: MimeCompliancePositionKind::Exact,
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn base64_pad_bits_across_sliced_and_empty_writes() {
+    for tail in [b"Zg", b"Zh"] {
+        let mut validator = EncodingValidator::new(
+            ContentEncoding::Base64,
+            Default::default(),
+            MimePosition {
+                offset: 100,
+                line: 7,
+            },
+        )
+        .unwrap();
+        let mut issues = Vec::new();
+        let mut logger = |issue| {
+            issues.push(issue);
+            Ok(())
+        };
+        validator.write(tail, &mut logger).unwrap();
+        validator.write(&b"B \t\r\n A"[1..6], &mut logger).unwrap();
+        validator.write(&[], &mut logger).unwrap();
+        validator.write(&b"B \r\n==A"[1..6], &mut logger).unwrap();
+        validator.finish(&mut logger).unwrap();
+        assert_eq!(issues.len(), usize::from(tail == b"Zh"));
+        if tail == b"Zh" {
+            assert_eq!(issues[0].violation, Violation::InvalidBase64Padding);
+            assert_eq!(
+                (
+                    issues[0].stream_offset,
+                    issues[0].line_number,
+                    issues[0].column_number
+                ),
+                (110, 9, 1)
+            );
+        }
+    }
+    // A whole quantum changes the last alphabet byte without changing our modulo-four count.
+    for tail in [b"AAAA", b"AAAh"] {
+        let mut validator = EncodingValidator::new(
+            ContentEncoding::Base64,
+            Default::default(),
+            MimePosition::default(),
+        )
+        .unwrap();
+        let mut issues = Vec::new();
+        let mut logger = |issue| {
+            issues.push(issue);
+            Ok(())
+        };
+        for bytes in [b"Zh".as_slice(), tail, b"=="] {
+            validator.write(bytes, &mut logger).unwrap();
+        }
+        validator.finish(&mut logger).unwrap();
+        assert_eq!(issues.len(), usize::from(tail == b"AAAh"));
+        if tail == b"AAAh" {
+            assert_eq!(issues[0].stream_offset, 6);
+        }
+    }
+}
+
+#[test]
+fn base64_pad_bits_preserve_other_diagnostics() {
+    use Violation::*;
+    for (text, next, offset) in [
+        ("Zh=", IncompleteBase64Quantum, 3),
+        ("Zh==!", Base64CharactersAfterPadding, 4),
+        ("Zh===", InvalidBase64Padding, 4),
+    ] {
+        check(
+            ContentEncoding::Base64,
+            text.as_bytes(),
+            &[(InvalidBase64Padding, 2), (next, offset)],
+        );
+    }
+    check(
+        ContentEncoding::Base64,
+        b"Zh%*\r\n==",
+        &[
+            (InvalidBase64Character, 2),
+            (ObsoleteBase64Comment, 3),
+            (InvalidBase64Padding, 6),
+        ],
+    );
+}
+
+#[test]
+fn base64_pad_bits_do_not_inspect_surrounding_slice_bytes() {
+    let text = format!("{}Zh \r\n==", "A".repeat(60));
+    for chunk in [1, 2, 15, 16, 17, 31, 32, 33, 64, text.len()] {
+        for start in [0, 1, 32] {
+            let mut validator = EncodingValidator::new(
+                ContentEncoding::Base64,
+                Default::default(),
+                MimePosition::default(),
+            )
+            .unwrap();
+            let mut issues = Vec::new();
+            let mut logger = |issue| {
+                issues.push(issue);
+                Ok(())
+            };
+            for bytes in text.as_bytes().chunks(chunk) {
+                // Safe slices replace the upstream guard-page pointer inputs.
+                // Alphabet bytes outside the slice must not affect backward recovery.
+                let mut buffer = vec![b'B'; start + bytes.len() + 1];
+                buffer[start..start + bytes.len()].copy_from_slice(bytes);
+                validator
+                    .write(&buffer[start..start + bytes.len()], &mut logger)
+                    .unwrap();
+            }
+            validator.finish(&mut logger).unwrap();
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].violation, Violation::InvalidBase64Padding);
+            assert_eq!(
+                (
+                    issues[0].stream_offset,
+                    issues[0].line_number,
+                    issues[0].column_number
+                ),
+                (65, 2, 1)
+            );
+        }
+    }
+}
+#[test]
 fn quoted_printable_states_and_independent_line_latches() {
     use Violation::*;
     for input in ["literal\r\ntext", "=C3=A9", "=\r\n", "=\n", "=ff"] {

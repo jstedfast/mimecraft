@@ -80,8 +80,8 @@ fn feed(text: &str, options: Options) -> Vec<Issue> {
 
 #[test]
 fn upstream_encoded_word_cases() {
-    assert_eq!(encoded_words::SYNTAX.len(), 40);
-    assert_eq!(encoded_words::ADDRESSES.len(), 37);
+    assert_eq!(encoded_words::SYNTAX.len(), 44);
+    assert_eq!(encoded_words::ADDRESSES.len(), 43);
     for (header, invalid, placement) in encoded_words::headers() {
         let text = format!("{header}\r\n\r\nbody\r\n");
         let issues = read(&text, 4096, Options::default());
@@ -137,6 +137,147 @@ fn gating_preserves_decoded_values_body_and_serialization() {
                 assert_words(&issues, if enabled { 2 } else { 0 }, usize::from(enabled));
             }
         }
+    }
+}
+
+#[test]
+fn base64_pad_bits_gating_preserves_decoding_and_serialization() {
+    let text = concat!(
+        "Subject: =?utf-8?B?Zh==?=\r\n",
+        "To: =?utf-8?B?Zm9=?= <a@example.com>\r\n",
+        "Content-Type: application/octet-stream\r\n",
+        "Content-Transfer-Encoding: base64\r\n\r\nZm9=\r\n",
+    );
+    for capacity in [1, 2, 17, 4096] {
+        for enabled_validators in [
+            Validators::NONE,
+            Validators::BASE64,
+            Validators::ENCODED_WORDS,
+            Validators::ALL,
+            Validators::QUOTED_PRINTABLE
+                | Validators::UU_ENCODE
+                | Validators::PARAMETERS
+                | Validators::ENCODED_WORDS,
+            Validators::BASE64
+                | Validators::QUOTED_PRINTABLE
+                | Validators::UU_ENCODE
+                | Validators::PARAMETERS,
+        ] {
+            for logging in [false, true] {
+                let options = Options {
+                    enabled_validators,
+                    ..Default::default()
+                };
+                let mut parser =
+                    MimeParser::new(BufReader::with_capacity(capacity, text.as_bytes()));
+                parser.set_compliance_options(options);
+                let mut issues = Vec::new();
+                let mut message = if logging {
+                    parser
+                        .parse_message_with_logger(&mut |issue| {
+                            issues.push(issue);
+                            Ok(())
+                        })
+                        .unwrap()
+                } else {
+                    parser.parse_message().unwrap()
+                };
+                assert_eq!(message.subject().unwrap().text, "f");
+                let recipients = message.to();
+                assert_eq!(recipients.addresses.len(), 1);
+                let mailbox = recipients.addresses.mailboxes().next().unwrap();
+                assert_eq!(mailbox.display_name(), "fo");
+                let mimecraft::MimeEntity::Part(part) = message.body_mut().unwrap() else {
+                    panic!("expected leaf part")
+                };
+                let mut decoded = Vec::new();
+                part.content_mut().decode_to(&mut decoded).unwrap();
+                assert_eq!(decoded, b"fo");
+                let mut serialized = Vec::new();
+                message.write_to(&mut serialized).unwrap();
+                assert_eq!(serialized, text.as_bytes());
+
+                let words = logging && enabled_validators.contains(Validators::ENCODED_WORDS);
+                let body = logging && enabled_validators.contains(Validators::BASE64);
+                assert_words(&issues, if words { 2 } else { 0 }, 0);
+                let padding: Vec<_> = issues
+                    .iter()
+                    .filter(|i| i.violation == Violation::InvalidBase64Padding)
+                    .collect();
+                assert_eq!(padding.len(), usize::from(body));
+                if body {
+                    assert_eq!(
+                        (
+                            padding[0].stream_offset,
+                            padding[0].line_number,
+                            padding[0].column_number
+                        ),
+                        (text.rfind('=').unwrap() as u64, 6, 4)
+                    );
+                    assert_eq!(padding[0].position_kind, PositionKind::Exact);
+                }
+                if logging {
+                    assert_eq!(issues, read(text, capacity, options));
+                    assert_eq!(issues, feed(text, options));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn base64_pad_bits_use_existing_budgets_and_propagate_logger_errors() {
+    let text = "Subject: =?utf-8?B?Zh==?= =?utf-8?B?Zm9=?=\r\nContent-Transfer-Encoding: base64\r\n\r\nZh===";
+    let options = Options {
+        context: Context::Storage,
+        max_issues_per_violation: 1,
+        ..Default::default()
+    };
+    let issues = read(text, 1, options);
+    assert_words(&issues, 1, 0);
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|i| i.violation == Violation::InvalidBase64Padding)
+            .count(),
+        1
+    );
+    let markers: Vec<_> = issues
+        .iter()
+        .filter(|i| i.violation == Violation::TooManyComplianceIssues)
+        .collect();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        markers[0].stream_offset,
+        text.find("=?utf-8?B?Zm9").unwrap() as u64
+    );
+    assert!(issues.iter().all(|i| i.context == Context::Storage));
+    assert_eq!(issues, feed(text, options));
+
+    for rejected in [
+        Violation::InvalidEncodedWord,
+        Violation::InvalidBase64Padding,
+    ] {
+        let mut seen = Vec::new();
+        let mut logger = |issue: Issue| {
+            seen.push(issue.violation);
+            if issue.violation == rejected {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "pad-bit logger",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let mut reader = MimeReader::new(text.as_bytes());
+        let error = reader
+            .read_message_with_logger(&mut logger, |_| Ok(()))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "pad-bit logger");
+        assert_eq!(seen.last(), Some(&rejected));
+        assert!(reader.read_message(|_| Ok(())).is_err());
     }
 }
 

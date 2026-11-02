@@ -339,6 +339,10 @@ pub struct Base64Decoder {
 }
 
 impl Base64Decoder {
+    pub(crate) fn rank(byte: u8) -> u8 {
+        RANK[byte as usize]
+    }
+
     /// Creates a tolerant MIME Base64 decoder.
     pub fn new() -> Self {
         Self::default()

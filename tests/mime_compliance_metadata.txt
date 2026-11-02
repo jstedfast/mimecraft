@@ -87,7 +87,7 @@
 86	MimeDepthLimitExceeded	Major	Major	6	34daf077def596a5	708128f514db0c8f
 87	IncompleteBase64Quantum	Major	Major	2	cffb3462efcf6e21	681eff67229da163
 88	InvalidBase64Character	Major	Major	6	0a53e5203c84cbab	b20a82949bea0b57
-89	InvalidBase64Padding	Major	Major	2	683259e725b21fee	e8343be654d34149
+89	InvalidBase64Padding	Major	Major	2	683259e725b21fee	1f4044907a667c58
 90	Base64CharactersAfterPadding	Major	Major	6	779a8d675c267c6c	da6a479b419a08a2
 91	ObsoleteBase64Comment	Major	Major	6	1ef2981cb892e9ad	ae6491baf756ecf5
 92	InvalidQuotedPrintableEncoding	Major	Major	2	246b8ce501822f14	7767f9ddb94ce597

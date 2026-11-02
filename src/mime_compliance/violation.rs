@@ -6,7 +6,7 @@ use super::{MimeComplianceCategories, MimeComplianceContext, MimeComplianceSever
 /// A MIME compliance defect, or notification that reporting was capped.
 ///
 /// Numeric values match MimeKit's unreleased enum, including its renumbering in
-/// commit `7908d7d1`. They are not yet stable persisted identifiers.
+/// commit `3376ca9f`. They are not yet stable persisted identifiers.
 /// Rust does not need MimeKit's uninitialized `None` sentinel.
 /// The enum includes checks not yet implemented by the reader; see
 /// [`crate::MimeReader::read_message_with_logger`] for reporting coverage.
@@ -1221,7 +1221,7 @@ impl MimeComplianceViolation {
                 "Invalid characters within base64 content can lead to decoding issues and inconsistent behavior among different MIME parser implementations which may stop decoding as soon as this scenario is encountered while others may ignore these characters and continue decoding."
             }
             Self::InvalidBase64Padding => {
-                "Invalid padding within base64 content can lead to decoding issues and inconsistent behavior among different MIME parser implementations. Some base64 decoders will ignore extraneous '=' padding characters if any are found within the middle of the base64 encoded block while others will treat decode it as 6 bits of 0's and may stop decoding as soon as they are encountered."
+                "Invalid padding within base64 content can lead to decoding issues and inconsistent behavior among different MIME parser implementations. Some base64 decoders will ignore extraneous '=' padding characters if any are found within the middle of the base64 encoded block while others will treat decode it as 6 bits of 0's and may stop decoding as soon as they are encountered. This also includes nonzero unused bits in the alphabet character before padding. These bits must be zero for a canonical encoding; permissive decoders ignore them, while strict decoders may reject them. Nonzero pad bits are reported at the first '=' padding character."
             }
             Self::Base64CharactersAfterPadding => {
                 "Base64 characters found after padding ('=') in a base64 encoded block are not allowed by the MIME specifications and can lead to inconsistent behavior among different MIME parser implementations."

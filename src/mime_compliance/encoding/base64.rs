@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
 use super::{MimeComplianceLogger, Position, Violation, io};
+use crate::encodings::Base64Decoder;
 
 const ALPHABET: u8 = 0;
 const PADDING: u8 = 1;
@@ -33,6 +34,7 @@ static CLASS: [u8; 256] = {
 pub(super) struct Base64 {
     padding: u8,
     quantum: u8,
+    last_alphabet: u8,
     invalid: bool,
     // Report each kind at most once per line: otherwise attacker-controlled
     // invalid octets could swamp the report with an issue per content byte.
@@ -42,6 +44,17 @@ pub(super) struct Base64 {
 }
 
 impl Base64 {
+    // Recover the last alphabet character only at chunk ends and padding,
+    // rather than adding tracking work to every scalar byte.
+    fn last_alphabet(&self, bytes: &[u8]) -> u8 {
+        bytes
+            .iter()
+            .rev()
+            .copied()
+            .find(|&byte| CLASS[byte as usize] == ALPHABET)
+            .unwrap_or(self.last_alphabet)
+    }
+
     pub(super) fn write(
         &mut self,
         bytes: &[u8],
@@ -51,7 +64,7 @@ impl Base64 {
         if self.invalid {
             return Ok(());
         }
-        for &byte in bytes {
+        for (index, &byte) in bytes.iter().enumerate() {
             let category = CLASS[byte as usize];
             if self.padding == 0 {
                 match category {
@@ -68,6 +81,11 @@ impl Base64 {
                             position.log(logger, Violation::InvalidBase64Padding)?;
                             self.invalid = true;
                         } else {
+                            let mask = if self.quantum == 2 { 0x0f } else { 0x03 };
+                            let last = self.last_alphabet(&bytes[..index]);
+                            if Base64Decoder::rank(last) & mask != 0 {
+                                position.log(logger, Violation::InvalidBase64Padding)?;
+                            }
                             self.padding = 1;
                             self.quantum = (self.quantum + 1) & 3;
                         }
@@ -109,6 +127,10 @@ impl Base64 {
             if self.invalid {
                 break;
             }
+        }
+        // Only a partial quantum that can accept padding needs its last alphabet character.
+        if self.quantum >= 2 && self.padding == 0 {
+            self.last_alphabet = self.last_alphabet(bytes);
         }
         Ok(())
     }

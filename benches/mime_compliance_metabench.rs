@@ -46,7 +46,19 @@ fn prepare(name: &str) -> Workload {
 #[bench::ContentIdFolded(&prepare("ContentIdFolded"))]
 #[bench::ContentIdMany(&prepare("ContentIdMany"))]
 #[bench::ContentIdNoLogger(&prepare("ContentIdNoLogger"))]
+#[bench::PadBitsBCanonical(&prepare("PadBitsBCanonical"))]
+#[bench::PadBitsBOne(&prepare("PadBitsBOne"))]
+#[bench::PadBitsBTwo(&prepare("PadBitsBTwo"))]
 fn validate(case: &Workload) -> usize {
+    workloads::validate(case)
+}
+
+#[metabench::benchmark(VALIDATE_BODY, "mime", "MimeCompliance_ValidateBody")]
+#[bench::Base64BodyCanonical(&prepare("Base64BodyCanonical"))]
+#[bench::Base64BodyPadBits(&prepare("Base64BodyPadBits"))]
+#[bench::Base64BodyWhitespace(&prepare("Base64BodyWhitespace"))]
+#[bench::Base64BodyNoLogger(&prepare("Base64BodyNoLogger"))]
+fn validate_body(case: &Workload) -> usize {
     workloads::validate(case)
 }
 
@@ -55,11 +67,14 @@ fn criterion_benchmarks(criterion: &mut Criterion) {
     for name in workloads::CASES {
         let case = prepare(name);
         group.throughput(Throughput::Bytes(case.data.len() as u64));
-        group.bench_function(BenchmarkId::new(VALIDATE.benchmark_name(), name), |b| {
+        group.bench_function(BenchmarkId::new(case.benchmark_name(), name), |b| {
             b.iter(|| validate(&case))
         });
     }
     group.finish();
 }
 
-metabench::main!(criterion = criterion_benchmarks, benchmarks = [VALIDATE]);
+metabench::main!(
+    criterion = criterion_benchmarks,
+    benchmarks = [VALIDATE, VALIDATE_BODY]
+);

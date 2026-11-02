@@ -8,7 +8,7 @@ use mimecraft::{
     MimeComplianceViolation as Violation, MimeReader,
 };
 
-pub const CASES: [&str; 27] = [
+pub const CASES: [&str; 34] = [
     "PlainSubject",
     "LongPlainSubject",
     "ShortQ",
@@ -36,6 +36,13 @@ pub const CASES: [&str; 27] = [
     "ContentIdFolded",
     "ContentIdMany",
     "ContentIdNoLogger",
+    "PadBitsBCanonical",
+    "PadBitsBOne",
+    "PadBitsBTwo",
+    "Base64BodyCanonical",
+    "Base64BodyPadBits",
+    "Base64BodyWhitespace",
+    "Base64BodyNoLogger",
 ];
 
 pub struct Workload {
@@ -43,15 +50,45 @@ pub struct Workload {
     validators: Validators,
     expected: usize,
     logging: bool,
+    body: bool,
 }
 
 impl Workload {
+    pub fn benchmark_name(&self) -> &'static str {
+        if self.body {
+            "MimeCompliance_ValidateBody"
+        } else {
+            "MimeCompliance_ValidateHeaders"
+        }
+    }
+
     pub fn check(&self) {
         assert_eq!(validate(self), self.expected);
     }
 }
 
 pub fn workload(name: &str) -> Workload {
+    if name.starts_with("Base64Body") {
+        let tail = match name {
+            "Base64BodyCanonical" => "Zg==".into(),
+            "Base64BodyPadBits" | "Base64BodyNoLogger" => "Zh==".into(),
+            "Base64BodyWhitespace" => {
+                format!("Zm9{}=", format!("\r\n{}", " ".repeat(64)).repeat(128))
+            }
+            _ => panic!("unknown compliance workload: {name}"),
+        };
+        return Workload {
+            data: format!(
+                "Content-Transfer-Encoding: base64\r\n\r\n{}{tail}\r\n",
+                format!("{}\r\n", "A".repeat(76)).repeat(1024)
+            )
+            .into_bytes(),
+            validators: Validators::BASE64,
+            expected: usize::from(matches!(name, "Base64BodyPadBits" | "Base64BodyWhitespace")),
+            logging: name != "Base64BodyNoLogger",
+            body: true,
+        };
+    }
     let mut field = if name.starts_with("Parameter") {
         "Content-Type"
     } else if name.starts_with("ContentId") {
@@ -92,6 +129,15 @@ pub fn workload(name: &str) -> Workload {
         "MalformedB" => {
             expected = 1;
             " =?utf-8?B?YQ?=\r\n".into()
+        }
+        "PadBitsBCanonical" => " =?utf-8?B?Zg==?=\r\n".into(),
+        "PadBitsBOne" => {
+            expected = 1;
+            " =?utf-8?B?Zm9=?=\r\n".into()
+        }
+        "PadBitsBTwo" => {
+            expected = 1;
+            " =?utf-8?B?Zh==?=\r\n".into()
         }
         "Unterminated" => {
             expected = 128;
@@ -167,12 +213,13 @@ pub fn workload(name: &str) -> Workload {
         },
         expected,
         logging: name != "ContentIdNoLogger",
+        body: false,
     }
 }
 
 pub fn validate(case: &Workload) -> usize {
-    // The validators are private. Measure them through header reporting, including
-    // raw header parsing/setup/drop, but without decoded address or message models.
+    // The validators are private. Measure them through reader reporting, including
+    // raw parsing/setup/drop, but without decoded address or message models.
     let mut reader = MimeReader::new(case.data.as_slice());
     reader.set_compliance_options(MimeComplianceOptions {
         enabled_validators: case.validators,
@@ -180,32 +227,41 @@ pub fn validate(case: &Workload) -> usize {
         ..Default::default()
     });
     if !case.logging {
-        reader.read_headers(|_| Ok(())).unwrap();
+        if case.body {
+            reader.read_entity(|_| Ok(())).unwrap();
+        } else {
+            reader.read_headers(|_| Ok(())).unwrap();
+        }
         return 0;
     }
     let mut count = 0;
-    reader
-        .read_headers_with_logger(
-            &mut |issue: MimeComplianceIssue| {
-                if matches!(
-                    issue.violation,
-                    Violation::InvalidEncodedWord
-                        | Violation::InvalidEncodedWordPlacement
-                        | Violation::InvalidParameter
-                        | Violation::InvalidRfc2231Parameter
-                        | Violation::EncodedWordInParameter
-                        | Violation::RepeatedParameter
-                        | Violation::RepeatedBoundaryParameter
-                        | Violation::RepeatedFilenameParameter
-                        | Violation::MissingParameterSegment
-                        | Violation::RepeatedContentId
-                ) {
-                    count += 1;
-                }
-                Ok(())
-            },
-            |_| Ok(()),
-        )
-        .unwrap();
+    let mut logger = |issue: MimeComplianceIssue| {
+        if matches!(
+            issue.violation,
+            Violation::InvalidEncodedWord
+                | Violation::InvalidEncodedWordPlacement
+                | Violation::InvalidParameter
+                | Violation::InvalidRfc2231Parameter
+                | Violation::EncodedWordInParameter
+                | Violation::RepeatedParameter
+                | Violation::RepeatedBoundaryParameter
+                | Violation::RepeatedFilenameParameter
+                | Violation::MissingParameterSegment
+                | Violation::RepeatedContentId
+                | Violation::InvalidBase64Padding
+        ) {
+            count += 1;
+        }
+        Ok(())
+    };
+    if case.body {
+        reader
+            .read_entity_with_logger(&mut logger, |_| Ok(()))
+            .unwrap();
+    } else {
+        reader
+            .read_headers_with_logger(&mut logger, |_| Ok(()))
+            .unwrap();
+    }
     count
 }

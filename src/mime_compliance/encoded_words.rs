@@ -104,6 +104,12 @@ impl<'a> Scanner<'a> {
                 valid &= at != payload
                     && hex == 0
                     && (!base64 || ((at - payload).is_multiple_of(4) && padding <= 2));
+                if valid && base64 && padding > 0 {
+                    let mask = if padding == 2 { 0x0f } else { 0x03 };
+                    valid = crate::encodings::Base64Decoder::rank(self.text[at - padding - 1])
+                        & mask
+                        == 0;
+                }
                 return (valid, Some(at + 2));
             }
             // Leave a nested candidate to the next iteration instead of hiding it in this one.
@@ -650,6 +656,53 @@ mod tests {
     use super::super::allocation_tracking;
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn base64_pad_bits_all_ranks_in_bounded_words() {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for padding in [1, 2] {
+            for (rank, &byte) in ALPHABET.iter().enumerate() {
+                let word = format!(
+                    "=?utf-8?B?{}{}{}?=",
+                    "A".repeat(3 - padding),
+                    char::from(byte),
+                    "=".repeat(padding)
+                );
+                let text = format!("xx{word}yy");
+                let mut scanner = Scanner::new(
+                    &text.as_bytes()[2..2 + word.len()],
+                    MimePosition {
+                        offset: 100,
+                        line: 5,
+                    },
+                    7,
+                    MimeComplianceContext::Storage,
+                );
+                let mut issues = Vec::new();
+                scanner
+                    .validate(word.len(), Location::Text, &mut |issue| {
+                        issues.push(issue);
+                        Ok(())
+                    })
+                    .unwrap();
+                let canonical = rank % if padding == 2 { 16 } else { 4 } == 0;
+                assert_eq!(issues.len(), usize::from(!canonical), "{word}");
+                if !canonical {
+                    let issue = &issues[0];
+                    assert_eq!(issue.violation, Violation::InvalidEncodedWord);
+                    assert_eq!(issue.context, MimeComplianceContext::Storage);
+                    assert_eq!(
+                        issue.position_kind,
+                        MimeCompliancePositionKind::ElementStart
+                    );
+                    assert_eq!(
+                        (issue.stream_offset, issue.line_number, issue.column_number),
+                        (100, 5, 7)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn ordinary_q_runs_match_scalar_word_validation() {
