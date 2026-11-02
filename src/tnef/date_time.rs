@@ -239,6 +239,22 @@ impl TnefDateTime {
         Self::from_ticks(ticks, self.kind)
     }
 
+    /// Adds unsigned whole minutes, retaining kind and fractional ticks.
+    ///
+    /// Recurrence offsets can exceed `i32::MAX`; they must not be narrowed to
+    /// signed minutes before addition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TnefDateTimeError::OutOfRange`] past the end of year 9999.
+    pub fn checked_add_unsigned_minutes(self, minutes: u32) -> Result<Self, TnefDateTimeError> {
+        // The supported date ticks plus any u32 minute delta fit in u64.
+        Self::from_ticks(
+            self.ticks + u64::from(minutes) * TICKS_PER_SECOND * 60,
+            self.kind,
+        )
+    }
+
     /// Returns the calendar year.
     pub fn year(self) -> u16 {
         self.date_parts().0

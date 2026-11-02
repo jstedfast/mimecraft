@@ -98,6 +98,7 @@ impl TnefRecurrenceException {
 /// This is a structural parser, not an occurrence generator or RRULE builder.
 /// Calendar IDs, periods, masks, dates, and end types retain their raw values;
 /// semantic validation belongs to the calendar consumer.
+/// [`super::calendar::recurrence_rule`] provides the MS-OXCICAL RRULE mapping.
 ///
 /// Malformed exception data does not invalidate the master recurrence:
 /// all exceptions are discarded and [`Self::exception_error`] records the

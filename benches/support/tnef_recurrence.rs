@@ -8,8 +8,7 @@ use mimecraft::{
 };
 use std::hint::black_box;
 
-#[path = "../../tests/support/tnef_recurrence.rs"]
-mod fixtures;
+use super::recurrence_fixtures as fixtures;
 
 pub const CASES: [&str; 7] = [
     "Daily",

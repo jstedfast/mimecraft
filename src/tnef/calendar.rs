@@ -1,17 +1,21 @@
 // Ported from MimeKit's Tnef/CalendarWriter.cs.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-//! Low-level iCalendar content-line writing for TNEF calendar conversion.
+//! iCalendar content-line writing and recurrence helpers for TNEF conversion.
 //!
 //! This is not a calendar model or a TNEF-to-MIME converter. Component nesting,
 //! property types, time-zone selection, and already formatted values remain the
 //! caller's responsibility.
+//! Recurrence helpers validate RRULE mappings and select local EXDATEs without
+//! assembling events or consuming the parser's recovery diagnostics.
 
 use std::io::{self, Write};
 
 use super::TnefDateTime;
+pub use super::calendar_recurrence::{RecurrenceRuleError, recurrence_exdates, recurrence_rule};
 
 const MAX_LINE_LENGTH: usize = 75;
+pub(super) const WEEK_DAYS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {

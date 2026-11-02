@@ -41,6 +41,33 @@ mod time_zone_workloads;
 #[path = "support/tnef_recurrence.rs"]
 mod recurrence_workloads;
 
+#[path = "../tests/support/tnef_recurrence.rs"]
+mod recurrence_fixtures;
+
+#[path = "support/tnef_calendar_recurrence.rs"]
+mod calendar_recurrence_workloads;
+
+fn prepare_calendar_recurrence(name: &'static str) -> calendar_recurrence_workloads::Workload {
+    let case = calendar_recurrence_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(CALENDAR_RECURRENCE, "tnef-calendar-recurrence", "Generate")]
+#[bench::Daily(&prepare_calendar_recurrence("Daily"))]
+#[bench::Weekly(&prepare_calendar_recurrence("Weekly"))]
+#[bench::YearlyNth(&prepare_calendar_recurrence("YearlyNth"))]
+#[bench::UntilUtc(&prepare_calendar_recurrence("UntilUtc"))]
+#[bench::UntilDate(&prepare_calendar_recurrence("UntilDate"))]
+#[bench::ExDates(&prepare_calendar_recurrence("ExDates"))]
+#[bench::ManyExDates(&prepare_calendar_recurrence("ManyExDates"))]
+#[bench::UnsupportedCalendar(&prepare_calendar_recurrence("UnsupportedCalendar"))]
+fn generate_calendar_recurrence(
+    case: &calendar_recurrence_workloads::Workload,
+) -> calendar_recurrence_workloads::Summary {
+    calendar_recurrence_workloads::run(case)
+}
+
 fn prepare_recurrence(name: &'static str) -> recurrence_workloads::Workload {
     let case = recurrence_workloads::workload(name);
     case.check();
@@ -461,6 +488,15 @@ fn collect(case: &Workload) -> Summary {
 }
 
 fn criterion_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("tnef-calendar-recurrence");
+    for name in calendar_recurrence_workloads::CASES {
+        let case = prepare_calendar_recurrence(name);
+        group.throughput(Throughput::Elements(case.operations as u64));
+        group.bench_function(BenchmarkId::new("Generate", name), |b| {
+            b.iter(|| calendar_recurrence_workloads::run(&case));
+        });
+    }
+    group.finish();
     let mut group = criterion.benchmark_group("tnef-recurrence");
     for name in recurrence_workloads::CASES {
         let case = prepare_recurrence(name);
@@ -638,6 +674,7 @@ metabench::main!(
         CALENDAR,
         TIME_ZONE,
         RECURRENCE,
+        CALENDAR_RECURRENCE,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

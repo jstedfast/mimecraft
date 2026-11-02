@@ -22,6 +22,7 @@
 //! Low-level iCalendar writing provides escaping, UTF-8-safe folding, and formatting.
 //! Embedded time-zone rules support checked UTC/local conversion and VTIMEZONE writing.
 //! Recurrence patterns preserve local dates and report discarded malformed exceptions.
+//! Calendar recurrence helpers generate checked RRULE values and local EXDATEs.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -31,6 +32,7 @@ use std::{error::Error, fmt, io};
 
 mod attachment;
 pub mod calendar;
+mod calendar_recurrence;
 mod date_time;
 mod embedded_writer;
 mod message;

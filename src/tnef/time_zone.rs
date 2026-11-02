@@ -478,7 +478,7 @@ impl TnefTimeZone {
             } else {
                 i32::from(date.day)
             };
-            let weekday = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"][usize::from(date.day_of_week)];
+            let weekday = super::calendar::WEEK_DAYS[usize::from(date.day_of_week)];
             format!("FREQ=YEARLY;BYDAY={week}{weekday};BYMONTH={}", date.month)
         } else {
             format!("FREQ=YEARLY;BYMONTHDAY={};BYMONTH={}", date.day, date.month)
