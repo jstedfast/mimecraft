@@ -32,6 +32,9 @@ mod rtf_writer_workloads;
 #[path = "support/tnef_writer.rs"]
 mod writer_workloads;
 
+#[path = "support/tnef_calendar.rs"]
+mod calendar_workloads;
+
 #[path = "support/tnef_bodies.rs"]
 mod body_workloads;
 
@@ -64,6 +67,23 @@ fn measure(name: &str, size: usize, mut read: impl FnMut()) {
 }
 
 fn main() {
+    println!(
+        "Calendar writing includes a fresh writer/sink, escaping, UTF-8 folding, finalization, full-output observation, and drop."
+    );
+    println!(
+        "Formatting includes date/offset formatting; ShortWrites uses seven-byte I/O. Input and independent expected output are prepared outside measurement."
+    );
+    for name in calendar_workloads::CASES {
+        let case = calendar_workloads::workload(name);
+        case.check();
+        measure(
+            &format!("Calendar/Write/{}", case.name),
+            case.output_length,
+            || {
+                black_box(calendar_workloads::write(&case));
+            },
+        );
+    }
     println!(
         "TNEF writing includes a fresh writer, growing sink, framing/checksums, finalization, output observation, and drop."
     );

@@ -32,6 +32,27 @@ mod rtf_writer_workloads;
 #[path = "support/tnef_writer.rs"]
 mod writer_workloads;
 
+#[path = "support/tnef_calendar.rs"]
+mod calendar_workloads;
+
+fn prepare_calendar(name: &'static str) -> calendar_workloads::Workload {
+    let case = calendar_workloads::workload(name);
+    case.check();
+    case
+}
+
+#[metabench::benchmark(CALENDAR, "tnef-calendar", "Write")]
+#[bench::Components(&prepare_calendar("Components"))]
+#[bench::EscapedText(&prepare_calendar("EscapedText"))]
+#[bench::Parameters(&prepare_calendar("Parameters"))]
+#[bench::FoldAscii(&prepare_calendar("FoldAscii"))]
+#[bench::FoldUtf8(&prepare_calendar("FoldUtf8"))]
+#[bench::ShortWrites(&prepare_calendar("ShortWrites"))]
+#[bench::Formatting(&prepare_calendar("Formatting"))]
+fn write_calendar(case: &calendar_workloads::Workload) -> calendar_workloads::Summary {
+    calendar_workloads::write(case)
+}
+
 fn prepare_writer(name: &'static str) -> writer_workloads::Workload {
     let case = writer_workloads::workload(name);
     case.check();
@@ -398,6 +419,15 @@ fn collect(case: &Workload) -> Summary {
 }
 
 fn criterion_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("tnef-calendar");
+    for name in calendar_workloads::CASES {
+        let case = prepare_calendar(name);
+        group.throughput(Throughput::Bytes(case.output_length as u64));
+        group.bench_function(BenchmarkId::new("Write", name), |b| {
+            b.iter(|| calendar_workloads::write(&case));
+        });
+    }
+    group.finish();
     let mut group = criterion.benchmark_group("tnef-writer");
     for name in writer_workloads::CASES {
         let case = prepare_writer(name);
@@ -541,6 +571,7 @@ metabench::main!(
         RTF_COMPRESSED,
         RTF_WRITER,
         WRITER,
+        CALENDAR,
         BODY_CONSTRUCT,
         BODY_STREAM,
         BODY_TEXT,

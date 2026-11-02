@@ -27,6 +27,19 @@ mod rtf_writer_workloads;
 #[path = "../benches/support/tnef_writer.rs"]
 mod writer_workloads;
 
+#[path = "../benches/support/tnef_calendar.rs"]
+mod calendar_workloads;
+
+#[test]
+fn calendar_writer_workloads_match_independent_utf8_content_lines() {
+    for name in calendar_workloads::CASES {
+        let case = calendar_workloads::workload(name);
+        assert_eq!(case.name, name);
+        assert!(case.output_length > 0);
+        case.check();
+    }
+}
+
 #[test]
 fn tnef_writer_workloads_match_independent_framing_and_full_content() {
     for name in writer_workloads::CASES {

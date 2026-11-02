@@ -9214,6 +9214,43 @@ Default and scalar TNEF integration suites each pass 258 tests, with one
 pre-existing ignored case. Twelve internal TNEF tests pass in both modes;
 23 TNEF doctests, strict scoped Clippy, and strict all-feature rustdoc pass.
 
+### iCalendar content-line writing
+
+`tnef::calendar::CalendarWriter<W: Write>` ports MimeKit's low-level calendar
+writer with a reusable logical-line buffer, CRLF endings, and UTF-8-safe
+75-octet folding. Continuation spaces count toward the limit. Component and
+property methods support raw values, escaped TEXT, and quoted parameters.
+Applicable upstream RFC, folding, and compatibility comments are retained.
+
+`append_text` and `escape_text` escape backslashes, semicolons, commas, and
+line breaks; CRLF becomes one escaped newline. Raw values drop CR/LF instead.
+Filtering uses RFC 5545 CONTROL, not Unicode's broader control category:
+TAB and non-ASCII characters remain intact. Parameters containing semicolons,
+colons, or commas are quoted, and double quotes become apostrophes rather than
+using RFC 6868 encoding, matching MimeKit's reader-compatibility workaround.
+
+Unlike the internal upstream helper, this public API validates nonempty ASCII
+alphanumeric/hyphen names before mutation. Invalid operations are recoverable.
+Explicit `finish` checks for an unfinished property and flushes the sink;
+short/Interrupted writes and Interrupted flushes are handled. Other sink errors
+are terminal and retain the exact emitted prefix. Drop and `into_inner` perform
+no I/O; recovering storage discards any unfinished logical line.
+
+`format_date_time`, `format_date`, and `format_utc_offset` preserve upstream
+formatting. Date-times use whole seconds; the explicit UTC flag selects only
+the `Z` suffix, without kind inspection or time-zone conversion. Offset
+formatting allows large hour fields but rejects `i32::MIN` explicitly.
+Component nesting, property grammar, time-zone/recurrence handling, calendar
+building, OLE helpers, and full TNEF-to-MIME conversion remain outside this port.
+
+All seven upstream CalendarWriter tests are adapted, with seven additional
+regressions for control filtering, exact octet boundaries, UTF-8 widths, name
+validation, short/Interrupted I/O, every partial-write failure boundary, flush
+failures, and no-I/O storage recovery. All 14 calendar tests and 13 shared TNEF
+benchmark tests pass in default and scalar builds. The 24 TNEF doctests, scoped
+all-feature Clippy, and strict all-feature rustdoc pass. Upstream has no calendar
+writer benchmark; seven original shared workloads cover this implementation.
+
 ### Streamed MAPI property values
 
 `TnefPropertyWriter::open_value` returns an exclusively borrowed
@@ -11279,6 +11316,38 @@ count and cumulative byte total is unchanged from the embedded-writing baseline.
 No throughput timings were recorded. The report is preserved under session
 `files/tnef-typed-writing-allocations.json`.
 
+#### iCalendar content-line writing
+
+Seven `tnef-calendar/Write` cases share standalone, native/metabench, optional
+Criterion, and regression harnesses. Components, EscapedText, and Parameters
+write 256 repetitions using upstream-style fixtures. FoldAscii writes 98,304
+input bytes; FoldUtf8 and ShortWrites write 73,728 UTF-8 input bytes, with the
+latter limiting each sink write to seven bytes. Formatting writes 256 sets of
+UTC/local date-time, date, and UTC-offset properties.
+
+Measurement includes fresh writers and output vectors, escaping, parameter
+preparation, folding, applicable date/offset formatting, output growth, explicit
+finish/flush, full-output observation, and destruction. Input generation, date
+construction, independent expected output, and correctness checks are excluded.
+The reference folder packs characters forward rather than copying the writer's
+backward UTF-8-boundary search. Throughput counts serialized output bytes once.
+
+| Case | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| Components | 15 | 49,196 |
+| EscapedText | 13 | 28,700 |
+| Parameters | 15 | 76,973 |
+| FoldAscii | 27 | 667,562 |
+| FoldUtf8 | 26 | 487,338 |
+| ShortWrites | 29 | 442,349 |
+| Formatting | 1,550 | 65,568 |
+
+All 166 unique native smoke/allocation cases pass. Every previous 159 allocation
+count and cumulative byte total is unchanged from the typed-writing baseline.
+Allocated bytes are cumulative, not peak memory. No throughput timings were
+recorded. The report is preserved under session
+`files/tnef-calendar-writing-allocations.json`.
+
 #### Optional metabench targets
 
 The `base64`, `mime_reader`, `mime_compliance`, `html`, `rtf`, `headers`, `filters`, `message`, and `tnef`
@@ -11294,7 +11363,8 @@ six recipient-model cases, four compressed-RTF decoding and six encoding cases,
 fifteen body-model cases, twelve attachment-model cases, and ten whole-message
 cases, plus eleven attribute-writer, seven native property-writer, six
 property-value stream, six compressed-RTF property, six embedded-message,
-and four typed date/currency writer cases (40 writer cases; 159 TNEF cases in total).
+and four typed date/currency writer cases (40 TNEF writer cases), plus seven
+calendar writer cases, for 166 TNEF cases in total.
 The MIME metabench target also includes six `headers/HeaderList_Get` cases:
 lowercase, mixed-case, and uppercase hits, a mixed-case miss, and long-name
 lookups. Header lists are prepared outside measurement; each operation performs

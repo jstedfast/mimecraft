@@ -19,6 +19,7 @@
 //! RTF property encoders write LZFu/MELA directly to that scratch without a second buffer.
 //! Embedded writers add IMessage framing, inherit codepages, and support runtime recursion.
 //! Attribute dates and MAPI date conversion retain explicit UTC/unspecified kinds.
+//! Low-level iCalendar writing provides escaping, UTF-8-safe folding, and formatting.
 //! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -27,6 +28,7 @@
 use std::{error::Error, fmt, io};
 
 mod attachment;
+pub mod calendar;
 mod date_time;
 mod embedded_writer;
 mod message;
