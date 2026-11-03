@@ -60,6 +60,8 @@ fn validate(case: &Workload) -> usize {
 #[bench::Base64BodyPadBits(&prepare("Base64BodyPadBits"))]
 #[bench::Base64BodyWhitespace(&prepare("Base64BodyWhitespace"))]
 #[bench::Base64BodyNoLogger(&prepare("Base64BodyNoLogger"))]
+#[bench::Base64BodyResumption(&prepare("Base64BodyResumption"))]
+#[bench::Base64BodyShortLines(&prepare("Base64BodyShortLines"))]
 #[bench::ScanBody7Bit(&prepare("ScanBody7Bit"))]
 #[bench::ScanBody8Bit(&prepare("ScanBody8Bit"))]
 #[bench::ScanBodyBinary(&prepare("ScanBodyBinary"))]

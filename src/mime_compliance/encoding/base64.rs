@@ -4,6 +4,70 @@
 use super::{MimeComplianceLogger, Position, Violation, io};
 use crate::encodings::Base64Decoder;
 
+#[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
+#[path = "base64/x86.rs"]
+mod simd;
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[path = "base64/neon.rs"]
+mod simd;
+#[cfg(test)]
+#[path = "base64/tests.rs"]
+mod tests;
+
+#[cfg(all(
+    feature = "simd",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Default)]
+struct Prefix {
+    len: usize,
+    alphabet: usize,
+    lines: u64,
+    line_start: usize,
+}
+
+#[cfg(all(
+    feature = "simd",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl Prefix {
+    // Only consume bytes preceding the first '=', '*' or invalid character.
+    fn masks(&mut self, width: usize, mut alphabet: u32, mut lf: u32, valid: u32) -> bool {
+        let count = ((!valid).trailing_zeros() as usize).min(width);
+        if count < width {
+            let mask = (1u32 << count) - 1;
+            alphabet &= mask;
+            lf &= mask;
+        }
+        // Whitespace is harmless but contributes nothing to the quantum.
+        // Count only alphabet lanes and line feeds in the consumed prefix.
+        self.alphabet += alphabet.count_ones() as usize;
+        if lf != 0 {
+            // For both vector widths the next line starts at 32 - leading_zeros.
+            self.line_start = self.len + (32 - lf.leading_zeros()) as usize;
+            self.lines += u64::from(lf.count_ones());
+        }
+        self.len += count;
+        count == width
+    }
+}
+
+#[cfg(all(
+    feature = "simd",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+struct Scanner(Option<simd::Accelerator>);
+
+#[cfg(all(
+    feature = "simd",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl Default for Scanner {
+    fn default() -> Self {
+        Self(simd::Accelerator::detect())
+    }
+}
+
 const ALPHABET: u8 = 0;
 const PADDING: u8 = 1;
 const LINE_FEED: u8 = 2;
@@ -32,6 +96,11 @@ static CLASS: [u8; 256] = {
 
 #[derive(Default)]
 pub(super) struct Base64 {
+    #[cfg(all(
+        feature = "simd",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    scanner: Scanner,
     padding: u8,
     quantum: u8,
     last_alphabet: u8,
@@ -45,7 +114,7 @@ pub(super) struct Base64 {
 
 impl Base64 {
     // Recover the last alphabet character only at chunk ends and padding,
-    // rather than adding tracking work to every scalar byte.
+    // rather than adding tracking work to every scalar byte and SIMD block.
     fn last_alphabet(&self, bytes: &[u8]) -> u8 {
         bytes
             .iter()
@@ -64,7 +133,35 @@ impl Base64 {
         if self.invalid {
             return Ok(());
         }
-        for (index, &byte) in bytes.iter().enumerate() {
+        let mut index = 0;
+        while index < bytes.len() {
+            // Most content is alphabet characters and line breaks. Validate
+            // these in bulk, then handle the first special byte scalarly.
+            #[cfg(all(
+                feature = "simd",
+                any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            if self.padding == 0
+                && bytes.len() - index >= 16
+                && let Some(accelerator) = self.scanner.0
+            {
+                let prefix = accelerator.scan(&bytes[index..]);
+                self.quantum = (self.quantum + (prefix.alphabet & 3) as u8) & 3;
+                if prefix.lines != 0 {
+                    position.line_start = position.offset + prefix.line_start as u64;
+                    position.line += prefix.lines;
+                    // A new line re-arms both once-per-line diagnostics, even
+                    // when the preceding malformed line spanned writes.
+                    self.reported_invalid_character = false;
+                    self.reported_comment = false;
+                }
+                position.offset += prefix.len as u64;
+                index += prefix.len;
+                if index == bytes.len() {
+                    break;
+                }
+            }
+            let byte = bytes[index];
             let category = CLASS[byte as usize];
             if self.padding == 0 {
                 match category {
@@ -124,6 +221,7 @@ impl Base64 {
                 }
             }
             position.advance(byte);
+            index += 1;
             if self.invalid {
                 break;
             }

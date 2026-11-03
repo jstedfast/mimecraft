@@ -1999,8 +1999,14 @@ MimeKit's bit value 16; `ENCODED_WORDS` is 32, and `ALL` includes implemented bi
 only (55).
 
 Quoted-printable literal runs use bulk byte searches; UU scanning skips whole
-runs where classification is no longer needed. Base64 validation currently uses
-MimeKit's table-driven scalar logic, not its separate SIMD validator kernels.
+runs where classification is no longer needed. Base64 validation ports MimeKit's
+alphabet/whitespace kernels using SSE2/AVX2 on x86 and NEON on AArch64, with
+runtime-checked CPU tokens and the table-driven scalar fallback. Vector scans
+stop before padding, comments, or invalid bytes and resume after scalar handling;
+line masks preserve exact positions and both per-line reporting latches.
+Private regression tests force scalar and every available SIMD backend, covering
+all byte values at every lane, MIME line tails, line lengths 1–100, arbitrary
+bytes, sliced/empty writes, pad bits, and fallible logger state.
 Nonzero unused bits before Base64 padding report `InvalidBase64Padding` at the
 first `=` (`Exact`), even across chunks, line breaks, or ignored bytes. The last
 alphabet character is recovered only at chunk ends and padding, avoiding a
@@ -10315,8 +10321,9 @@ MIME content scanning uses SSE2 or AVX2 with POPCNT on x86/x86-64 and NEON on
 AArch64 to find boundary candidates and count/classify newlines in one pass.
 CPU selection is retained across messages and source replacement. These
 fast scans do not themselves validate content. Optional compliance reporting
-uses separate Base64, quoted-printable, and UU validators; Base64 validation is
-currently scalar rather than using MimeKit's SIMD validator kernels.
+uses separate Base64, quoted-printable, and UU validators; Base64 validation
+uses bounded SSE2/AVX2 or NEON kernels, including alphabet-only fast paths and
+partial-block prefixes, with scalar special-byte handling.
 Other CPUs use scalar fallbacks.
 32-bit ARM is not accelerated; AVX-512 is intentionally omitted.
 
@@ -10467,11 +10474,15 @@ Body cases use `read_entity_with_logger` or `read_entity`, including body framin
 and raw-byte checks but no decoded body allocation. Input generation and expected
 diagnostic-count checks remain outside measurement, and throughput counts full
 encoded input including headers and whitespace.
-Six original scanner cases bring the compliance inventory to 40: long folded
+Six original scanner cases brought the compliance inventory to 40: long folded
 valid UTF-8 and a malformed suffix, plus roughly 80 KiB of 7bit, 8bit, binary,
 and unlogged body content with repeated NUL/high-bit bytes and an unterminated
 tail. These disable deeper validators and count only generic byte diagnostics.
-All 40 native smoke/allocation cases pass. The existing 34 cases retain their
+Two Base64 cases bring the current inventory to 42: `Base64BodyResumption`
+interleaves vector runs with invalid/comment bytes and repeated per-line defects;
+`Base64BodyShortLines` puts multiple line feeds in each vector and splits quantums
+across lines. Both assert diagnostic counts outside measurement.
+Those 40 native smoke/allocation cases passed. The existing 34 cases retained their
 allocation counts and cumulative bytes. New per-operation results are
 14 allocations / 29,991 bytes for either UTF-8 case, 11 / 1,919 for 7bit or
 8bit scanning, 13 / 1,955 for binary, and 8 / 623 without logging. These are
@@ -10635,6 +10646,48 @@ work: enabled reporting still scans content and runs selected deeper validators.
 No profiling attribution to individual validators was measured.
 Per-run output is retained locally in
 `target/benchmark-results/compliance-throughput-{1,2}.csv`.
+
+##### Base64 validator SIMD port: before/after
+
+After porting MimeKit's Base64 validator SIMD kernels, the same comparison was
+repeated with preserved before/after executables. Four processes ran sequentially
+in before/after/after/before order, pinned to logical CPU 0, with no concurrent
+build or test commands. Each process measured all 27 workloads using the same
+nine alternating paired samples, release settings, all validators, and
+one-issue-per-violation cap described above. These are fresh, contemporaneous
+baselines, not comparisons against the earlier table's absolute rates.
+
+The following rates are means of the two per-executable medians, in MiB/s.
+Speedup compares logging-enabled throughput; loss compares enabled versus
+disabled throughput within each executable.
+
+| API | Workload | Logged before | Logged after | Speedup | Loss before | Loss after |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Reader | StarTrekMessage | 841.5 | 2,166.3 | 2.57x | 90.4% | 74.3% |
+| Reader | ContentLengthMbox | 514.8 | 1,062.8 | 2.06x | 77.4% | 53.6% |
+| Reader | JwzMbox | 745.3 | 1,388.0 | 1.86x | 82.3% | 64.5% |
+| Parser Memory | StarTrekMessage | 722.6 | 1,635.9 | 2.26x | 83.7% | 61.4% |
+| Parser Memory | ContentLengthMbox | 418.7 | 722.9 | 1.73x | 64.7% | 37.8% |
+| Parser Memory | JwzMbox | 636.9 | 1,031.3 | 1.62x | 70.7% | 48.1% |
+
+Source-backed and slice-backed parser variants improved by 1.79-2.60x on these
+three body-heavy workloads. Reader slice variants improved by 1.82-2.58x.
+Header-only and nested controls did not show a comparable gain: their
+logging-enabled absolute rates were 1-6% lower in the after executable.
+Unlogged control rates also varied. Dividing each logged rate by its own
+unlogged rate gives before/after control ratios generally within about 1.5%,
+except the buffered 1,000-level reader, which was about 2.6% lower. These
+controls expose measurement/code-generation variation rather than establish
+statistical equivalence or prove the absence of small regressions.
+
+The SIMD port substantially reduces the measured body-validation cost, but
+does not eliminate compliance overhead. Raw body scanning and other validators
+remain enabled; their individual contributions have not yet been profiled.
+The new NEON implementation was cross-checked, not executed locally.
+Both binaries, the reproduction script, all four per-run reports, and the
+27-case summary are retained locally under `target/benchmark-results`:
+`mime-reader-{before,after}-base64-simd.exe`, `compare-base64-simd.ps1`,
+`base64-simd-{before,after}-{1,2}.csv`, and `base64-simd-summary.csv`.
 
 The `html` benchmark ports `HtmlTokenizer_ReadAllTokens` from MimeKit's
 `Benchmarks/Text/HtmlBenchmarks.cs`. Both original documents are preserved
@@ -11851,7 +11904,7 @@ with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 38 Base64, 27 MIME, 40 compliance, twelve HTML, twenty RTF,
+`benches/support`, covering all 38 Base64, 27 MIME, 42 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,

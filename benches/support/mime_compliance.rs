@@ -8,7 +8,7 @@ use mimecraft::{
     MimeComplianceViolation as Violation, MimeReader,
 };
 
-pub const CASES: [&str; 40] = [
+pub const CASES: [&str; 42] = [
     "PlainSubject",
     "LongPlainSubject",
     "ShortQ",
@@ -43,6 +43,8 @@ pub const CASES: [&str; 40] = [
     "Base64BodyPadBits",
     "Base64BodyWhitespace",
     "Base64BodyNoLogger",
+    "Base64BodyResumption",
+    "Base64BodyShortLines",
     "Utf8Valid",
     "Utf8Invalid",
     "ScanBody7Bit",
@@ -117,6 +119,26 @@ pub fn workload(name: &str) -> Workload {
         };
     }
     if name.starts_with("Base64Body") {
+        if matches!(name, "Base64BodyResumption" | "Base64BodyShortLines") {
+            let (body, expected) = if name == "Base64BodyResumption" {
+                // Specials interrupt vector runs; repeated defects on the same
+                // line must remain latched when vector scanning resumes.
+                (
+                    format!("{}?*{}?*\r\n", "A".repeat(37), "A".repeat(39)).repeat(1024),
+                    2048,
+                )
+            } else {
+                // Quantums straddle lines, with several line feeds per vector.
+                ("AAA\r\n".repeat(16384), 0)
+            };
+            return Workload {
+                data: format!("Content-Transfer-Encoding: base64\r\n\r\n{body}").into_bytes(),
+                validators: Validators::BASE64,
+                expected,
+                logging: true,
+                body: true,
+            };
+        }
         let tail = match name {
             "Base64BodyCanonical" => "Zg==".into(),
             "Base64BodyPadBits" | "Base64BodyNoLogger" => "Zh==".into(),
@@ -297,6 +319,8 @@ pub fn validate(case: &Workload) -> usize {
                 | Violation::MissingParameterSegment
                 | Violation::RepeatedContentId
                 | Violation::InvalidBase64Padding
+                | Violation::InvalidBase64Character
+                | Violation::ObsoleteBase64Comment
                 | Violation::UnexpectedNullBytesInHeader
                 | Violation::Unexpected8BitBytesInHeader
                 | Violation::UnexpectedNullBytesInBody

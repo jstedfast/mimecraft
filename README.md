@@ -45,7 +45,8 @@ message parser. Source-backed parsing can retain references to seekable input
 ranges instead of copying every part's content into memory.
 
 The default `simd` feature enables runtime-detected x86/x86-64 and AArch64
-acceleration for MIME scanning and Base64/UU codecs, with scalar fallbacks.
+acceleration for MIME scanning, Base64 compliance validation, and Base64/UU
+codecs, with scalar fallbacks.
 Disabling default features removes mimecraft's own SIMD and unsafe code;
 dependencies may still use their own acceleration and unsafe implementations.
 
