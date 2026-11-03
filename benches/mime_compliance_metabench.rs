@@ -49,6 +49,8 @@ fn prepare(name: &str) -> Workload {
 #[bench::PadBitsBCanonical(&prepare("PadBitsBCanonical"))]
 #[bench::PadBitsBOne(&prepare("PadBitsBOne"))]
 #[bench::PadBitsBTwo(&prepare("PadBitsBTwo"))]
+#[bench::Utf8Valid(&prepare("Utf8Valid"))]
+#[bench::Utf8Invalid(&prepare("Utf8Invalid"))]
 fn validate(case: &Workload) -> usize {
     workloads::validate(case)
 }
@@ -58,6 +60,10 @@ fn validate(case: &Workload) -> usize {
 #[bench::Base64BodyPadBits(&prepare("Base64BodyPadBits"))]
 #[bench::Base64BodyWhitespace(&prepare("Base64BodyWhitespace"))]
 #[bench::Base64BodyNoLogger(&prepare("Base64BodyNoLogger"))]
+#[bench::ScanBody7Bit(&prepare("ScanBody7Bit"))]
+#[bench::ScanBody8Bit(&prepare("ScanBody8Bit"))]
+#[bench::ScanBodyBinary(&prepare("ScanBodyBinary"))]
+#[bench::ScanBodyNoLogger(&prepare("ScanBodyNoLogger"))]
 fn validate_body(case: &Workload) -> usize {
     workloads::validate(case)
 }

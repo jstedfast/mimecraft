@@ -7838,6 +7838,30 @@ and first invalid UTF-8 sequence in each header, including continuation lines
 and valid multibyte sequences preceding malformed bytes. Valid RFC 6532 UTF-8
 remains accepted. Generic byte diagnostics still cover address headers until
 the address-specific compliance validators are ported.
+MimeKit commits `0eb76c0` and `be783d0` add byte-column correction after an
+initial BOM, bounded LF/NUL/8-bit scans shared by header and body reporting,
+and lookup-based UTF-8 validation using AVX2, SSSE3/SSE4.1, or little-endian
+AArch64 NEON. Inputs shorter than 128 bytes and unsupported CPUs use Rust's
+checked UTF-8 validator; scalar finishing reports a malformed sequence's leading
+byte even when it crosses a vector boundary. The default `simd` feature controls
+these backends, and no additional dependencies are needed. Source rationale and
+SimdUnicode attribution are retained in the implementation and
+`LICENSE-SimdUnicode`.
+Body reporting preserves exact byte positions, first-special-byte policy,
+encoding-specific detection, issue order, line-length thresholds, and chunked
+CRLF state. Both synchronous and sans-I/O readers use the same scanner.
+Ported tests cover every available backend directly, poisoned slice bounds,
+randomized differential inputs, vector boundaries, folded/invalid/nested
+headers, BOMs, unterminated tails, and byte-fed/synchronous parity.
+CI includes native ARM64 macOS Debug/Release runs that require NEON rather than
+silently falling back, alongside x86 and scalar jobs. The analyzer sample has
+no Rust counterpart; consumers can use the existing exact issue positions
+without rescanning headers. Six additional compliance benchmark workloads cover
+valid/malformed long UTF-8 headers and 7bit/8bit/binary/unlogged body scanning
+through the standalone, native metabench, and optional Criterion harnesses.
+The new NEON scanners have been cross-checked for `aarch64-unknown-linux-musl`;
+their native execution awaits ARM64 CI. Default/scalar regression suites and
+optimized x86 scanner tests pass locally.
 Additional ports cover reader content-callback ranges, physical line positions,
 empty multipart/message containers, consecutive mbox markers, and truncated
 header diagnostics. Parser cases cover truncated/raw invalid headers, bare-CR
@@ -10443,6 +10467,15 @@ Body cases use `read_entity_with_logger` or `read_entity`, including body framin
 and raw-byte checks but no decoded body allocation. Input generation and expected
 diagnostic-count checks remain outside measurement, and throughput counts full
 encoded input including headers and whitespace.
+Six original scanner cases bring the compliance inventory to 40: long folded
+valid UTF-8 and a malformed suffix, plus roughly 80 KiB of 7bit, 8bit, binary,
+and unlogged body content with repeated NUL/high-bit bytes and an unterminated
+tail. These disable deeper validators and count only generic byte diagnostics.
+All 40 native smoke/allocation cases pass. The existing 34 cases retain their
+allocation counts and cumulative bytes. New per-operation results are
+14 allocations / 29,991 bytes for either UTF-8 case, 11 / 1,919 for 7bit or
+8bit scanning, 13 / 1,955 for binary, and 8 / 623 without logging. These are
+fresh-reader allocation measurements, not throughput claims.
 
 Six additional `stream/*/chunk=4096` cases port MimeKit's
 `Benchmarks/Encodings/Base64DecoderBenchmarks.cs`: `Unwrapped`, `MimeCrlf`,
@@ -11755,7 +11788,7 @@ with the `_metabench` suffix are enabled by `--features bench-metabench`;
 their optional dependencies
 are not compiled by ordinary library builds or the original benchmark commands.
 These harnesses use the same fixtures, generators, and operations under
-`benches/support`, covering all 38 Base64, 27 MIME, 34 compliance, twelve HTML, twenty RTF,
+`benches/support`, covering all 38 Base64, 27 MIME, 40 compliance, twelve HTML, twenty RTF,
 84 address/RFC 2047, 31 codec/filter, three message-preparation, 18 raw-TNEF,
 30 TNEF-property, five TNEF-date, eight embedded-TNEF, five owned-TNEF-access,
 six recipient-model cases, four compressed-RTF decoding and six encoding cases,

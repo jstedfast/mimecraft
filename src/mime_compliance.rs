@@ -8,6 +8,7 @@ mod encoded_words;
 mod encoding;
 mod parameters;
 mod reporting;
+mod scan;
 mod violation;
 
 #[cfg(test)]

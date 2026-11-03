@@ -1,0 +1,31 @@
+name: Rust CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 runs natively on ARM64, exercising the NEON implementations.
+        os: [windows-latest, ubuntu-latest, macos-15]
+        profile: [debug, release]
+    runs-on: ${{ matrix.os }}
+    env:
+      MIMECRAFT_REQUIRE_ARM64_SIMD: ${{ matrix.os == 'macos-15' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test library and integration suites
+        run: cargo test --locked --lib --tests ${{ matrix.profile == 'release' && '--release' || '' }}
+
+  scalar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test without SIMD backends
+        run: cargo test --locked --no-default-features --lib --tests

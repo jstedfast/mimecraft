@@ -4,6 +4,7 @@
 use std::io;
 
 use super::encoding::EncodingValidator;
+use super::scan::Scanner;
 use super::{
     Budget, MimeComplianceIssue, MimeComplianceLogger, MimeComplianceOptions,
     MimeCompliancePositionKind as PositionKind, MimeComplianceValidators as Validators,
@@ -23,6 +24,7 @@ struct Active<'a, L: MimeComplianceLogger + ?Sized> {
     bodies: Vec<Body>,
     message: bool,
     source_line_start: u64,
+    scanner: Scanner,
 }
 
 pub(crate) enum HeaderEnd<'a> {
@@ -51,6 +53,7 @@ impl<'a, L: MimeComplianceLogger + ?Sized> Reporting<'a, L> {
                 bodies: Vec::new(),
                 message,
                 source_line_start: 0,
+                scanner: Scanner::default(),
             })
         }))
     }
@@ -246,13 +249,20 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
         let mut content_id = false;
         let mut encoding = None;
         let mut mime_version = false;
-        let mut end_column = 1;
+        // A skipped initial UTF-8 BOM still occupies three physical byte
+        // columns. Subsequent header blocks start after a newline.
+        let mut end_column = if position.line == 1 {
+            position.offset + 1
+        } else {
+            1
+        };
         for header in headers {
             let raw = header.raw();
             if let Some(offset) = header.offset() {
                 position.offset = offset;
             }
             let start = position;
+            let start_column = end_column;
             if header.is_invalid() {
                 let mut blank = None;
                 let mut invalid = None;
@@ -275,7 +285,7 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                     invalid.map_or((start, 1, PositionKind::ElementStart), |index| {
                         (
                             start.advance(&raw[..index]),
-                            index as u64 + 1,
+                            start_column + index as u64,
                             PositionKind::Exact,
                         )
                     });
@@ -283,7 +293,20 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
             }
             let mut bare_cr = false;
             let mut null = false;
-            for (number, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+            let mut first_eight_bit = None;
+            let mut offset = 0;
+            while offset < raw.len() {
+                let scanned = self
+                    .scanner
+                    .line(&raw[offset..], !null, first_eight_bit.is_none());
+                let length = scanned.lf.map_or(raw.len() - offset, |i| i + 1);
+                let line = &raw[offset..offset + length];
+                let column = end_column;
+                if let Some(index) = scanned.eight_bit {
+                    // RFC 6532 allows UTF-8 in headers. Remember the first
+                    // non-ASCII byte, then validate once the full value is available.
+                    first_eight_bit = Some(offset + index);
+                }
                 if line.len() > 1000 {
                     self.issue(
                         Violation::OversizedLine,
@@ -292,26 +315,24 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                         PositionKind::LineStart,
                     )?;
                 }
-                if !null && let Some(index) = line.iter().position(|&byte| byte == 0) {
+                if let Some(index) = scanned.null {
                     null = true;
                     self.issue(
                         Violation::UnexpectedNullBytesInHeader,
                         position.advance(&line[..index]),
-                        index as u64 + 1,
+                        column + index as u64,
                         PositionKind::Exact,
                     )?;
                 }
                 if !bare_cr
-                    && let Some(index) = line
-                        .iter()
-                        .enumerate()
-                        .position(|(i, &byte)| byte == b'\r' && line.get(i + 1) != Some(&b'\n'))
+                    && let Some(index) =
+                        memchr::memchr_iter(b'\r', line).find(|&i| line.get(i + 1) != Some(&b'\n'))
                 {
                     bare_cr = true;
                     self.issue(
                         Violation::BareCarriageReturnInHeader,
                         position.advance(&line[..index]),
-                        index as u64 + 1,
+                        column + index as u64,
                         PositionKind::Exact,
                     )?;
                 }
@@ -319,11 +340,11 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                     self.issue(
                         Violation::BareLinefeedInHeader,
                         position.advance(&line[..line.len() - 1]),
-                        line.len() as u64,
+                        column + line.len() as u64 - 1,
                         PositionKind::Exact,
                     )?;
                 }
-                if number != 0
+                if offset != 0
                     && line
                         .iter()
                         .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
@@ -341,14 +362,18 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                 end_column = if line.ends_with(b"\n") {
                     1
                 } else {
-                    line.len() as u64 + 1
+                    column + line.len() as u64
                 };
+                offset += length;
             }
             // RFC 6532 permits UTF-8 in headers, so wait for the full value
             // before reporting 8-bit bytes. Locate the first invalid sequence,
             // not an earlier valid UTF-8 sequence or the start of the header.
-            if let Err(error) = std::str::from_utf8(raw) {
-                let (position, column) = header_byte_position(raw, start, error.valid_up_to());
+            if let Some(first) = first_eight_bit
+                && let Some(index) = self.scanner.invalid_utf8(&raw[first..])
+            {
+                let (position, column) =
+                    header_byte_position(raw, start, start_column, first + index);
                 self.issue(
                     Violation::Unexpected8BitBytesInHeader,
                     position,
@@ -392,7 +417,8 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"X-")))
             {
                 let value = header.raw_value();
-                let (position, column) = header_byte_position(raw, start, raw.len() - value.len());
+                let (position, column) =
+                    header_byte_position(raw, start, start_column, raw.len() - value.len());
                 super::encoded_words::validate(
                     value,
                     address,
@@ -411,7 +437,8 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                 .contains(Validators::PARAMETERS)
             {
                 let value = header.raw_value();
-                let (position, column) = header_byte_position(raw, start, raw.len() - value.len());
+                let (position, column) =
+                    header_byte_position(raw, start, start_column, raw.len() - value.len());
                 super::parameters::validate(
                     value,
                     header.id(),
@@ -491,7 +518,8 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
                         )?;
                     } else {
                         let parsed = ContentEncoding::parse(&header.decode_value().text);
-                        let (value_position, column) = header_value_position(header, start);
+                        let (value_position, column) =
+                            header_value_position(header, start, start_column);
                         encoding = Some((parsed, value_position, column));
                         if parsed.is_err() {
                             self.issue(
@@ -632,9 +660,9 @@ impl<L: MimeComplianceLogger + ?Sized> MimeComplianceLogger for Active<'_, L> {
     }
 }
 
-fn header_value_position(header: &Header, start: MimePosition) -> (MimePosition, u64) {
-    // A header begins at column one. Skip folding whitespace after the colon to
-    // identify the value even when it starts on a subsequent physical line.
+fn header_value_position(header: &Header, start: MimePosition, column: u64) -> (MimePosition, u64) {
+    // Skip folding whitespace after the colon to identify the value even when
+    // it starts on a subsequent physical line.
     let raw = header.raw();
     let value = header.raw_value();
     let value_start = raw.len() - value.len();
@@ -644,15 +672,20 @@ fn header_value_position(header: &Header, start: MimePosition) -> (MimePosition,
     // An empty value must not point into the next header: use the byte just
     // after the colon rather than the end of its whitespace.
     let index = value_start + index.unwrap_or(0);
-    header_byte_position(raw, start, index)
+    header_byte_position(raw, start, column, index)
 }
 
-fn header_byte_position(raw: &[u8], start: MimePosition, index: usize) -> (MimePosition, u64) {
+fn header_byte_position(
+    raw: &[u8],
+    start: MimePosition,
+    column: u64,
+    index: usize,
+) -> (MimePosition, u64) {
     let prefix = &raw[..index];
     let column = prefix
         .iter()
         .rposition(|&b| b == b'\n')
-        .map_or(index as u64 + 1, |lf| (index - lf) as u64);
+        .map_or(column + index as u64, |lf| (index - lf) as u64);
     (start.advance(prefix), column)
 }
 
@@ -714,7 +747,7 @@ impl Body {
     fn scan<L: MimeComplianceLogger + ?Sized>(
         &mut self,
         active: &mut Active<'_, L>,
-        bytes: &[u8],
+        mut bytes: &[u8],
         mut position: MimePosition,
     ) -> io::Result<()> {
         if position.offset != self.expected {
@@ -725,55 +758,93 @@ impl Body {
             self.cr = false;
             self.oversized = false;
         }
-        for &byte in bytes {
-            if self.detect_null && byte == 0 {
-                self.detect_null = false;
-                active.issue(
+        while !bytes.is_empty() {
+            // Reuse the header line scanner rather than examining every byte
+            // again for NUL and 8-bit detection while compliance is enabled.
+            let scanned = active
+                .scanner
+                .line(bytes, self.detect_null, self.detect_8bit);
+            let length = scanned.lf.map_or(bytes.len(), |i| i + 1);
+            let line = &bytes[..length];
+            let oversized = if self.oversized {
+                length
+            } else {
+                1001u64.saturating_sub(self.column).min(length as u64) as usize
+            };
+            // Rust reports exact body bytes, not MimeKit's refill-dependent
+            // line-fragment start. Retain wire order, including a special byte
+            // at the oversized-line threshold, before any LF diagnostic.
+            let mut issues = [
+                (
+                    scanned.null.unwrap_or(length),
                     Violation::UnexpectedNullBytesInBody,
-                    position,
-                    self.column,
-                    PositionKind::Exact,
-                )?;
-            }
-            if self.detect_8bit && !byte.is_ascii() {
-                self.detect_8bit = false;
-                active.issue(
+                ),
+                (
+                    scanned.eight_bit.unwrap_or(length),
                     Violation::Unexpected8BitBytesInBody,
-                    position,
-                    self.column,
-                    PositionKind::Exact,
-                )?;
+                ),
+                (oversized, Violation::OversizedLine),
+            ];
+            issues.sort_unstable_by_key(|&(index, violation)| {
+                (index, violation == Violation::OversizedLine)
+            });
+            for (index, violation) in issues {
+                if index == length {
+                    continue;
+                }
+                match violation {
+                    Violation::OversizedLine => {
+                        self.oversized = true;
+                        active.issue(violation, self.line_start, 1, PositionKind::LineStart)?;
+                    }
+                    _ => {
+                        if violation == Violation::UnexpectedNullBytesInBody {
+                            self.detect_null = false;
+                        } else {
+                            self.detect_8bit = false;
+                        }
+                        active.issue(
+                            violation,
+                            MimePosition {
+                                offset: position.offset + index as u64,
+                                line: position.line,
+                            },
+                            self.column + index as u64,
+                            PositionKind::Exact,
+                        )?;
+                    }
+                }
             }
-            if !self.oversized && self.column > 1000 {
-                self.oversized = true;
-                active.issue(
-                    Violation::OversizedLine,
-                    self.line_start,
-                    1,
-                    PositionKind::LineStart,
-                )?;
-            }
-            if byte == b'\n' {
-                if !self.cr {
+            if scanned.lf.is_some() {
+                let cr = if length == 1 {
+                    self.cr
+                } else {
+                    line[length - 2] == b'\r'
+                };
+                if !cr {
                     active.issue(
                         Violation::BareLinefeedInBody,
-                        position,
-                        self.column,
+                        MimePosition {
+                            offset: position.offset + length as u64 - 1,
+                            line: position.line,
+                        },
+                        self.column + length as u64 - 1,
                         PositionKind::Exact,
                     )?;
                 }
                 position.line += 1;
                 self.line_start = MimePosition {
-                    offset: position.offset + 1,
+                    offset: position.offset + length as u64,
                     line: position.line,
                 };
                 self.column = 1;
                 self.oversized = false;
             } else {
-                self.column += 1;
+                self.column += length as u64;
             }
-            self.cr = byte == b'\r';
-            position.offset += 1;
+            self.cr = line.last() == Some(&b'\r');
+            position.offset += length as u64;
+            bytes = &bytes[length..];
         }
         self.expected = position.offset;
         Ok(())

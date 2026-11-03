@@ -3,9 +3,9 @@
 2	BareLinefeedInHeader	Major	Minor	5	c614095ead3c7374	b645715adf21500d
 3	BareLinefeedInBody	Major	Minor	5	d0dade0a253e2f21	b645715adf21500d
 4	OversizedLine	Major	Minor	3	f20d570539116dc5	8d2cbe4741a109ba
-5	Unexpected8BitBytesInHeader	Minor	Minor	3	4761004e20a1bd98	27f226e95a314a93
+5	Unexpected8BitBytesInHeader	Minor	Minor	3	4761004e20a1bd98	69ac89fa91b2314b
 6	Unexpected8BitBytesInBody	Minor	Minor	3	95e3d48e91642db7	ab9ed8e041070e5d
-7	UnexpectedNullBytesInHeader	Critical	Critical	5	9d534f83b8d8fe7c	f8455d5ac7b3ba0f
+7	UnexpectedNullBytesInHeader	Critical	Critical	5	9d534f83b8d8fe7c	e6c754bdbd0e0b2b
 8	UnexpectedNullBytesInBody	Critical	Critical	5	da8a6a6c978a3f66	07dd2d6a30abb806
 9	InvalidHeader	Major	Major	5	bc0215394e1e763c	93c7829a767ff3f4
 10	IncompleteHeader	Major	Major	1	1c7a21a7858518e5	79aa37362191f8f4
@@ -75,8 +75,8 @@
 74	Invalid8BitAddress	Major	Major	3	d5870f12028aa133	7e250011d8c39a2e
 75	MissingGroupTerminator	Major	Major	7	21b54447f06bf263	61238ad5d3388b8e
 76	NonConformantAddress	Major	Major	1	76add083c2c1095e	d90db2f1eb50c769
-77	NullByteInAddress	Critical	Critical	7	61dfc7e192dc7451	dacdaf4d516ffba3
-78	NullByteInDisplayName	Critical	Critical	7	c50f00bf9df289f3	d49b9ed7f726c757
+77	NullByteInAddress	Critical	Critical	7	61dfc7e192dc7451	19bc60e206054116
+78	NullByteInDisplayName	Critical	Critical	7	c50f00bf9df289f3	04df853769f46fba
 79	LineBreakInAddress	Critical	Critical	7	b447ffbacb590478	793a8a0eef6cd55f
 80	ControlCharacterInAddress	Major	Major	5	5b4365610012a1f8	bab20885514a7ee6
 81	Iso2022SequenceInLocalPart	Minor	Minor	1	81fe6e826a47501c	2677d17a00f0f0ec

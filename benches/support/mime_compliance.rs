@@ -8,7 +8,7 @@ use mimecraft::{
     MimeComplianceViolation as Violation, MimeReader,
 };
 
-pub const CASES: [&str; 34] = [
+pub const CASES: [&str; 40] = [
     "PlainSubject",
     "LongPlainSubject",
     "ShortQ",
@@ -43,6 +43,12 @@ pub const CASES: [&str; 34] = [
     "Base64BodyPadBits",
     "Base64BodyWhitespace",
     "Base64BodyNoLogger",
+    "Utf8Valid",
+    "Utf8Invalid",
+    "ScanBody7Bit",
+    "ScanBody8Bit",
+    "ScanBodyBinary",
+    "ScanBodyNoLogger",
 ];
 
 pub struct Workload {
@@ -68,6 +74,48 @@ impl Workload {
 }
 
 pub fn workload(name: &str) -> Workload {
+    if name.starts_with("Utf8") {
+        let mut data = format!(
+            "Subject: {}\r\n",
+            " ascii \u{e9} \u{65e5}\u{1f600}\r\n".repeat(512)
+        )
+        .into_bytes();
+        if name == "Utf8Invalid" {
+            data.truncate(data.len() - 2);
+            data.extend_from_slice(b" \xe2\x82!\r\n\r\n");
+        } else {
+            assert_eq!(name, "Utf8Valid");
+        }
+        return Workload {
+            data,
+            validators: Validators::NONE,
+            expected: usize::from(name == "Utf8Invalid"),
+            logging: true,
+            body: false,
+        };
+    }
+    if name.starts_with("ScanBody") {
+        let (encoding, expected) = match name {
+            "ScanBody7Bit" => ("7bit", 2),
+            "ScanBody8Bit" => ("8bit", 1),
+            "ScanBodyBinary" => ("binary", 0),
+            "ScanBodyNoLogger" => ("7bit", 0),
+            _ => panic!("unknown compliance workload: {name}"),
+        };
+        let mut data = format!(
+            "Content-Transfer-Encoding: {encoding}\r\n\r\n{}",
+            format!("{}\r\n", "a".repeat(78)).repeat(1024)
+        )
+        .into_bytes();
+        data.extend_from_slice(b"first\0\xff\r\nsecond\xff\0");
+        return Workload {
+            data,
+            validators: Validators::NONE,
+            expected,
+            logging: name != "ScanBodyNoLogger",
+            body: true,
+        };
+    }
     if name.starts_with("Base64Body") {
         let tail = match name {
             "Base64BodyCanonical" => "Zg==".into(),
@@ -249,6 +297,10 @@ pub fn validate(case: &Workload) -> usize {
                 | Violation::MissingParameterSegment
                 | Violation::RepeatedContentId
                 | Violation::InvalidBase64Padding
+                | Violation::UnexpectedNullBytesInHeader
+                | Violation::Unexpected8BitBytesInHeader
+                | Violation::UnexpectedNullBytesInBody
+                | Violation::Unexpected8BitBytesInBody
         ) {
             count += 1;
         }

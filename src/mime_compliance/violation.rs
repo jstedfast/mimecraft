@@ -23,10 +23,15 @@ pub enum MimeComplianceViolation {
     /// A line was found that exceeded the maximum line length permitted by the Internet Message Format.
     OversizedLine = 4,
     /// A MIME part or message header contained 8-bit bytes where only 7-bit bytes were expected.
+    ///
+    /// Reports the first malformed UTF-8 sequence at its leading byte, with an
+    /// exact stream offset and byte column, even for missing or invalid continuations.
     Unexpected8BitBytesInHeader = 5,
     /// A MIME part's body contained 8-bit content where only 7-bit content was expected.
     Unexpected8BitBytesInBody = 6,
     /// A MIME part or message header contained illegal null (`0x00`) bytes.
+    ///
+    /// Reports only the first null in each header, at its exact byte position.
     UnexpectedNullBytesInHeader = 7,
     /// A MIME part's body contained null (`0x00`) bytes without specifying a binary transfer encoding.
     UnexpectedNullBytesInBody = 8,
@@ -966,13 +971,13 @@ impl MimeComplianceViolation {
                 "This indicates that a line was longer than the SMTP limit of 1000 characters."
             }
             Self::Unexpected8BitBytesInHeader => {
-                "Older Internet Message Format specifications require that headers are strictly US-ASCII while the newer Internationalized Email Headers specification allows for UTF-8. Header values that are not US-ASCII should be encoded using the encoding mechanism described in the MIME specification and/or should be valid UTF-8 as allowed in the Internationalized Email Headers specification."
+                "Older Internet Message Format specifications require that headers are strictly US-ASCII while the newer Internationalized Email Headers specification allows for UTF-8. Header values that are not US-ASCII should be encoded using the encoding mechanism described in the MIME specification and/or should be valid UTF-8 as allowed in the Internationalized Email Headers specification. The position identifies the start of the first malformed UTF-8 sequence, with an exact stream offset and byte column. For a missing or invalid continuation byte, the position identifies the sequence's leading byte."
             }
             Self::Unexpected8BitBytesInBody => {
                 "This indicates that the Content-Transfer-Encoding header for a MIME part was set to a 7-bit encoding (such as 7bit, quoted-printable, or base64) but contained non-ASCII text (or potentially even binary data)."
             }
             Self::UnexpectedNullBytesInHeader => {
-                "Null (0x00) bytes in a message header can be used by malicious actors to prevent some MIME parsers, such as those written in languages like C or C++ which tend to use the null byte to mark the end of a buffer, from discovering content after the null byte. This technique can be used to smuggle viruses or other malicious content past content scanners."
+                "Null (0x00) bytes in a message header can be used by malicious actors to prevent some MIME parsers, such as those written in languages like C or C++ which tend to use the null byte to mark the end of a buffer, from discovering content after the null byte. This technique can be used to smuggle viruses or other malicious content past content scanners. Only the first null byte in each header is reported, with an exact stream offset and byte column."
             }
             Self::UnexpectedNullBytesInBody => {
                 "Null (0x00) bytes in a message body can be used by malicious actors to prevent some MIME parsers, such as those written in languages like C or C++ which tend to use the null byte to mark the end of a buffer, from discovering content after the null byte. This technique can be used to smuggle viruses or other malicious content past content scanners."
@@ -1185,10 +1190,10 @@ impl MimeComplianceViolation {
                 "This is the general case, used when an address departs from the grammar in a way that none of the more specific violations describes. Receiving systems differ widely in how much malformed syntax they will accept and in how they repair what they accept, so an address that only some implementations can read may resolve to different mailboxes, or to none at all, depending on which software handles the message."
             }
             Self::NullByteInAddress => {
-                "A null byte is not permitted anywhere in a header, but inside an address it is more dangerous than elsewhere. Software written in or interfacing with C treats a null as a string terminator, so an address such as \"us<NUL>er@example.com\" may be read as the complete address \"us\" by one component and as \"user@example.com\" by another. That disagreement is the point of the construct: a filter, an audit log and the delivering agent can each be made to see a different mailbox from the same header. This is reported in addition to UnexpectedNullBytesInHeader, which identifies only the line that the null byte appeared on."
+                "A null byte is not permitted anywhere in a header, but inside an address it is more dangerous than elsewhere. Software written in or interfacing with C treats a null as a string terminator, so an address such as \"us<NUL>er@example.com\" may be read as the complete address \"us\" by one component and as \"user@example.com\" by another. That disagreement is the point of the construct: a filter, an audit log and the delivering agent can each be made to see a different mailbox from the same header. This is reported in addition to UnexpectedNullBytesInHeader, which reports the first null byte in the header."
             }
             Self::NullByteInDisplayName => {
-                "This is reported instead of NullByteInAddress when the null falls in a display-name rather than in an addr-spec, because the two call for different handling: a display-name is presentation and can be discarded without affecting delivery, whereas an addr-spec cannot. The danger is correspondingly different rather than smaller. The mailbox is unambiguous, but a client that stops at the null shows a different name than one that does not, so \"Bank<NUL>evil\" can be made to read as \"Bank\" in the message list and as something else in a filter or an audit log. This is reported in addition to UnexpectedNullBytesInHeader, which identifies only the line that the null byte appeared on."
+                "This is reported instead of NullByteInAddress when the null falls in a display-name rather than in an addr-spec, because the two call for different handling: a display-name is presentation and can be discarded without affecting delivery, whereas an addr-spec cannot. The danger is correspondingly different rather than smaller. The mailbox is unambiguous, but a client that stops at the null shows a different name than one that does not, so \"Bank<NUL>evil\" can be made to read as \"Bank\" in the message list and as something else in a filter or an audit log. This is reported in addition to UnexpectedNullBytesInHeader, which reports the first null byte in the header."
             }
             Self::LineBreakInAddress => {
                 "Folding whitespace is permitted around the tokens of an address, but the dot-atom-text production in section 3.2.3 of rfc5322 admits none inside a local-part or domain, so a line break within one of those tokens cannot be produced by a conforming mailer. It is most often seen when an application has concatenated unvalidated input into a header, which is the header injection technique described in section 5 of rfc5321: the attacker supplies a line break in the hope that some component in the chain will treat what follows as a new header or a new command. Even where that fails, implementations differ on whether to unfold, reject or truncate the address, so the recipient that is finally used may not be the one an auditor sees. A line break inside a quoted local-part is also reported, even though section 3.2.4 of rfc5322 permits folding whitespace inside a quoted-string, because a quoted local-part is rare enough that implementations mishandle it in practice."

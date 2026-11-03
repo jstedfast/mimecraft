@@ -23,7 +23,7 @@ fn compliance_workloads_report_expected_diagnostics() {
         let case = mime_compliance::workload(name);
         assert_eq!(
             case.benchmark_name(),
-            if name.starts_with("Base64Body") {
+            if name.starts_with("Base64Body") || name.starts_with("ScanBody") {
                 "MimeCompliance_ValidateBody"
             } else {
                 "MimeCompliance_ValidateHeaders"
