@@ -9,7 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use mimecraft::{MimeContentStorage, MimeEntityParseOptions, MimeParser, MimeReader};
+use mimecraft::{
+    MimeComplianceIssue, MimeComplianceOptions, MimeComplianceValidators, MimeContentStorage,
+    MimeEntityParseOptions, MimeParser, MimeReader,
+};
 
 // MimeKit buffers its MemoryStream input internally. Rust takes BufRead
 // sources, so include a fresh 4 KiB input buffer in the buffered variants.
@@ -29,6 +32,7 @@ pub struct Workload {
     pub messages: usize,
     pub mbox: bool,
     pub options: MimeEntityParseOptions,
+    pub compliance: bool,
 }
 
 impl Workload {
@@ -65,6 +69,7 @@ pub fn workload(name: &str) -> Workload {
         messages,
         mbox,
         options,
+        compliance: false,
     }
 }
 
@@ -73,6 +78,7 @@ pub fn read(case: &Workload) -> (usize, u64, bool) {
     read_messages(
         MimeReader::with_options(source, case.options).unwrap(),
         case.mbox,
+        case.compliance,
     )
 }
 
@@ -80,21 +86,41 @@ pub fn read_slice(case: &Workload) -> (usize, u64, bool) {
     read_messages(
         MimeReader::with_options(black_box(case.data.as_slice()), case.options).unwrap(),
         case.mbox,
+        case.compliance,
     )
 }
 
 fn read_messages<R: BufRead>(
     mut reader: MimeReader<R>,
     mbox: bool,
+    compliance: bool,
 ) -> (usize, u64, bool) {
+    if compliance {
+        reader.set_compliance_options(compliance_options());
+    }
+    let mut logger = |issue: MimeComplianceIssue| {
+        black_box(issue);
+        Ok(())
+    };
     let messages = if mbox {
         let mut messages = 0;
-        while reader.read_mbox_message(|_| Ok(())).unwrap() {
+        while if compliance {
+            reader.read_mbox_message_with_logger(&mut logger, |_| Ok(()))
+        } else {
+            reader.read_mbox_message(|_| Ok(()))
+        }
+        .unwrap()
+        {
             messages += 1;
         }
         messages
     } else {
-        reader.read_message(|_| Ok(())).unwrap();
+        if compliance {
+            reader.read_message_with_logger(&mut logger, |_| Ok(()))
+        } else {
+            reader.read_message(|_| Ok(()))
+        }
+        .unwrap();
         1
     };
     (
@@ -109,6 +135,7 @@ pub fn parse_default(case: &Workload) -> (usize, u64, bool) {
     parse(
         MimeParser::with_options(source, case.options).unwrap(),
         case.mbox,
+        case.compliance,
     )
 }
 
@@ -120,29 +147,49 @@ pub fn parse_source(case: &Workload) -> (usize, u64, bool) {
         MimeParser::with_storage_and_options(source, MimeContentStorage::Source, case.options)
             .unwrap();
     assert_eq!(parser.get_ref().capacity(), BUFFER_SIZE);
-    parse(parser, case.mbox)
+    parse(parser, case.mbox, case.compliance)
 }
 
 pub fn parse_slice(case: &Workload) -> (usize, u64, bool) {
     let parser =
-        MimeParser::from_slice_with_options(black_box(case.data.as_slice()), case.options)
-            .unwrap();
-    parse(parser, case.mbox)
+        MimeParser::from_slice_with_options(black_box(case.data.as_slice()), case.options).unwrap();
+    parse(parser, case.mbox, case.compliance)
 }
 
 fn parse<R: BufRead, C: Read + Seek>(
     mut parser: MimeParser<R, C>,
     mbox: bool,
+    compliance: bool,
 ) -> (usize, u64, bool) {
+    if compliance {
+        parser.set_compliance_options(compliance_options());
+    }
+    let mut logger = |issue: MimeComplianceIssue| {
+        black_box(issue);
+        Ok(())
+    };
     let messages = if mbox {
         let mut messages = 0;
-        while let Some(message) = parser.parse_mbox_message().unwrap() {
+        while let Some(message) = if compliance {
+            parser.parse_mbox_message_with_logger(&mut logger)
+        } else {
+            parser.parse_mbox_message()
+        }
+        .unwrap()
+        {
             black_box(message);
             messages += 1;
         }
         messages
     } else {
-        black_box(parser.parse_message().unwrap());
+        black_box(
+            if compliance {
+                parser.parse_message_with_logger(&mut logger)
+            } else {
+                parser.parse_message()
+            }
+            .unwrap(),
+        );
         1
     };
     (
@@ -150,6 +197,14 @@ fn parse<R: BufRead, C: Read + Seek>(
         parser.position().offset,
         parser.is_end_of_stream(),
     )
+}
+
+fn compliance_options() -> MimeComplianceOptions {
+    MimeComplianceOptions {
+        enabled_validators: MimeComplianceValidators::ALL,
+        max_issues_per_violation: 1,
+        ..MimeComplianceOptions::default()
+    }
 }
 
 fn generate_mixed_nested_message(depth: usize) -> Vec<u8> {

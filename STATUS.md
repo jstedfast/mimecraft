@@ -10573,6 +10573,69 @@ timing harness is retained; it does not reproduce BenchmarkDotNet's allocation
 diagnostics or statistical machinery. Async and
 LegacyMimeParser variants are not included.
 
+#### Reader/parser compliance throughput
+
+Run `cargo bench --bench mime_reader -- --compare-compliance` to compare
+logging disabled against `MimeComplianceValidators::ALL` with
+`max_issues_per_violation = 1`. This standalone comparison covers every reader
+and parser/storage workload above. The enabled logger consumes each issue via
+`black_box`, without storing diagnostics or doing console/disk I/O. The cap
+resets for every message, including each mbox message. `ALL` means all currently
+implemented validators; address-specific validation is not yet implemented.
+Both modes check message counts, complete consumption, and EOF before timing.
+Each mode gets three warm-ups followed by nine paired samples of at least
+250 ms; the first mode alternates between pairs.
+
+The following November 2, 2026 measurements use library revision `f48963b`
+plus the comparison harness: Intel Core Ultra 7 268V, Windows x86-64,
+Rust 1.99.1/MSVC, default SIMD, `target-cpu=x86-64-v3`, fat LTO, and one
+codegen unit. Two benchmark processes ran sequentially, each pinned to logical
+CPU 0. Rates below are the arithmetic mean of the two per-run medians, in
+original-input MiB/s. Loss is `100 * (1 - enabled / disabled)`, not the
+percentage increase in elapsed time. The usual fresh-parser, 4 KiB buffer,
+model construction/drop, and preloaded-fixture rules apply.
+
+| API | Workload | Logging off | Logging on | Throughput loss |
+| --- | --- | ---: | ---: | ---: |
+| Reader | StarTrekMessage | 7,327.3 | 689.7 | 90.6% |
+| Reader | ContentLengthMbox | 2,037.6 | 472.7 | 76.8% |
+| Reader | JwzMbox | 3,771.0 | 697.2 | 81.5% |
+| Reader | HeaderStressTest | 314.9 | 210.4 | 33.2% |
+| Reader | MixedNested64 | 66.3 | 38.7 | 41.7% |
+| Reader | NestedRfc822x1000 | 73.9 | 48.5 | 34.4% |
+| Reader Slice | StarTrekMessage | 8,136.0 | 715.8 | 91.2% |
+| Reader Slice | ContentLengthMbox | 2,110.0 | 477.0 | 77.4% |
+| Reader Slice | JwzMbox | 4,073.1 | 713.4 | 82.5% |
+| Reader Slice | HeaderStressTest | 315.4 | 208.7 | 33.8% |
+| Reader Slice | MixedNested64 | 58.2 | 35.5 | 38.9% |
+| Reader Slice | NestedRfc822x1000 | 68.7 | 43.4 | 36.8% |
+| Parser Memory | StarTrekMessage | 3,795.3 | 637.0 | 83.2% |
+| Parser Memory | ContentLengthMbox | 1,020.2 | 359.0 | 64.8% |
+| Parser Memory | JwzMbox | 2,022.3 | 593.6 | 70.6% |
+| Parser Memory | HeaderStressTest | 284.9 | 189.9 | 33.3% |
+| Parser Memory | MixedNested64 | 48.6 | 32.3 | 33.6% |
+| Parser Source | StarTrekMessage | 6,755.6 | 730.4 | 89.2% |
+| Parser Source | ContentLengthMbox | 1,827.7 | 458.8 | 74.9% |
+| Parser Source | JwzMbox | 3,206.8 | 666.2 | 79.2% |
+| Parser Source | HeaderStressTest | 291.3 | 197.8 | 32.1% |
+| Parser Source | MixedNested64 | 52.1 | 33.5 | 35.8% |
+| Parser Slice | StarTrekMessage | 7,664.4 | 766.4 | 90.0% |
+| Parser Slice | ContentLengthMbox | 1,924.4 | 459.8 | 76.1% |
+| Parser Slice | JwzMbox | 3,474.6 | 671.2 | 80.7% |
+| Parser Slice | HeaderStressTest | 296.0 | 202.4 | 31.6% |
+| Parser Slice | MixedNested64 | 53.4 | 34.6 | 35.1% |
+
+These are indicative local timings, not confidence intervals. Absolute rates
+varied between runs, especially on nested inputs: buffered-reader
+`MixedNested64` was 53.1/79.6 MiB/s without logging and 32.6/44.7 with logging.
+Its paired throughput loss was 38.6%/43.8%; the body-heavy buffered-reader
+losses were much steadier (StarTrek 91.0%/90.2%, Content-Length 76.8%/76.8%,
+JWZ 82.0%/81.0%). The issue cap limits emitted diagnostics, not all validation
+work: enabled reporting still scans content and runs selected deeper validators.
+No profiling attribution to individual validators was measured.
+Per-run output is retained locally in
+`target/benchmark-results/compliance-throughput-{1,2}.csv`.
+
 The `html` benchmark ports `HtmlTokenizer_ReadAllTokens` from MimeKit's
 `Benchmarks/Text/HtmlBenchmarks.cs`. Both original documents are preserved
 byte-for-byte under `benches/data/html`: `test.html` and
