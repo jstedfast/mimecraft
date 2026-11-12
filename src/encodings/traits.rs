@@ -67,13 +67,13 @@ pub trait MimeEncoder {
 /// Decoded bytes are appended to a caller-owned `Vec`, which may be consumed and
 /// cleared between calls. Each implementation retains its existing tolerance for
 /// malformed input, incomplete groups, and end markers; this is not a validation
-/// interface. Incomplete final groups remain pending until more input arrives
-/// or [`reset`](Self::reset) discards them.
+/// interface. Incomplete final groups remain pending until more input arrives,
+/// [`finish`](Self::finish) resolves them, or [`reset`](Self::reset) discards them.
 ///
 /// This trait supports generic code and `dyn MimeDecoder`; boxed decoders also
 /// implement it, so generic adapters can own `Box<dyn MimeDecoder>`. Concrete decoders
 /// implement [`Clone`] separately, preserving their current streaming state.
-/// There is no decoder finish operation, matching MimeKit's decoder interface.
+/// Empty input is not end-of-input; call [`finish`](Self::finish) explicitly.
 ///
 /// ```
 /// use mimecraft::encodings::{Rfc2231Decoder, MimeDecoder};
@@ -93,6 +93,14 @@ pub trait MimeDecoder {
 
     /// Consumes input, appending decoded bytes and retaining streaming state.
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>);
+
+    /// Resolves buffered input at end-of-stream, appending any final bytes.
+    ///
+    /// Base64 and UU emit complete trailing bytes; quoted-printable and RFC 2231
+    /// preserve incomplete escapes literally. yEnc discards incomplete framing
+    /// and escapes, retaining its checksum. Repeated finishes emit nothing.
+    /// Call [`reset`](Self::reset) before decoding an independent stream.
+    fn finish(&mut self, output: &mut Vec<u8>);
 
     /// Discards pending input and streaming state while retaining configuration.
     ///
@@ -125,6 +133,10 @@ impl<D: MimeDecoder + ?Sized> MimeDecoder for Box<D> {
 
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
         (**self).decode(input, output);
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        (**self).finish(output);
     }
 
     fn reset(&mut self) {
@@ -231,6 +243,10 @@ impl MimeDecoder for Base64Decoder {
         Base64Decoder::decode(self, input, output);
     }
 
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        Base64Decoder::finish(self, output);
+    }
+
     fn reset(&mut self) {
         Base64Decoder::reset(self);
     }
@@ -243,6 +259,10 @@ impl MimeDecoder for QuotedPrintableDecoder {
 
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
         QuotedPrintableDecoder::decode(self, input, output);
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        QuotedPrintableDecoder::finish(self, output);
     }
 
     fn reset(&mut self) {
@@ -259,6 +279,10 @@ impl MimeDecoder for UuDecoder {
         UuDecoder::decode(self, input, output);
     }
 
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        UuDecoder::finish(self, output);
+    }
+
     fn reset(&mut self) {
         UuDecoder::reset(self);
     }
@@ -271,6 +295,10 @@ impl MimeDecoder for YDecoder {
 
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
         YDecoder::decode(self, input, output);
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        YDecoder::finish(self, output);
     }
 
     fn reset(&mut self) {
@@ -287,6 +315,10 @@ impl MimeDecoder for Rfc2231Decoder {
         Rfc2231Decoder::decode(self, input, output);
     }
 
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        Rfc2231Decoder::finish(self, output);
+    }
+
     fn reset(&mut self) {
         Rfc2231Decoder::reset(self);
     }
@@ -299,6 +331,10 @@ impl MimeDecoder for PassThroughDecoder {
 
     fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
         PassThroughDecoder::decode(self, input, output);
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        PassThroughDecoder::finish(self, output);
     }
 
     fn reset(&mut self) {

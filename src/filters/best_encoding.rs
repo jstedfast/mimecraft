@@ -6,13 +6,13 @@ use crate::{ContentEncoding, EncodingConstraint, encodings::InvalidLineLength};
 
 /// Passes bytes through unchanged while choosing a content transfer encoding.
 ///
-/// Tracks NUL and high-bit bytes, line lengths, and LF-terminated lines starting
+/// Tracks NUL and high-bit bytes, line lengths, and lines starting
 /// with exact `From `. Queries use MimeKit's heuristic, not a measurement of
 /// every encoder's output size. They neither encode the input nor reset state.
 ///
 /// CR immediately before LF is excluded from line width, even across chunks.
-/// Bare CR and an unterminated final CR count toward width. Like MimeKit, a
-/// `From ` marker is recorded only when its line's LF arrives, not on `finish`.
+/// Bare CR and an unterminated final CR count toward width. A `From ` marker is
+/// recognized as soon as its prefix arrives, even without a final newline.
 ///
 /// Counters use 64 bits rather than MimeKit's signed 32-bit counters. The
 /// 17-percent threshold is computed with exact, overflow-safe integer arithmetic.
@@ -158,10 +158,6 @@ impl BestEncodingFilter {
                 self.max_line_length = self.max_line_length.max(length);
                 self.line_length = 0;
 
-                // Check our saved line prefix for "From " only at the newline.
-                if !self.has_from_line && self.prefix_length == 5 && self.prefix == *b"From " {
-                    self.has_from_line = true;
-                }
                 self.prefix_length = 0;
             } else {
                 if byte == 0 {
@@ -170,11 +166,13 @@ impl BestEncodingFilter {
                     self.high_bit_count += 1;
                 }
 
-                // Retain the prefix across chunks so a split "From " marker
-                // can still be recognized when this line eventually reaches LF.
+                // Check the saved prefix even when this line is unterminated.
                 if !self.has_from_line && self.prefix_length < self.prefix.len() {
                     self.prefix[self.prefix_length] = byte;
                     self.prefix_length += 1;
+                    if self.prefix_length == 5 && self.prefix == *b"From " {
+                        self.has_from_line = true;
+                    }
                 }
                 self.line_length += 1;
             }
@@ -185,8 +183,6 @@ impl BestEncodingFilter {
     }
 
     /// Emits nothing and retains all statistics, including the current line.
-    ///
-    /// This does not recognize a `From ` marker on an unterminated line.
     pub fn finish(&mut self, _output: &mut Vec<u8>) {}
 
     /// Clears all statistics and returns to the beginning of a line.

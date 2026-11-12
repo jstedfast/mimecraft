@@ -195,7 +195,7 @@ fn depth_limit_overrides_content_state() {
 fn defaults_and_checked_depth() {
     let mut tree = HtmlTreeConstruction::default();
     assert_eq!(tree.max_element_depth(), 4096);
-    assert!(tree.scripting_enabled());
+    assert!(!tree.scripting_enabled());
     assert!(!tree.depth_exceeded());
     assert!(!tree.is_in_foreign_content());
     assert!(!tree.is_in_frameset());

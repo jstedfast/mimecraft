@@ -67,12 +67,11 @@ fn mimekit_international_mailbox_and_route_fixtures_keep_utf8() {
     assert_eq!(check(&list, &options()), format!("To: {chinese}\r\n"));
 
     let mut routed = MailboxAddress::new("User Name", "user@domain.com".parse().unwrap());
-    *routed.route_mut() = [
+    *routed.route_mut() = mimecraft::DomainList::try_from_iter([
         "route",
         "\u{4f0a}\u{662d}\u{5091}.\u{90f5}\u{4ef6}.\u{5546}\u{52d9}",
-    ]
-    .into_iter()
-    .collect();
+    ])
+    .unwrap();
     assert_eq!(
         routed.to_ascii().unwrap(),
         "User Name <@route,@xn--qoq00bf88b.xn--5nqv22n.xn--lhr59c:user@domain.com>"
@@ -132,19 +131,18 @@ fn stored_domain_spelling_and_local_only_and_quoted_addresses_are_preserved() {
         }
     }
     let mut routed = MailboxAddress::new("", "caf\u{e9}@Example.com".parse().unwrap());
-    *routed.route_mut() = ["B\u{dc}CHER.Example", "XN--BCHER-KVA.Example"]
-        .into_iter()
-        .collect();
+    *routed.route_mut() =
+        mimecraft::DomainList::try_from_iter(["B\u{dc}CHER.Example", "XN--BCHER-KVA.Example"])
+            .unwrap();
     let list: AddressList = vec![routed.into()].into();
     assert!(check(&list, &options()).contains("@B\u{dc}CHER.Example,@XN--BCHER-KVA.Example:"));
 }
 
 #[test]
-fn edited_routes_skip_empty_entries_and_normalize_literals_without_mutating_them() {
+fn parsed_routes_normalize_literals_without_mutating_them() {
     let mut value = MailboxAddress::new("", "caf\u{e9}@example.com".parse().unwrap());
-    *value.route_mut() = [" \r\n\t ", "[IPv6: ::1]", "", "B\u{dc}CHER.Example"]
-        .into_iter()
-        .collect();
+    *value.route_mut() =
+        mimecraft::DomainList::parse("@[IPv6: ::1],@B\u{dc}CHER.Example".as_bytes()).unwrap();
     let list: AddressList = vec![value.into()].into();
     let before = list.to_string();
     let header = list.to_header_with_options("To", &options()).unwrap();
@@ -292,7 +290,7 @@ fn unicode_addr_specs_routes_and_attached_commas_are_indivisible_byte_counted_pi
     };
     let address = format!("\"{}\"@b", "\u{e9} ".repeat(20));
     let mut routed = MailboxAddress::new("", "caf\u{e9}@b".parse().unwrap());
-    *routed.route_mut() = ["B\u{dc}CHER.Example"; 4].into_iter().collect();
+    *routed.route_mut() = mimecraft::DomainList::try_from_iter(["B\u{dc}CHER.Example"; 4]).unwrap();
     for value in [mailbox("", &address), routed.into()] {
         let list: AddressList = vec![value].into();
         assert!(matches!(
@@ -320,17 +318,10 @@ fn international_output_still_validates_domain_mappings_routes_and_strict_syntax
         assert_eq!(error.path(), &[0]);
         assert!(error.source().is_some());
     }
-    for domain in [
-        "bad domain",
-        "evil\r\nBcc:other@example.com",
-        "bad\0domain",
-        "[broken",
-        "[ok]junk",
-        "bad\u{ff20}example.com",
-        "bad\u{2009}example.com",
-    ] {
+    for domain in ["xn--.com", "[\u{e9}]", "bad\u{ff20}example.com"] {
         let mut value = MailboxAddress::new("Ren\u{e9}e", "caf\u{e9}@b".parse().unwrap());
-        *value.route_mut() = ["", "relay.example", domain].into_iter().collect();
+        *value.route_mut() =
+            mimecraft::DomainList::try_from_iter(["first", "relay.example", domain]).unwrap();
         let list: AddressList = vec![
             mailbox("", "a@b"),
             GroupAddress::new("Amis", vec![value.into()].into()).into(),

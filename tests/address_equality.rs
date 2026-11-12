@@ -63,7 +63,8 @@ fn idna_equivalent_spellings_are_not_implicitly_equal() {
 fn differing_routes_do_not_break_equality_or_hash_contract() {
     let plain = mailbox("User", "user@example.com");
     let mut routed = plain.clone();
-    *routed.route_mut() = ["relay.example", "invalid domain"].into_iter().collect();
+    *routed.route_mut() =
+        mimecraft::DomainList::try_from_iter(["relay.example", "other.example"]).unwrap();
     assert_ne!(plain.to_string(), routed.to_string());
     assert_equivalent(&plain, &routed);
     let mut set = HashSet::new();
@@ -107,7 +108,7 @@ fn group_equality_ignores_diagnostics_but_keeps_names_and_members() {
     let Address::Mailbox(member) = &mut routed.members_mut().as_mut_vec()[0] else {
         panic!("expected mailbox");
     };
-    member.route_mut().as_mut_vec().push("relay".into());
+    member.route_mut().push("relay").unwrap();
     assert_equivalent(&clean, &routed);
 }
 

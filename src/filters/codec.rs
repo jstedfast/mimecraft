@@ -122,9 +122,7 @@ impl<E: MimeEncoder> MimeFilter for EncoderFilter<E> {
 /// let mut output = Vec::new();
 /// filter.filter(b"file%2", &mut output);
 /// filter.finish(&mut output);
-/// assert_eq!(output, b"file");
-/// filter.filter(b"0name", &mut output);
-/// assert_eq!(output, b"file name");
+/// assert_eq!(output, b"file%2");
 /// ```
 #[derive(Clone, Debug)]
 pub struct DecoderFilter<D> {
@@ -162,12 +160,9 @@ impl<D: MimeDecoder> DecoderFilter<D> {
         self.decoder.decode(input, output);
     }
 
-    /// Passes empty input to the decoder, matching MimeKit's filter flush.
-    ///
-    /// Built-in decoders emit nothing here: incomplete groups remain pending,
-    /// rather than being flushed, rejected, or reset.
+    /// Finalizes the decoder, preserving its codec-specific trailing-input rules.
     pub fn finish(&mut self, output: &mut Vec<u8>) {
-        self.decoder.decode(&[], output);
+        self.decoder.finish(output);
     }
 
     /// Resets the decoder, preserving configuration and header-scanning mode.

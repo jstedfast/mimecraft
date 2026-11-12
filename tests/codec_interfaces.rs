@@ -11,6 +11,186 @@ use mimecraft::{
     },
 };
 
+// Adapted from MimeKit's MimeDecoderFlushTests: EOF must not depend on chunking.
+fn assert_decoder_finish<D: MimeDecoder + Clone>(template: D, input: &[u8], expected: &[u8]) {
+    use mimecraft::{
+        filters::DecoderFilter,
+        io::{FilteredReader, FilteredWriter},
+    };
+    use std::io::{Read, Write};
+
+    for split in 0..=input.len() {
+        let mut decoder = template.clone();
+        let mut output = b"prefix".to_vec();
+        decoder.decode(&input[..split], &mut output);
+        let prefix = output.clone();
+        decoder.decode(&[], &mut output);
+        assert_eq!(output, prefix, "empty decode is not EOF");
+        let mut cloned: Box<dyn MimeDecoder> = Box::new(decoder.clone());
+        let mut cloned_output = output.clone();
+        decoder.decode(&input[split..], &mut output);
+        decoder.finish(&mut output);
+        cloned.decode(&input[split..], &mut cloned_output);
+        cloned.finish(&mut cloned_output);
+        assert_eq!(&output[6..], expected, "input {input:?}, split {split}");
+        assert_eq!(output, cloned_output);
+        decoder.finish(&mut output);
+        cloned.finish(&mut cloned_output);
+        assert_eq!(&output[6..], expected);
+        assert_eq!(output, cloned_output);
+        decoder.reset();
+        output.clear();
+        decoder.decode(input, &mut output);
+        decoder.finish(&mut output);
+        assert_eq!(output, expected);
+    }
+    let mut reader = FilteredReader::new(input, DecoderFilter::new(template.clone()));
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output).unwrap();
+    assert_eq!(output, expected);
+    assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+    let mut writer = FilteredWriter::new(Vec::new(), DecoderFilter::new(template));
+    for byte in input {
+        writer.write_all(std::slice::from_ref(byte)).unwrap();
+    }
+    writer.finish().unwrap();
+    writer.finish().unwrap();
+    assert_eq!(writer.get_ref(), expected);
+}
+
+#[test]
+fn decoder_finalization_handles_incomplete_payloads_and_framing() {
+    for (input, expected) in [
+        ("", ""),
+        ("T", ""),
+        ("TQ", "M"),
+        ("TWE", "Ma"),
+        ("TQ=", "M"),
+        ("TWE=", "Ma"),
+        ("TWFu", "Man"),
+        ("TWFuTQ", "ManM"),
+        ("TQ==TWE", "MMa"),
+        ("T W\r\nE", "Ma"),
+        ("=Q", ""),
+        ("T=", ""),
+        ("T=Q", ""),
+        ("TW=", "M"),
+        ("====TQ", "M"),
+    ] {
+        assert_decoder_finish(Base64Decoder::new(), input.as_bytes(), expected.as_bytes());
+    }
+    // Exercise SIMD blocks followed by each kind of scalar tail.
+    for (tail, suffix) in [
+        ("T", ""),
+        ("TQ", "M"),
+        ("TWE", "Ma"),
+        ("TQ=", "M"),
+        ("T=Q", ""),
+    ] {
+        let input = format!("{}{tail}", "TWFu".repeat(128));
+        let expected = format!("{}{suffix}", "Man".repeat(128));
+        assert_decoder_finish(Base64Decoder::new(), input.as_bytes(), expected.as_bytes());
+    }
+    for (input, expected) in [
+        ("", ""),
+        ("abc=", "abc="),
+        ("abc=4", "abc=4"),
+        ("abc=\r", "abc=\r"),
+        ("abc=\r\n", "abc"),
+        ("==", "=="),
+        ("=Q", "=Q"),
+        ("abc=4G", "abc=4G"),
+        ("=41", "A"),
+    ] {
+        assert_decoder_finish(
+            QuotedPrintableDecoder::new(),
+            input.as_bytes(),
+            expected.as_bytes(),
+        );
+    }
+    assert_decoder_finish(QuotedPrintableDecoder::for_encoded_words(), b"_=4", b" =4");
+    for (input, expected) in [
+        ("", ""),
+        ("%", "%"),
+        ("%4", "%4"),
+        ("%q", "%q"),
+        ("%4Z", "%4Z"),
+        ("%41%A", "A%A"),
+    ] {
+        assert_decoder_finish(Rfc2231Decoder::new(), input.as_bytes(), expected.as_bytes());
+    }
+    for (input, expected) in [
+        ("", ""),
+        ("#3", ""),
+        ("#36", "M"),
+        ("#36%", "Ma"),
+        ("#36%N", "Man"),
+        ("!36%", "M"),
+        ("\"36%", "Ma"),
+        ("`\n", ""),
+    ] {
+        assert_decoder_finish(
+            UuDecoder::for_payload(),
+            input.as_bytes(),
+            expected.as_bytes(),
+        );
+    }
+    assert_decoder_finish(UuDecoder::new(), b"begin", b"");
+    assert_decoder_finish(UuDecoder::new(), b"begin 644 file\n#36%", b"Ma");
+    let mut prefix = Vec::new();
+    UuEncoder::new().encode(&[b'x'; 90], &mut prefix);
+    for (tail, suffix) in [
+        (b"#36".as_slice(), b"M".as_slice()),
+        (b"#36%", b"Ma"),
+        (b"!36%", b"M"),
+    ] {
+        let mut input = prefix.clone();
+        input.extend_from_slice(tail);
+        let mut expected = vec![b'x'; 90];
+        expected.extend_from_slice(suffix);
+        assert_decoder_finish(UuDecoder::for_payload(), &input, &expected);
+    }
+    for (input, expected) in [
+        (b"".as_slice(), b"".as_slice()),
+        (b"*=", b"\0"),
+        (b"=J", b"\xe0"),
+        (b"*=\r", b"\0"),
+    ] {
+        assert_decoder_finish(YDecoder::for_payload(), input, expected);
+    }
+    assert_decoder_finish(
+        YDecoder::new(),
+        b"=ybegin line=128 size=1 name=file\n=",
+        b"",
+    );
+    assert_decoder_finish(
+        YDecoder::new(),
+        b"=ybegin line=128 size=1 name=file\n*=",
+        b"\0",
+    );
+    assert_decoder_finish(PassThroughDecoder::default(), b"a\0\r\n=", b"a\0\r\n=");
+}
+
+#[test]
+fn framed_decoder_finish_ends_input_and_preserves_yenc_checksum() {
+    let mut uu = UuDecoder::for_payload();
+    let mut output = Vec::new();
+    uu.decode(b"#36%", &mut output);
+    uu.finish(&mut output);
+    uu.decode(b"#36%N", &mut output);
+    assert_eq!(output, b"Ma");
+
+    let mut yenc = YDecoder::for_payload();
+    output.clear();
+    yenc.decode(b"*=", &mut output);
+    let checksum = yenc.checksum();
+    yenc.finish(&mut output);
+    yenc.decode(b"=J", &mut output);
+    yenc.finish(&mut output);
+    assert_eq!(output, b"\0");
+    assert_eq!(yenc.checksum(), checksum);
+}
+
 #[test]
 fn pass_through_preserves_every_byte_and_encoding_label() {
     let input: Vec<u8> = (0..=255).cycle().take(1024).collect();

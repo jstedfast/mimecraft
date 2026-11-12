@@ -257,8 +257,8 @@ enum DecoderState {
 /// Malformed escapes pass through literally, matching MimeKit.
 ///
 /// Incomplete escapes (`=`, `=X` with a hex digit, or `=\r`) remain pending
-/// until more input arrives or [`reset`](Self::reset) discards them. There is
-/// no implicit flushing or replacement of incomplete escapes.
+/// until more input arrives, [`finish`](Self::finish) preserves them literally,
+/// or [`reset`](Self::reset) discards them.
 #[derive(Clone, Debug, Default)]
 pub struct QuotedPrintableDecoder {
     state: DecoderState,
@@ -369,5 +369,18 @@ impl QuotedPrintableDecoder {
     /// Discards an incomplete escape, retaining body or encoded-word mode.
     pub fn reset(&mut self) {
         self.state = DecoderState::PassThrough;
+    }
+
+    /// Preserves an incomplete escape literally and resets the pending state.
+    ///
+    /// Retains body or encoded-word mode. Repeated calls emit nothing.
+    pub fn finish(&mut self, output: &mut Vec<u8>) {
+        match self.state {
+            DecoderState::PassThrough => {}
+            DecoderState::EqualSign => output.push(b'='),
+            DecoderState::SoftBreak => output.extend_from_slice(b"=\r"),
+            DecoderState::HexDigit { byte, .. } => output.extend_from_slice(&[b'=', byte]),
+        }
+        self.reset();
     }
 }

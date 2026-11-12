@@ -285,8 +285,14 @@ fn empty_bodies_and_incomplete_payloads_keep_decoder_tolerance() {
     }
     for (encoding, stored, expected) in [
         (ContentEncoding::Base64, &b"Q"[..], &b""[..]),
-        (ContentEncoding::QuotedPrintable, &b"abc="[..], &b"abc"[..]),
+        (ContentEncoding::Base64, &b"TQ"[..], &b"M"[..]),
+        (ContentEncoding::QuotedPrintable, &b"abc="[..], &b"abc="[..]),
         (ContentEncoding::UuEncode, &b"#0V%T\n"[..], &b""[..]),
+        (
+            ContentEncoding::UuEncode,
+            &b"begin 644 file\n#36%"[..],
+            &b"Ma"[..],
+        ),
     ] {
         let mut content = MimeContent::with_encoding(Cursor::new(stored), encoding);
         for _ in 0..2 {

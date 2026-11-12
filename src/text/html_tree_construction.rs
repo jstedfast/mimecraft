@@ -146,7 +146,7 @@ impl Default for HtmlTreeConstruction {
             form_pointer_set: false,
             form_pointer_index: None,
             popped_through: false,
-            scripting_enabled: true,
+            scripting_enabled: false,
             namespace: HtmlNamespace::Html,
             last_tag: None,
             disposition: HtmlTagDisposition::Normal,
@@ -156,7 +156,7 @@ impl Default for HtmlTreeConstruction {
 }
 
 impl HtmlTreeConstruction {
-    /// Creates structural state with a 4096-entry limit and scripting enabled.
+    /// Creates structural state with a 4096-entry limit and scripting disabled.
     pub fn new() -> Self {
         Self::default()
     }

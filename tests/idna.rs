@@ -251,10 +251,8 @@ fn unchanged_ascii_is_borrowed_and_failures_have_diagnostics() {
 }
 
 #[test]
-fn route_encoding_skips_blank_domains_and_encodes_idns() {
-    let route: DomainList = ["  \t ", "b\u{fc}cher.example", "example.net", "\u{2008}"]
-        .into_iter()
-        .collect();
+fn route_encoding_encodes_idns() {
+    let route = DomainList::try_from_iter(["b\u{fc}cher.example", "example.net"]).unwrap();
     let original = route.clone();
     assert_eq!(
         route.to_ascii().unwrap(),
@@ -263,40 +261,34 @@ fn route_encoding_skips_blank_domains_and_encodes_idns() {
     assert_eq!(route, original);
     assert_eq!(route.to_string(), "@b\u{fc}cher.example,@example.net");
     assert_eq!(DomainList::new().to_ascii().unwrap(), "");
-    let blank: DomainList = ["", " \t\r\n", "\u{3000}"].into_iter().collect();
+    let blank: DomainList = "@\u{3000}".parse().unwrap();
     assert_eq!(blank.to_ascii().unwrap(), "");
 }
 
 #[test]
 fn route_encoding_preserves_order_duplicates_and_literal_spelling() {
-    let route: DomainList = [
+    let route = DomainList::try_from_iter([
         "RELAY.Example",
-        "[ IPv6: ::ABCD ]",
+        "[IPv6:::ABCD]",
         "b\u{fc}cher.example",
         "RELAY.Example",
-        "example.",
-    ]
-    .into_iter()
-    .collect();
+        "example",
+    ])
+    .unwrap();
     assert_eq!(
         route.to_ascii().unwrap(),
-        "@relay.example,@[IPv6:::ABCD],@xn--bcher-kva.example,@relay.example,@example."
+        "@relay.example,@[IPv6:::ABCD],@xn--bcher-kva.example,@relay.example,@example"
     );
-    let literals: DomainList = ["[]", "[not an (ip)]"].into_iter().collect();
+    let literals = DomainList::parse(b"@[],@[not an (ip)]").unwrap();
     assert_eq!(literals.to_ascii().unwrap(), "@[],@[notan(ip)]");
 }
 
 #[test]
 fn route_errors_identify_original_indices_without_partial_output_or_mutation() {
-    for invalid in [
-        "xn--.com",
-        "example\u{ff20}evil.com",
-        "example.com,@evil.com",
-        "a b",
-    ] {
-        let route: DomainList = ["", "good.example", "\u{2008}", invalid, "later.example"]
-            .into_iter()
-            .collect();
+    for invalid in ["xn--.com", "example\u{ff20}evil.com", "\u{200b}"] {
+        let route =
+            DomainList::try_from_iter(["first", "good.example", "third", invalid, "later.example"])
+                .unwrap();
         let original = route.clone();
         let error = route.to_ascii().unwrap_err();
         assert!(matches!(
@@ -312,18 +304,9 @@ fn route_errors_identify_original_indices_without_partial_output_or_mutation() {
 }
 
 #[test]
-fn route_literals_require_a_complete_ascii_literal() {
-    for invalid in [
-        "[unclosed",
-        "[a\\b]",
-        "[a[b]",
-        "[a]\r\nBcc:x",
-        "[a] ",
-        "[a],@b",
-        "[\u{e9}]",
-        "[\0]",
-    ] {
-        let route: DomainList = ["good", invalid].into_iter().collect();
+fn route_literals_require_ascii_for_ascii_formatting() {
+    for invalid in ["[\u{e9}]", "[\u{1f600}]"] {
+        let route = DomainList::try_from_iter(["good", invalid]).unwrap();
         let error = route.to_ascii().unwrap_err();
         assert_eq!(error, DomainListEncodeError::InvalidLiteral { index: 1 });
         assert_eq!(error.domain_index(), 1);

@@ -444,7 +444,8 @@ fn mailbox_checks_do_not_mutate_or_validate_names_routes() {
         ("user@xn--99999999999.example.com", Err(ALabel), Err(ALabel)),
     ] {
         let mut mailbox = MailboxAddress::new("\u{202e}\u{1f42a}", address.parse().unwrap());
-        mailbox.route_mut().as_mut_vec().push("bad\r\nroute".into());
+        *mailbox.route_mut() =
+            mimecraft::DomainList::parse("@bad\u{2008}route".as_bytes()).unwrap();
         let original = mailbox.clone();
         assert_eq!(mailbox.validate_smtp_utf8(), expected);
         assert_eq!(mailbox.validate_smtp_utf8_with_options(&DECODE), decoded);

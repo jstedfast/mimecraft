@@ -477,8 +477,8 @@ fn reference(input: &[u8], width: usize) -> [ContentEncoding; 3] {
     let threshold = (input.len() as f64 * (17.0 / 100.0)) as usize;
     let mut needs_encoding = false;
     for line in input.split_inclusive(|&byte| byte == b'\n') {
+        needs_encoding |= line.starts_with(b"From ");
         let content = if let Some(content) = line.strip_suffix(b"\n") {
-            needs_encoding |= line.starts_with(b"From ");
             content.strip_suffix(b"\r").unwrap_or(content)
         } else {
             line
@@ -666,11 +666,9 @@ fn crlf_splits_and_unterminated_lines_preserve_source_widths() {
 }
 
 #[test]
-fn from_markers_are_exact_lf_terminated_and_latched() {
+fn from_markers_are_exact_and_latched_even_without_a_newline() {
     for input in [
-        b"From ".as_slice(),
-        b"From x\r",
-        b"from x\n",
+        b"from x\n".as_slice(),
         b"FROM x\n",
         b">From x\n",
         b" From x\n",
@@ -681,17 +679,24 @@ fn from_markers_are_exact_lf_terminated_and_latched() {
     ] {
         assert_splits(input, 78, [SevenBit; 3]);
     }
-    for input in [b"From \n".as_slice(), b"From x\r\n", b"\nFrom x\nshort\n"] {
+    for input in [
+        b"From ".as_slice(),
+        b"From x\r",
+        b"From \n",
+        b"From x\r\n",
+        b"\nFrom x\nshort\n",
+        b"short\nFrom ",
+    ] {
         assert_splits(input, 78, [QuotedPrintable; 3]);
     }
 
     let mut filter = analyze(b"From x\r", 1);
-    assert_eq!(decisions(&filter, 78), [SevenBit; 3]);
+    assert_eq!(decisions(&filter, 78), [QuotedPrintable; 3]);
     let mut clone = filter.clone();
     filter.filter(b"\n", &mut Vec::new());
     assert_eq!(decisions(&filter, 78), [QuotedPrintable; 3]);
     clone.filter(b"x", &mut Vec::new());
-    assert_eq!(decisions(&clone, 78), [SevenBit; 3]);
+    assert_eq!(decisions(&clone, 78), [QuotedPrintable; 3]);
     filter.filter(b"short\n", &mut Vec::new());
     assert_eq!(decisions(&filter, 78), [QuotedPrintable; 3]);
 }

@@ -284,6 +284,8 @@
 //! values, with explicit errors and MimeKit-compatible recovery.
 //! [`DomainList`] parses obsolete mailbox routes with ordered UTF-8 domains,
 //! comments, literals, and complete/prefix APIs sharing message-ID domain parsing.
+//! Its checked constructors and mutations validate authored domain syntax while
+//! parsing and cloning retain tolerant recovery.
 //! [`idna`] converts international domains with explicit validity/MIME-safety
 //! errors; [`DomainList::to_ascii`] separately formats validated ASCII routes.
 //! [`AddrSpec`] parses the local-part/domain portion of an address, with quoted
@@ -463,6 +465,7 @@ pub use content_type::ContentType;
 pub use date_time_offset::{DateTimeOffset, DateTimeOffsetError};
 pub use domain_list::{
     DomainList, DomainListEncodeError, DomainListParseError, DomainListParseErrorKind,
+    DomainListValidationError,
 };
 pub use encoding_constraint::EncodingConstraint;
 pub use group_address::GroupAddress;

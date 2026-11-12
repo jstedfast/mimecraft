@@ -449,9 +449,16 @@ impl<F: FnMut(&mut HtmlTagContext, &mut HtmlWriter)> Converter<'_, F> {
         {
             return;
         }
-        // An ignored frameset start must not become effective after stripping
-        // the body/head tokens that cleared the input's frameset-ok flag.
-        if tag.id() == HtmlTagId::FrameSet && !tag.is_end_tag() && !tree.is_in_frameset() {
+        // Browsers ignore frameset starts after body content or after the
+        // outermost frameset closes. Drop them so removing the tokens that
+        // caused them to be ignored (e.g. the first frameset) cannot activate them.
+        if tag.id() == HtmlTagId::FrameSet
+            && !tag.is_end_tag()
+            && (!tree.is_in_frameset()
+                || tree
+                    .last_tag()
+                    .is_some_and(|last| last.disposition == HtmlTagDisposition::Ignored))
+        {
             return;
         }
         // Fallback was tokenized as markup. Removing its wrapper makes the

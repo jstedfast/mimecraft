@@ -17,10 +17,11 @@ use crate::parse_utils::{self, DomainParseErrorKind, skip_comments_and_whitespac
 /// not perform IDNA conversion or SMTP validation; [`Self::to_ascii`] separately
 /// converts and validates route domains for ASCII value formatting.
 ///
-/// Stored strings are freely editable, like MimeKit's list, and are **not
-/// authoring-validated**. [`Display`](fmt::Display) prefixes non-whitespace
-/// strings with `@` and joins them with commas, without escaping or folding.
-/// Do not treat arbitrary edited values as safe header output.
+/// Construction and mutation require nonempty dot-atoms or bracketed literals
+/// without whitespace or controls. Unicode and single-label names are supported;
+/// values are not trimmed or checked against DNS. Parsing and cloning preserve
+/// tolerated malformed domains. [`Display`](fmt::Display) does not validate,
+/// escape, or fold them; use checked formatting for header output.
 ///
 /// ```
 /// use mimecraft::DomainList;
@@ -44,7 +45,7 @@ impl DomainList {
         Self::default()
     }
 
-    /// Returns the number of stored strings, including empty/whitespace entries.
+    /// Returns the number of stored domains.
     pub fn len(&self) -> usize {
         self.domains.len()
     }
@@ -61,12 +62,69 @@ impl DomainList {
         &self.domains
     }
 
-    /// Exposes ordinary vector edits without domain validation or normalization.
+    /// Constructs a list, validating each domain without normalization.
     ///
-    /// Empty strings, whitespace strings, and duplicates remain in the list.
-    /// Display skips whitespace-only entries but does not remove them.
-    pub fn as_mut_vec(&mut self) -> &mut Vec<String> {
-        &mut self.domains
+    /// Returns the index of the first invalid domain; no partial list is returned.
+    pub fn try_from_iter<S: Into<String>>(
+        domains: impl IntoIterator<Item = S>,
+    ) -> Result<Self, DomainListValidationError> {
+        Self::try_from(domains.into_iter().map(Into::into).collect::<Vec<_>>())
+    }
+
+    /// Appends a valid domain, preserving spelling and duplicates.
+    ///
+    /// An invalid domain leaves the list unchanged.
+    pub fn push(&mut self, domain: impl Into<String>) -> Result<(), DomainListValidationError> {
+        let domain = domain.into();
+        validate_domain(&domain, self.len())?;
+        self.domains.push(domain);
+        Ok(())
+    }
+
+    /// Inserts a valid domain, leaving the list unchanged on a validation error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > self.len()`, like [`Vec::insert`].
+    pub fn insert(
+        &mut self,
+        index: usize,
+        domain: impl Into<String>,
+    ) -> Result<(), DomainListValidationError> {
+        let domain = domain.into();
+        validate_domain(&domain, index)?;
+        self.domains.insert(index, domain);
+        Ok(())
+    }
+
+    /// Replaces a domain, leaving the list unchanged on a validation error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= self.len()`.
+    pub fn set(
+        &mut self,
+        index: usize,
+        domain: impl Into<String>,
+    ) -> Result<(), DomainListValidationError> {
+        let domain = domain.into();
+        validate_domain(&domain, index)?;
+        self.domains[index] = domain;
+        Ok(())
+    }
+
+    /// Removes and returns a domain, shifting later entries left.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= self.len()`, like [`Vec::remove`].
+    pub fn remove(&mut self, index: usize) -> String {
+        self.domains.remove(index)
+    }
+
+    /// Removes all domains.
+    pub fn clear(&mut self) {
+        self.domains.clear();
     }
 
     /// Returns the stored vector without copying its strings.
@@ -88,10 +146,9 @@ impl DomainList {
     /// ```
     /// use mimecraft::DomainList;
     ///
-    /// let route: DomainList = [" \t ", "b\u{fc}cher.example", "[IPv6: ::1]"]
-    ///     .into_iter().collect();
+    /// let route = DomainList::try_from_iter(["b\u{fc}cher.example", "[IPv6:::1]"])?;
     /// assert_eq!(route.to_ascii()?, "@xn--bcher-kva.example,@[IPv6:::1]");
-    /// # Ok::<(), mimecraft::DomainListEncodeError>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Errors
@@ -122,7 +179,7 @@ impl DomainList {
                 let ascii = crate::idna::to_ascii(domain)
                     .map_err(|source| DomainListEncodeError::Idna { index, source })?;
                 // MimeKit retains domain spelling in international mode. Unlike
-                // unchecked display output, validate freely edited route entries.
+                // unchecked display output, also validate recovered route entries.
                 if international {
                     std::borrow::Cow::Borrowed(domain.as_str())
                 } else {
@@ -233,19 +290,79 @@ fn skip_cfws(input: &[u8], index: &mut usize) -> Result<(), DomainListParseError
     })
 }
 
-impl From<Vec<String>> for DomainList {
-    fn from(domains: Vec<String>) -> Self {
-        Self { domains }
+impl TryFrom<Vec<String>> for DomainList {
+    type Error = DomainListValidationError;
+
+    fn try_from(domains: Vec<String>) -> Result<Self, Self::Error> {
+        for (index, domain) in domains.iter().enumerate() {
+            validate_domain(domain, index)?;
+        }
+        Ok(Self { domains })
     }
 }
 
-impl<S: Into<String>> FromIterator<S> for DomainList {
-    fn from_iter<T: IntoIterator<Item = S>>(iter: T) -> Self {
-        Self {
-            domains: iter.into_iter().map(Into::into).collect(),
+fn validate_domain(domain: &str, index: usize) -> Result<(), DomainListValidationError> {
+    let literal = domain.starts_with('[');
+    let text = if literal {
+        domain.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+    } else {
+        Some(domain)
+    };
+    let valid = text.is_some_and(|text| {
+        let mut atom_length = 0;
+        for ch in text.chars() {
+            if !literal && ch == '.' {
+                if atom_length == 0 {
+                    return false;
+                }
+                atom_length = 0;
+                continue;
+            }
+            // Rust strings already contain valid Unicode scalars, so no
+            // surrogate-pair checks are needed for internationalized domains.
+            let valid = if ch.is_ascii() {
+                if literal {
+                    ch.is_ascii_graphic() && !matches!(ch, '[' | '\\' | ']')
+                } else {
+                    parse_utils::is_atom(ch as u8)
+                }
+            } else {
+                !ch.is_whitespace() && !ch.is_control()
+            };
+            if !valid {
+                return false;
+            }
+            atom_length += 1;
         }
+        literal || atom_length > 0
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(DomainListValidationError { index })
     }
 }
+
+/// An invalid authored route domain. Parsing uses separate, tolerant rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DomainListValidationError {
+    index: usize,
+}
+
+impl DomainListValidationError {
+    /// Returns the attempted insertion/replacement index, or invalid input index.
+    pub fn domain_index(self) -> usize {
+        self.index
+    }
+}
+
+impl fmt::Display for DomainListValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid route domain at index {}", self.index)
+    }
+}
+
+impl Error for DomainListValidationError {}
 
 impl IntoIterator for DomainList {
     type Item = String;

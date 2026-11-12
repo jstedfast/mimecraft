@@ -608,9 +608,8 @@ fn international_assignments_replace_duplicates_and_keep_failures_atomic_without
         ..Default::default()
     };
     let mut invalid_route = mailbox.clone();
-    *invalid_route.route_mut() = ["relay.example", "bad\r\nBcc: injected@example.com"]
-        .into_iter()
-        .collect();
+    *invalid_route.route_mut() =
+        mimecraft::DomainList::try_from_iter(["relay.example", "xn--.com"]).unwrap();
     let long_address = MailboxAddress::new(
         "",
         format!("{}@example.com", "\u{e9}".repeat(40))

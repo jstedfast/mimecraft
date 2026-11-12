@@ -292,10 +292,11 @@ impl MailboxAddress {
         &self.route
     }
 
-    /// Exposes source-route edits without domain validation or normalization.
+    /// Exposes checked source-route edits without normalization.
     ///
-    /// As with [`DomainList::as_mut_vec`], arbitrary edits are not safe header
-    /// output. Name/address values and their diagnostics are unaffected.
+    /// Insertions and replacements validate authored domains. Parsing and
+    /// cloning preserve recovered domains; use checked header formatting.
+    /// Name/address values and their diagnostics are unaffected.
     pub fn route_mut(&mut self) -> &mut DomainList {
         &mut self.route
     }

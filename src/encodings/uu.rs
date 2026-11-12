@@ -266,8 +266,9 @@ enum DecoderState {
 ///
 /// Matches MimeKit's scalar decoder: CR is ignored, LF starts a new line, and
 /// every other byte maps to a sextet. Incomplete quartets remain pending, even
-/// across malformed line breaks; this is not a strict validator. Only complete
-/// quartets produce output, capped by the line's declared byte count.
+/// across malformed line breaks; this is not a strict validator. Decoding emits
+/// complete quartets; [`finish`](Self::finish) emits any complete trailing bytes,
+/// capped by the line's declared byte count.
 ///
 /// A zero-length line (space or backtick in canonical input) ends decoding.
 /// Subsequent input is ignored until [`reset`](Self::reset), including `end`
@@ -428,5 +429,23 @@ impl UuDecoder {
         self.pending_len = 0;
         self.remaining = 0;
         self.end_of_line = false;
+    }
+
+    /// Emits complete bytes from a partial payload quartet and ends decoding.
+    ///
+    /// Discards incomplete framing and fragments that cannot produce a byte.
+    /// Repeated calls emit nothing; reset before decoding another stream.
+    pub fn finish(&mut self, output: &mut Vec<u8>) {
+        if self.state == DecoderState::Payload && self.pending_len >= 2 && self.remaining > 0 {
+            let [first, second, third, _] = self.pending;
+            output.push(first << 2 | second >> 4);
+            if self.pending_len == 3 && self.remaining > 1 {
+                output.push(second << 4 | third >> 2);
+            }
+        }
+        self.state = DecoderState::Ended;
+        self.pending_len = 0;
+        self.pending = [0; 4];
+        self.remaining = 0;
     }
 }

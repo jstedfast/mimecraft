@@ -74,6 +74,26 @@ fn canonical_encoded_word_vectors() {
 }
 
 #[test]
+fn encoded_word_runs_finalize_trailing_bytes_before_charset_conversion() {
+    for (input, expected) in [
+        ("=?utf-8?b?TQ?=", "M"),
+        ("=?utf-8?b?TWE?=", "Ma"),
+        ("=?utf-8?b?T?= =?utf-8?b?Q?=", "M"),
+        ("=?utf-8?q?abc=?=", "abc="),
+        ("=?utf-8?q?abc=4?=", "abc=4"),
+        ("=?utf-8?q?abc=?= =?utf-8?q?4?=", "abc=4"),
+        ("=?utf-8?b?TQ?= =?utf-8?q?=4?=", "M=4"),
+        ("=?utf-8?q?=4?= =?iso-8859-1?q?=41?=", "=4A"),
+    ] {
+        assert_both(input.as_bytes(), expected);
+        assert_both(
+            format!("{input} suffix").as_bytes(),
+            &format!("{expected} suffix"),
+        );
+    }
+}
+
+#[test]
 fn malformed_wrappers_remain_literal() {
     for word in [
         "=??q?no_charset?=",
@@ -233,10 +253,10 @@ fn run_boundaries_reset_payload_and_charset_state() {
         }
     }
     assert_both(b"=?utf-8?q?=C3?=x=?utf-8?q?=A9?=", "\u{fffd}x\u{fffd}");
-    assert_both(b"=?utf-8?q?=C?= x =?utf-8?q?3?=", " x 3");
-    assert_both(b"=?utf-8?b?w?= x =?utf-8?b?6k=?=", " x ");
-    assert_both(b"=?utf-8?q?=C?= =?latin1?q?3?=", "3");
-    assert_both(b"=?utf-8?q?=C?= =?utf-8?b?QQ==?= =?utf-8?q?3?=", "A3");
+    assert_both(b"=?utf-8?q?=C?= x =?utf-8?q?3?=", "=C x 3");
+    assert_both(b"=?utf-8?b?w?= x =?utf-8?b?6k=?=", " x \u{fffd}");
+    assert_both(b"=?utf-8?q?=C?= =?latin1?q?3?=", "=C3");
+    assert_both(b"=?utf-8?q?=C?= =?utf-8?b?QQ==?= =?utf-8?q?3?=", "=CA3");
 }
 
 #[test]
@@ -406,8 +426,8 @@ fn phrase_tokenization_affects_raw_fallback_boundaries() {
 fn tolerant_decoding_is_not_validation_or_sanitization() {
     assert_both(b"=?utf-8?b?S!G@V#s$bG8=?=", "Hello");
     assert_both(b"=?utf-8?q?bad=XY_escapes?=", "bad=XY escapes");
-    assert_both(b"=?utf-8?q?pending=?=", "pending");
-    assert_both(b"=?utf-8?b?YQ?=", "");
+    assert_both(b"=?utf-8?q?pending=?=", "pending=");
+    assert_both(b"=?utf-8?b?YQ?=", "a");
     assert_both(b"=?utf-8?q?=00=0D=0A?=", "\0\r\n");
     let long = "a".repeat(1000);
     assert_both(format!("=?utf-8?q?{long}?=").as_bytes(), &long);

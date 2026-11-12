@@ -178,7 +178,8 @@ fn quotes_escapes_angles_and_literal_delimiters_do_not_create_false_fold_points(
         "A \"quoted\" \\ name",
         "\"a b\\\" c\"@example.com".parse().unwrap(),
     );
-    *routed.route_mut() = ["[a\"<>b]", "relay.example"].into_iter().collect();
+    *routed.route_mut() =
+        mimecraft::DomainList::try_from_iter(["[a\"<>b]", "relay.example"]).unwrap();
     let list: AddressList = vec![
         mailbox("A  B, C", "\"with spaces\tand tabs\"@example.com"),
         routed.into(),
@@ -211,13 +212,12 @@ fn unbreakable_quoted_local_parts_and_routes_fail_instead_of_being_rewritten() {
         Err(AddressHeaderFormatError::LineTooLong { .. })
     ));
     let mut routed = MailboxAddress::new("", "a@b".parse().unwrap());
-    *routed.route_mut() = [
+    *routed.route_mut() = mimecraft::DomainList::try_from_iter([
         "relay-one.example",
         "relay-two.example",
         "relay-three.example",
-    ]
-    .into_iter()
-    .collect();
+    ])
+    .unwrap();
     let list: AddressList = vec![routed.into()].into();
     assert!(matches!(
         list.to_header_string_with_options("To", &options),

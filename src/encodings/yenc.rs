@@ -373,4 +373,12 @@ impl YDecoder {
         self.end_of_line = true;
         self.crc = u32::MAX;
     }
+
+    /// Ends decoding, discarding incomplete framing and a dangling escape.
+    ///
+    /// Preserves the running checksum. Reset before decoding another stream.
+    pub fn finish(&mut self, _output: &mut Vec<u8>) {
+        self.state = DecoderState::Ended;
+        self.escaped = false;
+    }
 }

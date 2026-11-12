@@ -130,6 +130,21 @@ pub const FRAMESET_IGNORED_TAGS: &[(&str, bool, &str)] = &[
 ];
 
 pub const IGNORED_FRAMESET_START_TAG: &[(&str, bool, &str)] = &[
+    (
+        "<frameset></frameset><<frameset>>",
+        false,
+        "<frameset></frameset>&lt;>",
+    ),
+    (
+        "<frameset></frameset><<frameset>>",
+        true,
+        "<frameset></frameset>&lt;>",
+    ),
+    (
+        "<frameset></frameset></html><frameset>",
+        false,
+        "<frameset></frameset>",
+    ),
     ("<body><frameset><d>x</d>", false, "<body><d>x</d>"),
     ("<body><frameset><d>x</d>", true, "<d>x</d>"),
     (

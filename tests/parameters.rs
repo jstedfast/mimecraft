@@ -483,13 +483,16 @@ fn percent_and_character_sequences_cross_encoded_sections() {
             "name*0=prefix; name*1*=utf-8''%C3%A9; name*2=suffix; name*3*=%C3%A9",
             "prefix\u{e9}suffix\u{e9}",
         ),
-        ("name*0*=utf-8''%C; name*1=; name*2*=3%A9", "\u{e9}"),
+        ("name*0*=utf-8''%C; name*1=; name*2*=3%A9", "%C3\u{fffd}"),
         (
             "name*0*=utf-8''%C3; name*1=; name*2*=%A9",
             "\u{fffd}\u{fffd}",
         ),
-        ("name*0*=utf-8''%C; name*1=\"\"; name*2*=3%A9", "3\u{fffd}"),
-        ("name*0*=utf-8''%C; name*1=X; name*2*=3%A9", "X3\u{fffd}"),
+        (
+            "name*0*=utf-8''%C; name*1=\"\"; name*2*=3%A9",
+            "%C3\u{fffd}",
+        ),
+        ("name*0*=utf-8''%C; name*1=X; name*2*=3%A9", "%CX3\u{fffd}"),
     ] {
         for mode in [
             ParameterComplianceMode::Loose,
@@ -533,10 +536,15 @@ fn percent_tolerance_and_pending_escape_diagnostics() {
     for (input, expected, incomplete) in [
         ("name*=utf-8''a+b%20c", "a+b c", false),
         ("name*=utf-8''%XY%20bad", "%XY bad", false),
-        ("name*=utf-8''abc%", "abc", true),
-        ("name*=utf-8''abc%X", "abc", true),
-        ("name*0*=utf-8''%C; name*1=x", "x", true),
-        ("name*0*=utf-8''%C; name*1=; name*2*=3%A9", "\u{e9}", false),
+        ("name*=utf-8''abc%", "abc%", true),
+        ("name*=utf-8''abc%X", "abc%X", true),
+        ("name*0*=utf-8''%C; name*1=x", "%Cx", true),
+        (
+            "name*0*=utf-8''%C; name*1=; name*2*=3%A9",
+            "%C3\u{fffd}",
+            true,
+        ),
+        ("name*0*=utf-8''%C; name*1*=3%A9%", "\u{e9}%", true),
     ] {
         let list = ParameterList::parse(input.as_bytes()).unwrap();
         assert_eq!(list.get("name"), Some(expected));

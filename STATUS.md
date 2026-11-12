@@ -59,12 +59,25 @@ The queued performance work is:
    This remains deferred; `HeaderList::with_capacity` and pre-sized indexing
    when constructing a list from a vector already exist.
 
-Porting has temporarily switched from TNEF to recent MIME compliance features.
+Recent MIME compliance work includes the following upstream ports.
 MimeKit commit `7908d7d10a4ec4a5bc7129178d472b5af5555ba6` (repeated Content-Id
 diagnostics and compact reader state) is ported with its regression tests.
 Commit `3376ca9f093f0603c34a5adeb39535fccbe304d5` is also ported: Base64
 pad-bit validation in encoded words and MIME content. The remaining TNEF work
 above stays queued.
+
+The latest correctness catch-up includes explicit MIME decoder finalization
+(`48f1e35c`), unterminated `From ` detection (`6b00b465`), strict authored
+Content-Type/domain-route validation (`6c493f47`), scripting-disabled HTML
+defaults (`517a908a`), and ignored-frameset handling (`2ba7e617`). Literal
+encoded-word prefixes across address-name splits are covered by regressions;
+the existing whole-input encoder check already preserves them.
+
+Performance ports still pending from the upstream checkout include fused
+transfer-encoding scanning, ancestor-boundary indexing, avoiding unnecessary
+CR masks, and the quoted-printable encoder common path. The parser-cache and
+explicit ContentType-handoff experiments remain on their separate experimental
+branches, not merged into this baseline.
 
 Cryptography, including DKIM, ARC, and DMARC, is excluded from the current scope.
 `LegacyMimeParser` and its event-argument types will not be ported. These are
@@ -313,8 +326,8 @@ Wrapping body encoders default to **CRLF** and can instead emit **LF**, matching
 updated MimeKit encoders. Line-length limits exclude newline bytes.
 Base64 encodes input bytes unchanged, including any input newlines. Its decoder
 is deliberately permissive, not a validation API: non-alphabet bytes (including
-CR and LF) are ignored, padding does not end the stream, and incomplete final
-quartets are not decoded.
+CR and LF) are ignored and padding does not end the stream. `finish` emits
+complete bytes from an unpadded final quartet, discards a lone sextet, and resets.
 
 For Base64 and quoted-printable, use `with_new_line_format` for the default width,
 or `with_options` to select both:
@@ -347,11 +360,11 @@ Content-Transfer-Encoding values; it does not parse an entire header line.
 append input bytes unchanged. Their `default()` selects `ContentEncoding::Unspecified`.
 The configured encoding is only a label: even `SevenBit` does not reject
 non-ASCII bytes, and selecting `Base64` does not perform Base64 encoding.
-Neither codec normalizes line endings; the encoder's `finish` emits nothing.
+Neither codec normalizes line endings; both codecs' `finish` emits nothing.
 Cloning and resetting preserve the label.
 
 `encodings::MimeEncoder` exposes `encoding`, `encode`, `finish`, and `reset`;
-`encodings::MimeDecoder` exposes `encoding`, `decode`, and `reset`. The traits
+`encodings::MimeDecoder` exposes `encoding`, `decode`, `finish`, and `reset`. The traits
 delegate to the existing implementations, keeping their streaming state,
 configuration, SIMD dispatch, and permissive decoding behavior.
 
@@ -391,9 +404,13 @@ Concrete codecs implement standard Rust `Clone`; generic code that needs
 snapshots can require `MimeEncoder + Clone` or `MimeDecoder + Clone`.
 `Clone` is deliberately not a supertrait, allowing `dyn` dispatch.
 Stateless header payload encoders are outside the incremental encoder trait.
-There is no decoder `finish`, and encoder `finish` is not an I/O flush or a
-uniform reset: UU emits a terminator on every call, yEnc retains its checksum,
-and pass-through emits nothing. Use `reset` before starting an independent body.
+Decoder `finish` resolves trailing input: Base64 and UU emit complete trailing
+bytes, quoted-printable and RFC 2231 preserve incomplete escapes literally,
+and yEnc discards incomplete framing/escapes while retaining its checksum.
+UU and yEnc finish in the ended state; repeated decoder finishes emit nothing.
+Empty `decode` is not EOF. Encoder `finish` is not an I/O flush or a uniform
+reset: UU emits a terminator on every call, yEnc retains its checksum, and
+pass-through emits nothing. Use `reset` before starting an independent body.
 
 ### Streaming filters
 
@@ -450,7 +467,7 @@ Pending spaces/tabs are run-length packed, with up to 255 equal bytes per
 discard them, while cloning preserves them.
 
 `BestEncodingFilter` passes bytes through unchanged while tracking NUL/high-bit
-bytes, line lengths, and LF-terminated lines beginning with `From `. It chooses
+bytes, line lengths, and lines beginning with `From `. It chooses
 an encoding using MimeKit's heuristic; it does not apply that encoding or
 measure every encoder's actual output size. The root `EncodingConstraint`
 enum offers `SevenBit`, `EightBit`, and `None` (unrestricted, the enum default).
@@ -459,8 +476,8 @@ enum offers `SevenBit`, `EightBit`, and `None` (unrestricted, the enum default).
 `best_encoding_with_line_length(constraint, limit)` accepts 60..=998 without
 capping the limit at 76 and returns `encodings::InvalidLineLength` on invalid
 input. CR immediately before LF is excluded from line width, even across chunks.
-The final unterminated line counts toward width, but its `From ` marker is not
-recorded until LF arrives, matching MimeKit. `finish` emits nothing and retains
+The final unterminated line counts toward width, and a `From ` marker is
+recognized as soon as its five-byte prefix arrives. `finish` emits nothing and retains
 all statistics; queries do not reset state, cloning preserves it, and `reset`
 clears it.
 
@@ -492,9 +509,9 @@ resetting it. `encoding()` returns its metadata. `EncoderFilter::has_output()`
 tracks output emitted through the filter since construction or reset, excluding
 bytes already in the output buffer.
 
-Adapters retain codec-specific finish behavior: UU always emits a terminator,
-yEnc retains its checksum, and decoder finish passes empty input through the
-decoder without flushing or discarding incomplete groups. Cloning an adapter
+Adapters retain codec-specific finish behavior: the UU encoder emits a terminator,
+yEnc retains its checksum, and decoder finish delegates to explicit decoder
+finalization. Cloning an adapter
 copies its state when the underlying codec implements `Clone`.
 `PassThroughFilter` simply copies bytes; its finish and reset do nothing.
 
@@ -3742,6 +3759,11 @@ modes for SVG/MathML integration, forms, tables, noscript, framesets, formatting
 closures, and depth overflow. A recognized tag name alone does not determine
 whether its contents are raw text.
 
+Scripting is disabled by default in both the tokenizer and structural controller,
+so noscript fallback is tokenized as markup. Explicit scripting-enabled mode
+retains raw-text behavior. `HtmlToHtml` continues to select that mode explicitly
+from its `no_script_handling` option.
+
 Tag/attribute spelling, ordered duplicates, malformed attribute names, and
 DOCTYPE keyword/identifier delimiters are retained. Attribute references
 always decode; data/RCDATA decoding is chosen at construction and stays fixed
@@ -6704,9 +6726,9 @@ let input = b"@relay (note) . example,,@gateway.example:user@example.com";
 let (mut route, consumed) = DomainList::parse_prefix(input)?;
 assert_eq!(route.as_slice(), &["relay.example", "gateway.example"]);
 assert_eq!(&input[consumed..], b":user@example.com");
-route.as_mut_vec().push("another.example".into());
+route.push("another.example")?;
 assert_eq!(route.to_string(), "@relay.example,@gateway.example,@another.example");
-# Ok::<(), mimecraft::DomainListParseError>(())
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Parsing requires an explicit first `@` after optional comments/whitespace, and
@@ -6724,11 +6746,16 @@ commas, but leaves other suffixes for the enclosing parser. Neither API is
 incremental.
 
 `as_slice` provides indexing, iteration, and case-sensitive string lookup;
-`as_mut_vec` provides ordinary vector edits without validation. Vector conversion,
-collection, and owned/borrowed iteration preserve all entries. Display skips
+`push`, `insert`, and `set` validate domains before changing the list; `remove`
+and `clear` support deletion. `try_from_iter` and `TryFrom<Vec<String>>` replace
+unchecked collection/vector construction. Domains must be nonempty dot-atoms
+or bracketed literals without whitespace or controls, with no trimming or DNS
+checks. Unicode and single-label names are supported. Invalid values return
+`DomainListValidationError` with the attempted domain index. Parsing and cloning
+bypass authoring validation to preserve recovered data. Display skips
 empty/whitespace-only entries without modifying storage, joins the remaining
 strings with commas and `@` prefixes, and does no escaping or folding. Arbitrary
-edited strings are **not safe header syntax**.
+recovered strings are **not necessarily safe header syntax**.
 
 `to_ascii()` separately formats validated ASCII route value syntax without
 modifying the list. It skips blank entries, converts names through the IDNA
@@ -6740,10 +6767,9 @@ colon, folding, or terminating newline.
 ```rust
 use mimecraft::DomainList;
 
-let route: DomainList = [" \t ", "b\u{fc}cher.example", "[IPv6: ::1]"]
-    .into_iter().collect();
+let route = DomainList::try_from_iter(["b\u{fc}cher.example", "[IPv6:::1]"])?;
 assert_eq!(route.to_ascii()?, "@xn--bcher-kva.example,@[IPv6:::1]");
-# Ok::<(), mimecraft::DomainListEncodeError>(())
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Unlike MimeKit's route encoder, all emitted names are validated and normalized,
@@ -7174,7 +7200,8 @@ assert_eq!(decoded, b"Cat");
 The decoder follows MimeKit's tolerant scalar behavior: CR is ignored, LF marks
 a new line, all other bytes map to sextets, and space and backtick both represent
 zero. It accepts length prefixes up to 63 bytes and retains incomplete quartets,
-even across malformed line breaks. A zero-length prefix ends decoding; `end`
+even across malformed line breaks. `finish` emits complete trailing bytes up to
+the declared remaining line length and ends decoding. A zero-length prefix also ends decoding; `end`
 trailers and further bodies are ignored until `reset`, which retains the
 original scanning mode. Both UU codecs support cloning and caller-owned output
 buffers. The default `simd` feature accelerates complete encoding lines,
@@ -7356,7 +7383,8 @@ conversion is added.
 Percent decoding is incremental and accepts either case of hex. Invalid
 three-byte escapes pass through literally, without reinterpreting embedded
 percent signs. Incomplete `%` or `%X` sequences stay pending, even if X is
-not hex, until more input arrives or `reset` discards them.
+not hex, until more input arrives, `finish` preserves them literally, or
+`reset` discards them.
 
 `Rfc2047Base64Encoder` writes a complete, independently padded **B payload per
 call**, without MIME line wrapping or a final newline. It reuses the existing
@@ -7537,6 +7565,9 @@ definition wins, with continuation groups positioned at their first encounter.
 Adjacent encoded sections share percent-decoder state and charset conversion,
 allowing escapes and multibyte characters to span sections. Incorrectly quoted
 extended values have only their outer quotes removed, not quoted-pair escapes.
+At the end of an encoded run, pending percent escapes are preserved literally
+before charset conversion. An intervening unencoded section, including an empty
+one, ends that run; incomplete-escape diagnostics are retained.
 
 Missing, empty, or unsupported RFC 2231 charsets use Latin-1, **not** UTF-8-first
 guessing. An incomplete declaration remains part of the payload; a complete
@@ -7654,11 +7685,10 @@ disposition.set_size(None)?; // remove the size parameter
 ```
 
 `ContentType::new`, `set_media_type`, and `set_media_subtype` validate complete
-components using the same ASCII alphabets as the parser, including its
-extra-slash subtype compatibility. This deliberately tightens MimeKit's
-unchecked Content-Type assignments: empty values, comments, whitespace, and
-other malformed components are rejected instead of stored. It is not strict
-RFC validation. `ContentDisposition::new` and `set_disposition` require a
+components as nonempty ASCII MIME tokens, matching MimeKit's checked authoring
+APIs. Whitespace, controls, and token specials (including `/`, `?`, and `=`)
+are rejected without mutation. Parsing and cloning preserve tolerated values
+such as extra-slash subtypes. `ContentDisposition::new` and `set_disposition` require a
 nonempty ASCII atom, including extension dispositions such as `form-data`.
 Failures report the first invalid byte in the affected component and do not
 change the object.

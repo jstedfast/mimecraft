@@ -37,7 +37,7 @@ fn construction_adds_only_wrapper_content_type_without_read_trait_bounds() {
     let entity: MimeEntity<NoIo> = part.into();
     assert!(matches!(entity, MimeEntity::Message(_)));
     assert_eq!(entity.leaf_parts().count(), 0);
-    for subtype in ["news", "global", "RFC822", "x-custom", "rfc822/custom"] {
+    for subtype in ["news", "global", "RFC822", "x-custom"] {
         let part = MessagePart::with_subtype(subtype, MimeMessage::<NoIo>::new()).unwrap();
         assert!(
             part.content_type()
@@ -46,7 +46,7 @@ fn construction_adds_only_wrapper_content_type_without_read_trait_bounds() {
                 .is_mime_type("message", subtype)
         );
     }
-    for subtype in ["", "rfc822 bad", "rfc822\r\nX: bad"] {
+    for subtype in ["", "rfc822 bad", "rfc822\r\nX: bad", "rfc822/custom"] {
         assert!(matches!(
             MessagePart::with_subtype(subtype, MimeMessage::<NoIo>::new()),
             Err(MessagePartError::ContentType(_))

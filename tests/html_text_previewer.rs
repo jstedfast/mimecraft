@@ -149,10 +149,7 @@ fn preview_rules_are_distinct_from_full_html_to_text() {
         ("<body><table>hidden<td>one</td>hidden</table>two", "onetwo"),
         ("<body><div hidden>still visible</div>", "still visible"),
         ("<body><template>still visible</template>", "still visible"),
-        (
-            "<body><noscript>raw &amp; text</noscript>",
-            "raw &amp; text",
-        ),
+        ("<body><noscript>raw &amp; text</noscript>", "raw & text"),
         (
             "<body><svg><![CDATA[omitted]]><text>visible</text></svg>",
             "visible",

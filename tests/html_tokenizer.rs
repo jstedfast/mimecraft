@@ -22,6 +22,32 @@ struct DocTypeCase {
 }
 
 #[test]
+fn scripting_is_disabled_by_default_but_can_be_enabled_explicitly() {
+    let input = "<body><noscript><b>fallback</b></noscript>";
+    let defaults = HtmlTokenizerOptions::default();
+    assert!(!defaults.scripting_enabled);
+    assert!(!HtmlTokenizer::new().tree_construction().scripting_enabled());
+    let tokens = tokenize(input, defaults);
+    assert!(
+        tokens
+            .iter()
+            .any(|token| matches!(token, HtmlToken::Tag(tag) if tag.name() == "b"))
+    );
+    let tokens = tokenize(
+        input,
+        HtmlTokenizerOptions {
+            scripting_enabled: true,
+            ..defaults
+        },
+    );
+    assert!(
+        !tokens
+            .iter()
+            .any(|token| matches!(token, HtmlToken::Tag(tag) if tag.name() == "b"))
+    );
+}
+
+#[test]
 fn canonical_doctype_metadata() {
     let cases: DocTypeCases =
         serde_json::from_str(include_str!("data/html/tokenizer-doctypes.json")).unwrap();
@@ -79,7 +105,10 @@ fn implicit_closures_can_be_acknowledged_without_changing_structure() {
         assert_eq!(tokenizer.position(), position);
     }
     assert_eq!(
-        closures.iter().map(|closed| closed.name.as_str()).collect::<Vec<_>>(),
+        closures
+            .iter()
+            .map(|closed| closed.name.as_str())
+            .collect::<Vec<_>>(),
         ["g", "svg"],
     );
 }

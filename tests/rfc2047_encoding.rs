@@ -101,6 +101,32 @@ fn round_trip(text: &str, options: &EncodeOptions, phrase: bool) -> String {
 }
 
 #[test]
+fn literal_encoded_word_prefixes_survive_internal_word_and_line_splits() {
+    for max_line_length in [60, 78] {
+        let options = EncodeOptions {
+            max_word_length: max_line_length.min(75),
+            ..Default::default()
+        };
+        for length in 0..max_line_length * 2 {
+            let text = format!(":{}=?utf-8?q?hello?=", "a".repeat(length));
+            for phrase in [false, true] {
+                round_trip(&text, &options, phrase);
+            }
+            let mailbox =
+                mimecraft::MailboxAddress::new(&text, "user@example.com".parse().unwrap());
+            let list: mimecraft::AddressList = vec![mailbox.into()].into();
+            let format = mimecraft::AddressHeaderFormatOptions {
+                max_line_length,
+                ..Default::default()
+            };
+            let header = list.to_header_with_options("To", &format).unwrap();
+            let decoded = header.parse_addresses().unwrap();
+            assert_eq!(decoded.mailboxes().next().unwrap().display_name(), text);
+        }
+    }
+}
+
+#[test]
 fn defaults_and_plain_text_are_literal() {
     let options = EncodeOptions::default();
     assert_eq!(options.charset, Charset::UTF8);

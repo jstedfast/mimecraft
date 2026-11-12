@@ -511,10 +511,8 @@ fn mailbox_validates_only_stored_addr_spec_without_mutation() {
         ("user@gr\u{e5}.example.com", Err(NonAscii)),
     ] {
         let mut mailbox = MailboxAddress::new("G\u{f8}ril\r\n", address.parse().unwrap());
-        mailbox
-            .route_mut()
-            .as_mut_vec()
-            .push("bad route\r\n".into());
+        *mailbox.route_mut() =
+            mimecraft::DomainList::parse("@bad\u{2008}route".as_bytes()).unwrap();
         let before = mailbox.clone();
         assert_eq!(mailbox.validate_smtp(), expected);
         assert_eq!(mailbox.validate_smtp_with_options(&LENGTHS), expected);

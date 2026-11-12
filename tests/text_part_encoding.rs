@@ -276,7 +276,7 @@ fn scanner_requires_explicit_structure_and_respects_tokenizer_context() {
         ),
         (
             "<html><head><noscript><meta charset=windows-1252></noscript>",
-            false,
+            true,
         ),
         ("<html><head><meta charset=windows-1252", false),
         ("<html><head><meta charset='windows-1252", false),

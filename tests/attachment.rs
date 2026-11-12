@@ -187,7 +187,7 @@ fn text_encoding_thresholds_and_explicit_parameters_preserve_raw_bytes() {
             b"From sender\r\n".to_vec(),
             ContentEncoding::QuotedPrintable,
         ),
-        (b"From sender".to_vec(), ContentEncoding::SevenBit),
+        (b"From sender".to_vec(), ContentEncoding::QuotedPrintable),
         (b"a\0b".to_vec(), ContentEncoding::Base64),
         (
             b"hello world caf\xe9\r\n".to_vec(),

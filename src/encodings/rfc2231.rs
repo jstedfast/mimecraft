@@ -67,7 +67,8 @@ enum DecoderState {
 /// Accepts upper- and lowercase hex in `%HH` escapes. Invalid three-byte
 /// sequences pass through literally, without reinterpreting any `%` within
 /// them. Incomplete escapes (`%` or `%X`, even when X is not a hex digit) remain
-/// pending until more input arrives or [`reset`](Self::reset) discards them.
+/// pending until more input arrives, [`finish`](Self::finish) preserves them
+/// literally, or [`reset`](Self::reset) discards them.
 ///
 /// Matches MimeKit's `Rfc2231Decoder`: `+` stays `+`, whitespace is preserved,
 /// and no charset conversion, parameter parsing, or strict validation occurs.
@@ -111,6 +112,18 @@ impl Rfc2231Decoder {
     /// Discards any pending percent escape without emitting it.
     pub fn reset(&mut self) {
         self.state = DecoderState::PassThrough;
+    }
+
+    /// Preserves an incomplete percent escape literally and resets pending state.
+    ///
+    /// Repeated calls without more input emit nothing.
+    pub fn finish(&mut self, output: &mut Vec<u8>) {
+        match self.state {
+            DecoderState::PassThrough => {}
+            DecoderState::Percent => output.push(b'%'),
+            DecoderState::FirstByte(byte) => output.extend_from_slice(&[b'%', byte]),
+        }
+        self.reset();
     }
 
     pub(crate) fn has_pending_escape(&self) -> bool {

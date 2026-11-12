@@ -284,17 +284,19 @@ fn encoder_adapter_tracks_only_its_own_output_and_preserves_state() {
 }
 
 #[test]
-fn decoder_finish_retains_incomplete_input_and_into_inner_retains_state() {
+fn decoder_finish_preserves_incomplete_input_and_into_inner_retains_state() {
     let mut filter = DecoderFilter::new(Rfc2231Decoder::new());
     assert_eq!(filter.encoding(), ContentEncoding::Unspecified);
     let mut output = Vec::new();
     filter.filter(b"%4", &mut output);
-    filter.finish(&mut output);
-    filter.finish(&mut output);
-    assert!(output.is_empty());
     let mut cloned = filter.clone();
+    filter.finish(&mut output);
+    filter.finish(&mut output);
+    assert_eq!(output, b"%4");
+    filter.reset();
+    output.clear();
     filter.filter(b"3", &mut output);
-    assert_eq!(output, b"C");
+    assert_eq!(output, b"3");
     assert_eq!(run(&mut cloned, b"1", 1), b"A");
 
     filter.reset();
@@ -308,7 +310,7 @@ fn decoder_finish_retains_incomplete_input_and_into_inner_retains_state() {
 }
 
 #[test]
-fn decoder_finish_delegates_empty_input_to_custom_decoders() {
+fn decoder_finish_delegates_finalization_to_custom_decoders() {
     #[derive(Default)]
     struct EmptyInputDecoder(usize);
     impl MimeDecoder for EmptyInputDecoder {
@@ -316,12 +318,11 @@ fn decoder_finish_delegates_empty_input_to_custom_decoders() {
             ContentEncoding::Unspecified
         }
         fn decode(&mut self, input: &[u8], output: &mut Vec<u8>) {
-            if input.is_empty() {
-                self.0 += 1;
-                output.push(b'!');
-            } else {
-                output.extend_from_slice(input);
-            }
+            output.extend_from_slice(input);
+        }
+        fn finish(&mut self, output: &mut Vec<u8>) {
+            self.0 += 1;
+            output.push(b'!');
         }
         fn reset(&mut self) {
             self.0 = 0;

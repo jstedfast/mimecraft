@@ -61,16 +61,13 @@ fn mailbox_values_encode_names_and_angle_local_only_addresses() {
 #[test]
 fn address_domains_and_routes_use_checked_ascii_without_mutation() {
     let mut value = mailbox("", "user@b\u{fc}cher.example");
-    *value.route_mut() = [
-        "",
+    *value.route_mut() = mimecraft::DomainList::try_from_iter([
         "Relay.EXAMPLE",
-        " \t",
         "b\u{fc}cher.example",
         "[IPv6:::1]",
         "Relay.EXAMPLE",
-    ]
-    .into_iter()
-    .collect();
+    ])
+    .unwrap();
     let displayed = value.to_string();
     let encoded = value.to_ascii().unwrap();
     assert_eq!(
@@ -89,7 +86,7 @@ fn address_domains_and_routes_use_checked_ascii_without_mutation() {
     );
     assert_eq!(value.to_string(), displayed);
 
-    *value.route_mut() = ["", " \t", "\u{a0}"].into_iter().collect();
+    value.route_mut().clear();
     assert_eq!(value.to_ascii().unwrap(), "user@xn--bcher-kva.example");
     assert_eq!(
         mailbox("", "user@[not-an-ip:25]").to_ascii().unwrap(),
@@ -275,14 +272,10 @@ fn invalid_domains_and_edited_routes_report_explicit_errors() {
         assert!(matches!(error.kind(), AddressEncodeErrorKind::Domain(_)));
         assert!(error.source().is_some());
     }
-    for domain in [
-        "bad domain",
-        "evil\r\nBcc:other@example.com",
-        "[broken",
-        "[ok]junk",
-    ] {
+    for domain in ["xn--.com", "bad\u{ff20}example.com", "[\u{e9}]"] {
         let mut value = mailbox("Good", "a@b");
-        *value.route_mut() = ["", "relay.example", domain].into_iter().collect();
+        *value.route_mut() =
+            mimecraft::DomainList::try_from_iter(["first", "relay.example", domain]).unwrap();
         let before = value.to_string();
         let error = value.to_ascii().unwrap_err();
         let AddressEncodeErrorKind::Route(source) = error.kind() else {
@@ -297,7 +290,8 @@ fn invalid_domains_and_edited_routes_report_explicit_errors() {
 #[test]
 fn nested_failure_paths_include_lists_groups_and_original_route_indexes() {
     let mut invalid = mailbox("", "a@b");
-    *invalid.route_mut() = ["", "relay.example", "bad domain"].into_iter().collect();
+    *invalid.route_mut() =
+        mimecraft::DomainList::try_from_iter(["first", "relay.example", "xn--.com"]).unwrap();
     let inner = GroupAddress::new(
         "Inner",
         vec![

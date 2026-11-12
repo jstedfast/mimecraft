@@ -384,19 +384,20 @@ fn into_parts_recovers_unread_output_and_pending_filter_state() {
 }
 
 #[test]
-fn new_preserves_existing_filter_state_and_decoder_eof_does_not_reset_it() {
+fn new_preserves_existing_filter_state_and_decoder_eof_finalizes_it() {
     let mut decoder = Base64Decoder::new();
     decoder.decode(b"Q", &mut Vec::new());
     let mut reader = FilteredReader::new(&b"2F0"[..], DecoderFilter::new(decoder));
     assert_eq!(collect(&mut reader, 1), b"Cat");
 
     let mut reader = FilteredReader::new(&b"name%2"[..], DecoderFilter::new(Rfc2231Decoder::new()));
-    assert_eq!(collect(&mut reader, 1), b"name");
+    assert_eq!(collect(&mut reader, 1), b"name%2");
     let (_, mut filter, remaining) = reader.into_parts();
     assert!(remaining.is_empty());
     let mut output = Vec::new();
+    filter.reset();
     filter.filter(b"0", &mut output);
-    assert_eq!(output, b" ");
+    assert_eq!(output, b"0");
 }
 
 #[test]

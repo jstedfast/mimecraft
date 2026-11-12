@@ -78,6 +78,9 @@ impl PassThroughDecoder {
         output.extend_from_slice(input);
     }
 
+    /// Emits nothing because this decoder never buffers input.
+    pub fn finish(&mut self, _output: &mut Vec<u8>) {}
+
     /// Does nothing; there is no pending state, and the metadata is retained.
     pub fn reset(&mut self) {}
 }

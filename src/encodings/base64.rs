@@ -325,10 +325,9 @@ impl Base64Encoder {
 /// are ignored, and decoding continues after padded quartets so independently
 /// padded blocks can be concatenated. This is **not** a strict Base64 validator.
 ///
-/// Only complete quartets produce output. An incomplete final quartet remains
-/// pending until more input arrives or [`reset`](Self::reset) is called; missing
-/// padding is not synthesized. Excess padding is processed as additional
-/// quartets, following the same positional rules as other input.
+/// Decoding emits complete quartets; [`finish`](Self::finish) emits complete
+/// bytes from an unpadded final quartet. Excess padding is processed as
+/// additional quartets, following the same positional rules as other input.
 #[derive(Clone, Debug, Default)]
 pub struct Base64Decoder {
     value: u32,
@@ -426,5 +425,20 @@ impl Base64Decoder {
         self.value = 0;
         self.padding = 0;
         self.count = 0;
+    }
+
+    /// Emits complete bytes from a final partial quartet, discarding a lone sextet.
+    ///
+    /// Resets the pending state. Repeated calls without more input emit nothing.
+    pub fn finish(&mut self, output: &mut Vec<u8>) {
+        if self.count >= 2 && self.padding & (3 << (self.count - 2)) == 0 {
+            // The first two sextets must not be padding. A third padding
+            // character still permits the first decoded byte.
+            output.push((self.value >> ((self.count - 2) * 6 + 4)) as u8);
+            if self.count == 3 && self.padding & 1 == 0 {
+                output.push((self.value >> 2) as u8);
+            }
+        }
+        self.reset();
     }
 }

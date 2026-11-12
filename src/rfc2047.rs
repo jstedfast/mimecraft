@@ -265,6 +265,14 @@ impl<'a> Writer<'a> {
     }
 
     fn flush(&mut self) {
+        // Finish the entire adjacent-word run, not each word: broken mailers
+        // can split escapes and quartets across encoded-word boundaries.
+        if let Some(run) = &self.run {
+            match run.encoding {
+                WordEncoding::B => self.base64.finish(&mut self.scratch),
+                WordEncoding::Q => self.quoted.finish(&mut self.scratch),
+            }
+        }
         self.flush_text();
         self.base64.reset();
         self.quoted.reset();

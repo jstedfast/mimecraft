@@ -191,6 +191,8 @@ fn content_type_construction_and_component_setters() {
     for (token, offset) in [
         ("", 0),
         ("text/plain", 4),
+        ("te?xt", 2),
+        ("te=xt", 2),
         ("text ", 4),
         ("x\r\nY", 1),
         ("x\u{e9}", 1),
@@ -207,6 +209,7 @@ fn content_type_construction_and_component_setters() {
         ("plain; charset=x", 5),
         ("a b", 1),
         ("a=b", 1),
+        ("multipart/mixed", 9),
         ("x\u{e9}", 1),
     ] {
         let before = value.clone();
@@ -219,30 +222,37 @@ fn content_type_construction_and_component_setters() {
         assert_eq!(value, before);
         assert_eq!(ContentType::new("text", token).unwrap_err(), error);
     }
-    let value = ContentType::new("multipart", "multipart/mixed").unwrap();
-    assert_eq!(
-        ContentType::parse(value.mime_type().as_bytes()).unwrap(),
-        value
-    );
+    let value = ContentType::parse(b"multipart/multipart/mixed; boundary=x").unwrap();
+    let mut clone = value.clone();
+    assert_eq!(clone, value);
+    assert!(ContentType::new(value.media_type(), value.media_subtype()).is_err());
+    assert!(clone.set_media_subtype("multipart/mixed").is_err());
+    assert_eq!(clone, value);
+    clone.set_media_subtype("mixed").unwrap();
+    assert_eq!(value.media_subtype(), "multipart/mixed");
+    assert_eq!(clone.boundary(), Some("x"));
 }
 
 #[test]
-fn authored_tokens_match_parser_alphabets() {
+fn authored_content_types_use_mime_tokens_and_dispositions_use_atoms() {
     for byte in 0u8..128 {
         let token = format!("x{}y", char::from(byte));
         let atom = byte.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~".contains(&byte);
-        let media_type = atom && byte != b'/';
-        let media_subtype = (33..127).contains(&byte) && !b"()<>@,;:\\\"[]?=".contains(&byte);
+        let mime_token = (33..127).contains(&byte) && !b"()<>@,;:\\\"/[]?=".contains(&byte);
         let result = ContentType::new(&token, "plain");
-        assert_eq!(result.is_ok(), media_type, "media type byte {byte}");
-        if let Ok(value) = result {
+        assert_eq!(result.is_ok(), mime_token, "media type byte {byte}");
+        // MimeKit's legacy type parser does not accept dots, even though
+        // authoring correctly accepts the full MIME-token alphabet.
+        if let Ok(value) = result
+            && byte != b'.'
+        {
             assert_eq!(
                 ContentType::parse(value.mime_type().as_bytes()).unwrap(),
                 value
             );
         }
         let result = ContentType::new("application", &token);
-        assert_eq!(result.is_ok(), media_subtype, "subtype byte {byte}");
+        assert_eq!(result.is_ok(), mime_token, "subtype byte {byte}");
         if let Ok(value) = result {
             assert_eq!(
                 ContentType::parse(value.mime_type().as_bytes()).unwrap(),

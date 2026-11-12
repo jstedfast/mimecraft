@@ -69,7 +69,6 @@ fn default_construction_generates_a_boundary_and_needs_no_source_traits() {
         "related",
         "report",
         "x-custom",
-        "multipart/mixed",
     ] {
         let part: Multipart<()> = Multipart::new(subtype).unwrap();
         let boundary = part.boundary().unwrap().unwrap();
@@ -87,7 +86,7 @@ fn default_construction_generates_a_boundary_and_needs_no_source_traits() {
         assert!(part.preamble().is_empty());
         assert!(part.epilogue().is_empty());
     }
-    for subtype in ["", "bad subtype", "bad\r\n", "\u{e9}"] {
+    for subtype in ["", "bad subtype", "bad\r\n", "\u{e9}", "multipart/mixed"] {
         assert!(
             matches!(
                 Multipart::<()>::new(subtype),

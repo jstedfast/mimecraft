@@ -65,9 +65,8 @@ fn names_escape_quotes_and_backslashes_without_decoding_again() {
 #[test]
 fn routes_force_angles_and_skip_only_blank_domains() {
     let mut mailbox = mailbox("Rusty McRouterson", "rusty@final-destination.com");
-    *mailbox.route_mut() = ["comcast.net", "forward.com", "geek.net"]
-        .into_iter()
-        .collect();
+    *mailbox.route_mut() =
+        mimecraft::DomainList::try_from_iter(["comcast.net", "forward.com", "geek.net"]).unwrap();
     assert_eq!(
         mailbox.to_string(),
         "\"Rusty McRouterson\" <@comcast.net,@forward.com,@geek.net:rusty@final-destination.com>"
@@ -77,22 +76,19 @@ fn routes_force_angles_and_skip_only_blank_domains() {
         mailbox.to_string(),
         "<@comcast.net,@forward.com,@geek.net:rusty@final-destination.com>"
     );
-    *mailbox.route_mut() = ["", " \t", "\u{a0}"].into_iter().collect();
+    mailbox.route_mut().clear();
     assert_eq!(mailbox.to_string(), "rusty@final-destination.com");
     mailbox.set_display_name("Rusty");
     assert_eq!(
         mailbox.to_string(),
         "\"Rusty\" <rusty@final-destination.com>"
     );
-    *mailbox.route_mut() = [
-        "",
+    *mailbox.route_mut() = mimecraft::DomainList::try_from_iter([
         "Relay.EXAMPLE",
-        " ",
         "b\u{fc}cher.example",
         "Relay.EXAMPLE",
-    ]
-    .into_iter()
-    .collect();
+    ])
+    .unwrap();
     assert_eq!(
         mailbox.to_string(),
         "\"Rusty\" <@Relay.EXAMPLE,@b\u{fc}cher.example,@Relay.EXAMPLE:rusty@final-destination.com>"
@@ -153,18 +149,15 @@ fn nested_groups_and_lists_preserve_boundaries_and_duplicate_order() {
 #[test]
 fn display_preserves_controls_and_does_not_fold_or_validate() {
     let mut mailbox = mailbox("A\r\nB\t\0C", "user@example.com");
-    mailbox
-        .route_mut()
-        .as_mut_vec()
-        .push("bad domain\r\n".into());
+    *mailbox.route_mut() = mimecraft::DomainList::parse("@bad\u{2008}domain".as_bytes()).unwrap();
     assert_eq!(
         mailbox.to_string(),
-        "\"A\r\nB\t\0C\" <@bad domain\r\n:user@example.com>"
+        "\"A\r\nB\t\0C\" <@bad\u{2008}domain:user@example.com>"
     );
     let group = GroupAddress::new("G\r\nH\0", vec![mailbox.into()].into());
     assert_eq!(
         group.to_string(),
-        "G\r\nH\0: \"A\r\nB\t\0C\" <@bad domain\r\n:user@example.com>;"
+        "G\r\nH\0: \"A\r\nB\t\0C\" <@bad\u{2008}domain:user@example.com>;"
     );
     let long = "x".repeat(1000);
     assert_eq!(

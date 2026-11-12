@@ -652,7 +652,7 @@ pub enum ParameterIssueKind {
         /// The charset selected for the unlabelled bytes.
         selected: Charset,
     },
-    /// A pending percent escape was discarded at a reset or end of the value.
+    /// An encoded run ended with an incomplete percent escape, preserved literally.
     IncompletePercentEscape,
 }
 
@@ -1088,6 +1088,15 @@ fn decode_extended(
                 run_range = Some(part.value_range.clone());
             }
             if !parts.get(index + 1).is_some_and(|next| next.encoded) {
+                if hex.has_pending_escape() {
+                    issues.push(ParameterIssue {
+                        range: group_range.clone(),
+                        kind: ParameterIssueKind::IncompletePercentEscape,
+                    });
+                }
+                // Preserve a trailing percent escape before finalizing the
+                // charset decoder, but keep escapes across adjacent sections.
+                hex.finish(&mut bytes);
                 flush_extended_bytes(
                     &mut output,
                     &mut bytes,
@@ -1109,22 +1118,7 @@ fn decode_extended(
             } else {
                 output.push_str(&text);
             }
-            if hex.has_pending_escape() {
-                issues.push(ParameterIssue {
-                    range: group_range.clone(),
-                    kind: ParameterIssueKind::IncompletePercentEscape,
-                });
-            }
-            hex.reset();
         }
-        // An empty unquoted section deliberately does not reset percent state.
-        // Character state, however, was flushed at the preceding encoded run.
-    }
-    if hex.has_pending_escape() {
-        issues.push(ParameterIssue {
-            range: group_range,
-            kind: ParameterIssueKind::IncompletePercentEscape,
-        });
     }
     (output, charset)
 }

@@ -82,42 +82,113 @@ fn canonical_null_and_unicode_whitespace_domains() {
 fn vector_edits_preserve_order_and_exact_strings() {
     let mut route = DomainList::new();
     assert!(route.is_empty());
-    let domains = route.as_mut_vec();
-    domains.push("domain2".into());
-    domains.insert(0, "domain0".into());
-    domains.insert(1, "domain1".into());
+    route.push("domain2").unwrap();
+    route.insert(0, "domain0").unwrap();
+    route.insert(1, "domain1").unwrap();
     assert_eq!(route.len(), 3);
     assert_eq!(route.as_slice(), &["domain0", "domain1", "domain2"]);
     assert!(route.as_slice().contains(&"domain1".into()));
     assert!(!route.as_slice().contains(&"DOMAIN1".into()));
-    assert_eq!(route.as_mut_vec().remove(0), "domain0");
-    route.as_mut_vec()[0] = "DOMAIN1".into();
-    route.as_mut_vec().push("DOMAIN1".into());
+    assert_eq!(route.remove(0), "domain0");
+    route.set(0, "DOMAIN1").unwrap();
+    route.push("DOMAIN1").unwrap();
     assert_eq!(route.to_string(), "@DOMAIN1,@domain2,@DOMAIN1");
     let copy = route.clone();
-    route.as_mut_vec().clear();
+    route.clear();
     assert!(route.is_empty());
     assert_eq!(copy.into_vec(), ["DOMAIN1", "domain2", "DOMAIN1"]);
 }
 
 #[test]
-fn construction_iteration_and_display_do_not_validate_or_mutate() {
-    let route: DomainList = ["route1", "  \t\t ", "route2", "", "\u{2008}"]
-        .into_iter()
-        .collect();
+fn construction_iteration_and_display_preserve_order_and_spelling() {
+    let route = DomainList::try_from_iter(["route1", "route2"]).unwrap();
     assert_eq!(route.to_string(), "@route1,@route2");
-    assert_eq!(route.len(), 5);
+    assert_eq!(route.len(), 2);
     assert_eq!(
         (&route).into_iter().map(String::as_str).collect::<Vec<_>>(),
-        ["route1", "  \t\t ", "route2", "", "\u{2008}"]
+        ["route1", "route2"]
     );
     assert_eq!(
-        DomainList::from(route.clone().into_iter().collect::<Vec<_>>()),
+        DomainList::try_from(route.clone().into_vec()).unwrap(),
         route
     );
-    let raw: DomainList = [" a b ", "x\r\nY:z"].into_iter().collect();
-    assert_eq!(raw.to_string(), "@ a b ,@x\r\nY:z");
     assert_eq!(DomainList::default(), DomainList::new());
+}
+
+#[test]
+fn authored_domains_are_validated_without_dns_checks_or_normalization() {
+    for domain in [
+        "localhost",
+        "Example.com",
+        "b\u{fc}cher.example",
+        "mail_host.example",
+        "[127.0.0.1]",
+        "[IPv6:2001:db8::1]",
+        "[opaque-literal]",
+        "[]",
+        "\u{1f600}.example",
+        "[\u{e9}]",
+    ] {
+        let mut list = DomainList::try_from_iter([domain]).unwrap();
+        list.push(domain).unwrap();
+        list.insert(0, domain).unwrap();
+        list.set(1, "other.example").unwrap();
+        list.set(1, domain).unwrap();
+        assert_eq!(list.as_slice(), [domain, domain, domain]);
+    }
+    for domain in [
+        "",
+        " ",
+        " a",
+        "a ",
+        "a..b",
+        ".a",
+        "a.",
+        "a\r\nb",
+        "a\0b",
+        "bad domain",
+        "a@b",
+        "a,b",
+        "a:b",
+        "[unclosed",
+        "[a]junk",
+        "[a\\b]",
+        "[a[b]",
+        "[a b]",
+        "exam\u{2008}ple.com",
+        "a\u{85}b",
+        "[\u{a0}]",
+    ] {
+        let mut list = DomainList::try_from_iter(["good.example"]).unwrap();
+        let original = list.clone();
+        let error = list.push(domain).unwrap_err();
+        assert_eq!(error.domain_index(), 1, "{domain:?}");
+        assert!(error.to_string().contains("index 1"));
+        assert!(list.insert(0, domain).is_err());
+        assert!(list.set(0, domain).is_err());
+        assert_eq!(list, original);
+        assert_eq!(
+            DomainList::try_from_iter(["good", domain])
+                .unwrap_err()
+                .domain_index(),
+            1
+        );
+        assert!(DomainList::try_from(vec![domain.to_owned()]).is_err());
+    }
+}
+
+#[test]
+fn recovered_domains_can_be_parsed_and_cloned_but_not_authored() {
+    let route = DomainList::parse("@exam\u{2008}ple.com".as_bytes()).unwrap();
+    assert_eq!(route.as_slice(), ["exam\u{2008}ple.com"]);
+    assert!(DomainList::try_from_iter(&route).is_err());
+    let mailbox =
+        mimecraft::MailboxAddress::parse("<@exam\u{2008}ple.com:user@example.com>".as_bytes())
+            .unwrap();
+    let mut clone = mailbox.clone();
+    assert_eq!(clone.route(), &route);
+    clone.route_mut().set(0, "other.example").unwrap();
+    assert_eq!(mailbox.route(), &route);
 }
 
 #[test]

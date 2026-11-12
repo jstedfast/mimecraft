@@ -109,19 +109,20 @@ fn replacing_address_preserves_name_and_route_diagnostics() {
 }
 
 #[test]
-fn route_edits_preserve_other_fields_and_remain_unvalidated() {
+fn checked_route_edits_preserve_other_fields() {
     let mut mailbox = MailboxAddress::parse(b"Andr\xe9 <caf\xe9@x>").unwrap();
     let issues = mailbox.display_name_issues().to_vec();
-    *mailbox.route_mut() = ["relay.example", "relay.example"].into_iter().collect();
-    mailbox.route_mut().as_mut_vec().push("not a domain".into());
+    *mailbox.route_mut() =
+        mimecraft::DomainList::try_from_iter(["relay.example", "relay.example"]).unwrap();
+    assert!(mailbox.route_mut().push("not a domain").is_err());
     assert_eq!(
         mailbox.route().as_slice(),
-        &["relay.example", "relay.example", "not a domain"]
+        &["relay.example", "relay.example"]
     );
-    assert!(mailbox.route().to_ascii().is_err());
+    assert!(mailbox.route().to_ascii().is_ok());
     assert_eq!(mailbox.display_name_issues(), issues);
     assert!(mailbox.address().had_latin1_fallback());
-    mailbox.route_mut().as_mut_vec().clear();
+    mailbox.route_mut().clear();
     assert!(mailbox.route().is_empty());
 }
 
@@ -191,7 +192,7 @@ fn cloned_groups_and_mailboxes_can_be_edited_independently() {
     };
     member.set_display_name("New");
     member.set_address("new@y".parse().unwrap());
-    member.route_mut().as_mut_vec().clear();
+    member.route_mut().clear();
     let original = group.members().mailboxes().next().unwrap();
     assert_eq!(group.display_name(), "Friends");
     assert_eq!(original.display_name(), "Andr\u{e9}");

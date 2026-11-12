@@ -9,7 +9,7 @@ use crate::{
     charsets::{Charset, CharsetError},
     content_header::{parse_parameters, skip_cfws, validate_token},
     header_format::format_header,
-    parse_utils::{is_media_subtype, is_media_type},
+    parse_utils::{is_media_subtype, is_media_type, is_token},
 };
 
 /// A decoded Content-Type header value with construction and editing support.
@@ -99,11 +99,9 @@ impl ContentType {
 
     /// Creates a content type with an empty parameter list.
     ///
-    /// Components must be nonempty and use the same ASCII alphabets as this
-    /// type's parser, without comments or surrounding whitespace. This includes
-    /// MimeKit's extra-slash subtype compatibility; it is not strict RFC
-    /// validation. Unlike MimeKit's unchecked constructor, malformed components
-    /// cannot be assigned.
+    /// Components must be nonempty ASCII MIME tokens, without whitespace,
+    /// controls, or token specials. Parsing and cloning remain tolerant of
+    /// malformed components such as subtypes containing extra slashes.
     ///
     /// ```
     /// use mimecraft::ContentType;
@@ -122,12 +120,12 @@ impl ContentType {
     pub fn new(media_type: &str, media_subtype: &str) -> Result<Self, ContentHeaderParseError> {
         validate_token(
             media_type,
-            is_media_type,
+            is_token,
             ContentHeaderParseErrorKind::InvalidMediaType,
         )?;
         validate_token(
             media_subtype,
-            is_media_subtype,
+            is_token,
             ContentHeaderParseErrorKind::InvalidMediaSubtype,
         )?;
         Ok(Self {
@@ -261,7 +259,7 @@ impl ContentType {
     pub fn set_media_type(&mut self, value: &str) -> Result<(), ContentHeaderParseError> {
         validate_token(
             value,
-            is_media_type,
+            is_token,
             ContentHeaderParseErrorKind::InvalidMediaType,
         )?;
         self.media_type = value.to_owned();
@@ -282,7 +280,7 @@ impl ContentType {
     pub fn set_media_subtype(&mut self, value: &str) -> Result<(), ContentHeaderParseError> {
         validate_token(
             value,
-            is_media_subtype,
+            is_token,
             ContentHeaderParseErrorKind::InvalidMediaSubtype,
         )?;
         self.media_subtype = value.to_owned();

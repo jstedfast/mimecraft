@@ -16,7 +16,7 @@ pub struct HtmlTokenizerOptions {
     pub decode_character_references: bool,
     /// Discard incomplete tags at EOF instead of returning encoded literal text.
     pub ignore_truncated_tags: bool,
-    /// Treat HTML noscript contents as raw text.
+    /// Treat HTML noscript contents as raw text. Disabled by default.
     pub scripting_enabled: bool,
     /// Positive limit on distinct structural stack entries; identical runs fold.
     pub max_element_depth: usize,
@@ -27,7 +27,7 @@ impl Default for HtmlTokenizerOptions {
         Self {
             decode_character_references: true,
             ignore_truncated_tags: false,
-            scripting_enabled: true,
+            scripting_enabled: false,
             max_element_depth: 4096,
         }
     }

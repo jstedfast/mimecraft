@@ -80,8 +80,8 @@ impl<R> MessagePart<R> {
 
     /// Takes a message with an explicitly selected message subtype.
     ///
-    /// Uses default header formatting and [`ContentType::new`]'s compatibility
-    /// component rules, including extra slashes in subtypes. This is not strict
+    /// Uses default header formatting and [`ContentType::new`]'s nonempty ASCII
+    /// MIME-token rules, rejecting extra slashes in subtypes. This is not
     /// subtype-specific validation or transport preparation.
     ///
     /// # Errors

@@ -468,10 +468,11 @@ fn new_retains_codec_state_and_decoder_finish_keeps_incomplete_escapes() {
     writer.write_all(b"name%2").unwrap();
     writer.finish().unwrap();
     let (mut output, mut filter, pending) = writer.into_parts();
-    assert_eq!(output, b"name");
+    assert_eq!(output, b"name%2");
     assert!(pending.is_empty());
+    filter.reset();
     filter.filter(b"0", &mut output);
-    assert_eq!(output, b"name ");
+    assert_eq!(output, b"name%20");
 }
 
 #[test]
