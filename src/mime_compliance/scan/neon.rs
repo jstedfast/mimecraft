@@ -4,13 +4,34 @@
 
 #![allow(unsafe_code)]
 
+use super::clean::{Clean, Run, Validation, escapes_valid};
 use super::{CURRENT, HIGH, LOW, Line, invalid_utf8_tail};
+use crate::mime_compliance::encoding::base64::simd::is_alphabet;
 use std::arch::aarch64::*;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Accelerator(());
 
 impl Accelerator {
+    pub fn clean_content(
+        self,
+        input: &[u8],
+        validation: Validation,
+        column: u64,
+        cr: bool,
+        null: bool,
+        eight: bool,
+    ) -> Clean {
+        // SAFETY: the token verifies NEON; all loads fit the real input slice.
+        unsafe {
+            match validation {
+                Validation::Base64 => clean_neon::<1>(input, column, cr, null, eight),
+                Validation::QuotedPrintable => clean_neon::<2>(input, column, cr, null, eight),
+                _ => clean_neon::<0>(input, column, cr, null, eight),
+            }
+        }
+    }
+
     pub fn detect() -> Option<Self> {
         (cfg!(target_endian = "little") && std::arch::is_aarch64_feature_detected!("neon"))
             .then_some(Self(()))
@@ -27,6 +48,72 @@ impl Accelerator {
         // SAFETY: the token verifies little-endian NEON; loads stay in the slice.
         unsafe { utf8_neon(input) }
     }
+}
+
+#[target_feature(enable = "neon")]
+fn clean_neon<const MODE: u8>(
+    input: &[u8],
+    column: u64,
+    cr: bool,
+    null: bool,
+    eight: bool,
+) -> Clean {
+    let mut run = Run::new(column, cr);
+    while input.len() - run.clean.examined >= 16 {
+        let offset = run.clean.examined;
+        // SAFETY: the complete 16-byte load fits the checked window.
+        let block = unsafe { vld1q_u8(input.as_ptr().add(offset)) };
+        if MODE != 1 && ((eight && vmaxvq_u8(block) >= 128) || (null && vminvq_u8(block) == 0)) {
+            break;
+        }
+        let alphabet = if MODE == 1 {
+            mask(is_alphabet(block))
+        } else {
+            0
+        };
+        if MODE == 1 && alphabet == 0xffff {
+            if !run.push(input, 16, 0, 0, alphabet) {
+                break;
+            }
+            continue;
+        }
+        let lf = mask(vceqq_u8(block, vdupq_n_u8(10)));
+        let equals = if MODE == 2 {
+            mask(vceqq_u8(block, vdupq_n_u8(61)))
+        } else {
+            0
+        };
+        let cr = if lf != 0 || equals != 0 || MODE == 1 {
+            mask(vceqq_u8(block, vdupq_n_u8(13)))
+        } else {
+            0
+        };
+        if equals != 0 {
+            // Unsigned subtraction folds the desired ASCII range to 0..N.
+            let letters = vcltq_u8(
+                vsubq_u8(vorrq_u8(block, vdupq_n_u8(32)), vdupq_n_u8(b'a')),
+                vdupq_n_u8(6),
+            );
+            let digits = vcltq_u8(vsubq_u8(block, vdupq_n_u8(b'0')), vdupq_n_u8(10));
+            let hex = mask(vorrq_u8(letters, digits));
+            if !escapes_valid(input, offset, 16, equals, hex, cr, lf) {
+                break;
+            }
+        }
+        if MODE == 1 {
+            let whitespace = mask(vorrq_u8(
+                vceqq_u8(block, vdupq_n_u8(32)),
+                vceqq_u8(block, vdupq_n_u8(9)),
+            ));
+            if alphabet | lf | cr | whitespace != 0xffff {
+                break;
+            }
+        }
+        if !run.push(input, 16, lf, cr, alphabet) {
+            break;
+        }
+    }
+    run.clean
 }
 
 #[target_feature(enable = "neon")]

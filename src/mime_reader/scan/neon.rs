@@ -46,15 +46,21 @@ fn scan_neon(input: &[u8], multipart: bool, mbox: bool, cr: bool) -> Scan {
     let f = vdupq_n_u8(b'F');
     let r = vdupq_n_u8(b'r');
     let mut scan = Scan::default();
-    let mut carry = u32::from(cr);
     // Unlike MimeKit's sentinel-backed buffer, all shifted loads must fit
     // the real slice. The scalar tail also preserves partial marker prefixes.
     while input.len() - scan.len >= 18 {
         // SAFETY: all 16 bytes fit the 18-byte window checked above.
         let bytes = unsafe { vld1q_u8(input.as_ptr().add(scan.len)) };
         let lf = mask(vceqq_u8(bytes, vlf));
-        let cr = mask(vceqq_u8(bytes, vcr));
         if lf != 0 {
+            // Newline-free blocks need no CR mask; guard the preceding-byte
+            // check when an LF occupies the first lane of the input slice.
+            let cr_mask = mask(vceqq_u8(bytes, vcr));
+            let carry = u32::from(if scan.len == 0 {
+                cr
+            } else {
+                input[scan.len - 1] == b'\r'
+            });
             let mut possible = vdupq_n_u8(0);
             if multipart || mbox {
                 // SAFETY: the shifted vectors end at len+17 and len+18.
@@ -72,14 +78,17 @@ fn scan_neon(input: &[u8], multipart: bool, mbox: bool, cr: bool) -> Scan {
                 }
             }
             let candidates = lf & mask(possible);
-            let crlf = lf & ((cr << 1) | carry);
+            let crlf = lf & ((cr_mask << 1) | carry);
             if scan.push_masks(lf, crlf, candidates) {
                 return scan;
             }
         }
-        // A CR in the final lane can pair with LF in the next vector's lane 0.
-        carry = cr >> 15;
         scan.len += 16;
     }
-    scan.finish(input, multipart, mbox, carry != 0)
+    let cr = if scan.len == 0 {
+        cr
+    } else {
+        input[scan.len - 1] == b'\r'
+    };
+    scan.finish(input, multipart, mbox, cr)
 }

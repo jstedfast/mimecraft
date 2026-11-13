@@ -63,15 +63,21 @@ fn scan_sse2(input: &[u8], multipart: bool, mbox: bool, cr: bool) -> Scan {
     let f = _mm_set1_epi8(b'F' as i8);
     let r = _mm_set1_epi8(b'r' as i8);
     let mut scan = Scan::default();
-    let mut carry = u32::from(cr);
     // MimeKit's shifted loads can include its sentinel. Here all three loads
     // must fit the actual slice, leaving at most 17 bytes for the scalar tail.
     while input.len() - scan.len >= 18 {
         // SAFETY: [len..len+16) lies within the 18 bytes checked above.
         let bytes = unsafe { _mm_loadu_si128(input.as_ptr().add(scan.len).cast()) };
         let lf = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, vlf)) as u32;
-        let cr = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, vcr)) as u32;
         if lf != 0 {
+            // Newline-free blocks need no CR mask. At lane zero consult the
+            // preceding byte, guarding the beginning of the borrowed slice.
+            let cr_mask = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, vcr)) as u32;
+            let carry = u32::from(if scan.len == 0 {
+                cr
+            } else {
+                input[scan.len - 1] == b'\r'
+            });
             let mut possible = _mm_setzero_si128();
             if multipart || mbox {
                 // SAFETY: shifted loads end at len+17 and len+18, in bounds.
@@ -92,17 +98,19 @@ fn scan_sse2(input: &[u8], multipart: bool, mbox: bool, cr: bool) -> Scan {
                 }
             }
             let candidates = lf & _mm_movemask_epi8(possible) as u32;
-            let crlf = lf & ((cr << 1) | carry);
+            let crlf = lf & ((cr_mask << 1) | carry);
             if scan.push_masks(lf, crlf, candidates) {
                 return scan;
             }
         }
-        // Carry a final CR into lane zero of the next vector, so a split CRLF
-        // has exactly the same line count and format as the per-line scanner.
-        carry = cr >> 15;
         scan.len += 16;
     }
-    scan.finish(input, multipart, mbox, carry != 0)
+    let cr = if scan.len == 0 {
+        cr
+    } else {
+        input[scan.len - 1] == b'\r'
+    };
+    scan.finish(input, multipart, mbox, cr)
 }
 
 #[target_feature(enable = "avx2,popcnt")]
@@ -113,14 +121,18 @@ fn scan_avx2(input: &[u8], multipart: bool, mbox: bool, cr: bool) -> Scan {
     let f = _mm256_set1_epi8(b'F' as i8);
     let r = _mm256_set1_epi8(b'r' as i8);
     let mut scan = Scan::default();
-    let mut carry = u32::from(cr);
     // No sentinel: the p+2 load must end within the borrowed slice.
     while input.len() - scan.len >= 34 {
         // SAFETY: the loop bounds cover all 32 bytes of this unaligned load.
         let bytes = unsafe { _mm256_loadu_si256(input.as_ptr().add(scan.len).cast()) };
         let lf = _mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, vlf)) as u32;
-        let cr = _mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, vcr)) as u32;
         if lf != 0 {
+            let cr_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, vcr)) as u32;
+            let carry = u32::from(if scan.len == 0 {
+                cr
+            } else {
+                input[scan.len - 1] == b'\r'
+            });
             let mut possible = _mm256_setzero_si256();
             if multipart || mbox {
                 // SAFETY: both shifted vectors fit the checked 34-byte window.
@@ -142,13 +154,17 @@ fn scan_avx2(input: &[u8], multipart: bool, mbox: bool, cr: bool) -> Scan {
                 }
             }
             let candidates = lf & _mm256_movemask_epi8(possible) as u32;
-            let crlf = lf & ((cr << 1) | carry);
+            let crlf = lf & ((cr_mask << 1) | carry);
             if scan.push_masks(lf, crlf, candidates) {
                 return scan;
             }
         }
-        carry = cr >> 31;
         scan.len += 32;
     }
-    scan.finish(input, multipart, mbox, carry != 0)
+    let cr = if scan.len == 0 {
+        cr
+    } else {
+        input[scan.len - 1] == b'\r'
+    };
+    scan.finish(input, multipart, mbox, cr)
 }

@@ -73,11 +73,22 @@ defaults (`517a908a`), and ignored-frameset handling (`2ba7e617`). Literal
 encoded-word prefixes across address-name splits are covered by regressions;
 the existing whole-input encoder check already preserves them.
 
-Performance ports still pending from the upstream checkout include fused
-transfer-encoding scanning, ancestor-boundary indexing, avoiding unnecessary
-CR masks, and the quoted-printable encoder common path. The parser-cache and
-explicit ContentType-handoff experiments remain on their separate experimental
-branches, not merged into this baseline.
+The performance catch-up includes fused structural/transfer-encoding validation
+(`03097f04`), ancestor-boundary indexing (`89a63228`), avoiding unnecessary CR
+masks (`a9579f8c`), and the quoted-printable encoder common path (`a4a10817`).
+The encoder avoids redundant wrapping checks for ordinary saved bytes while
+retaining exact output at all supported widths and both newline formats.
+The parser-cache and explicit ContentType-handoff experiments remain on their
+separate experimental branches, not merged into this baseline.
+
+Local x86-64 comparisons against `f2b54e0`, with all compliance validators and
+one reported issue per violation, reduced buffered-reader throughput loss from
+about 75% to 49% on StarTrekMessage, 53% to 42% on ContentLengthMbox, and 65% to
+51% on JwzMbox. The logger does not store or print issues. Repeated comparisons
+also favored the quoted-printable encoder fast path. Absolute throughput varied
+substantially on the shared host, including slower deep-nesting results; these
+measurements do not establish a boundary-index speedup or rule out regressions
+in logging-disabled or deeply nested workloads.
 
 Cryptography, including DKIM, ARC, and DMARC, is excluded from the current scope.
 `LegacyMimeParser` and its event-argument types will not be ported. These are
@@ -1801,7 +1812,9 @@ Ordinary content borrows buffered input directly across physical lines, without
 copying each line or invoking a callback for every line. The default `simd`
 feature fuses `\n--` / mbox `\nFr` candidate detection, line counting, and CRLF/LF
 classification with runtime-detected SSE2/AVX2 or NEON. Scalar matching remains
-the fallback, and bulk byte searches skip newline-free runs. Partial prefixes
+the fallback, and bulk byte searches skip newline-free runs. Newline-free SIMD
+blocks do not calculate CR masks; first-lane LFs check the preceding input byte
+or the caller's retained CR state. Partial prefixes
 and full delimiter validation stay with the line scanner. Only ambiguous
 trailing newline bytes are copied on this fast path, and delimiter-owned
 newlines do not contribute to body format hints. Header storage, nesting
@@ -1811,6 +1824,16 @@ can be classified; this buffering is bounded by `max_input_bytes`, not the
 callback chunk size. Newly appended padding is checked once rather than
 repeatedly rescanning the growing line. Scanner scratch buffers are reused
 between messages. This is not an unconditional constant-memory guarantee.
+
+Active multipart boundaries are tracked separately from embedded-message frames.
+The nearest marker keeps its direct-match fast path; up to four active boundaries
+use a bounded ancestor walk, while deeper stacks use a balanced byte-keyed index.
+The index is allocated lazily on the first ancestor lookup, avoiding its setup
+cost when even a deep tree only matches its nearest boundary.
+Duplicate markers retain nearest-match precedence, including collisions between
+one boundary's closing marker and another's opening marker. Closing or unwinding
+a multipart removes its index entry and restores an earlier duplicate. Active
+boundary presence and maximum lookahead length no longer require a depth walk.
 
 `MimeParser` consumes the same reader events to build existing owned models.
 `parse_entity` and `parse_message` return their respective models, retaining
@@ -2021,6 +2044,24 @@ alphabet/whitespace kernels using SSE2/AVX2 on x86 and NEON on AArch64, with
 runtime-checked CPU tokens and the table-driven scalar fallback. Vector scans
 stop before padding, comments, or invalid bytes and resume after scalar handling;
 line masks preserve exact positions and both per-line reporting latches.
+Clean CRLF content now fuses structural and transfer-encoding checks across
+multiple lines using specialized SSE2/AVX2 and NEON kernels for Base64 and
+quoted-printable. UU payload lines use their declared lengths to validate runs,
+including partial-line continuations. Only a clean prefix ending after LF
+advances the encoding validator without rescanning; padding, malformed escapes,
+oversized lines, and other exceptions retain the per-line path. Accepted
+newline-free tail progress is reused by that fallback. LF-only input stops
+retrying the CRLF kernel within the current event.
+
+Unlike MimeKit's combined input scanner, this fusion sits in mimecraft's
+reporting layer, after boundary framing, preserving existing content-event
+segmentation and exact structural-before-encoding diagnostic order. The
+non-validating boundary scanner remains separate. Valid QP fallback lines,
+including rejected boundary candidates and LF soft breaks, retain the clean
+prefix without suppressing structural issues. Differential tests compare issue
+values, positions, ordering, and caps against per-line scanning across available
+SIMD backends, vector edges, chunk sizes, and partial decoder states.
+
 Private regression tests force scalar and every available SIMD backend, covering
 all byte values at every lane, MIME line tails, line lengths 1–100, arbitrary
 bytes, sliced/empty writes, pad bits, and fallible logger state.

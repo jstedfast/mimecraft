@@ -60,7 +60,7 @@ impl Accelerator {
 // i8::MIN and use one signed comparison against its end. OR'ing with 0x20 maps
 // 'A'-'Z' to 'a'-'z' without mapping any other byte into that range.
 #[target_feature(enable = "sse2")]
-fn is_alphabet_sse2(block: __m128i) -> __m128i {
+pub(in crate::mime_compliance) fn is_alphabet_sse2(block: __m128i) -> __m128i {
     let letters = _mm_cmplt_epi8(
         _mm_add_epi8(
             _mm_or_si128(block, _mm_set1_epi8(0x20)),
@@ -82,7 +82,7 @@ fn is_alphabet_sse2(block: __m128i) -> __m128i {
 }
 
 #[target_feature(enable = "avx2")]
-fn is_alphabet_avx2(block: __m256i) -> __m256i {
+pub(in crate::mime_compliance) fn is_alphabet_avx2(block: __m256i) -> __m256i {
     // The same biased signed comparisons as the 128-bit kernel.
     let letters = _mm256_cmpgt_epi8(
         _mm256_set1_epi8(-128 + 26),

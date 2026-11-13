@@ -22,6 +22,36 @@ pub(super) struct QuotedPrintable {
 }
 
 impl QuotedPrintable {
+    pub(super) fn can_consume_clean(&self) -> bool {
+        self.state == State::PassThrough
+    }
+
+    pub(super) fn consume_clean(&mut self) {
+        self.newline();
+    }
+
+    // Check a single line without reporting, so a rejected boundary candidate
+    // does not end the clean prefix or move encoding issues ahead of structure.
+    pub(super) fn is_line_valid(mut input: &[u8]) -> bool {
+        if input.last() != Some(&b'\n') {
+            return false;
+        }
+        while let Some(index) = memchr::memchr(b'=', input) {
+            input = &input[index..];
+            if input == b"=\n" {
+                return true;
+            }
+            if input.len() < 3
+                || !(input[1..3] == *b"\r\n"
+                    || (input[1].is_ascii_hexdigit() && input[2].is_ascii_hexdigit()))
+            {
+                return false;
+            }
+            input = &input[3..];
+        }
+        true
+    }
+
     fn newline(&mut self) {
         self.reported_invalid_encoding = false;
         self.reported_invalid_soft_break = false;

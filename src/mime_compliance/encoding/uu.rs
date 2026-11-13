@@ -52,6 +52,27 @@ fn whitespace(byte: u8) -> bool {
 }
 
 impl Uu {
+    pub(super) fn clean_remaining(&self) -> Option<i16> {
+        (self.state == State::Payload
+            && self.remaining <= 45
+            && (self.saved == 0 || (!self.eoln && self.remaining > 0)))
+            .then(|| {
+                if self.eoln {
+                    -1
+                } else {
+                    4 * i16::from(self.remaining.div_ceil(3)) - i16::from(self.saved)
+                }
+            })
+    }
+
+    pub(super) fn consume_clean(&mut self) {
+        self.eoln = true;
+        self.saved = 0;
+        self.remaining = 0;
+        self.reported_invalid_content = false;
+        self.reported_extra_data = false;
+    }
+
     fn pretext(
         &mut self,
         position: &Position,

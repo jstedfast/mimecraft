@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{ContentEncoding, MimePosition};
 
-mod base64;
+pub(super) mod base64;
 mod quoted_printable;
 mod uu;
 
@@ -26,6 +26,40 @@ pub(super) struct EncodingValidator {
 }
 
 impl EncodingValidator {
+    pub(super) fn clean_validation(&self) -> super::scan::Validation {
+        use super::scan::Validation;
+        match &self.state {
+            State::Base64(state) if state.can_consume_clean() => Validation::Base64,
+            State::QuotedPrintable(state) if state.can_consume_clean() => {
+                Validation::QuotedPrintable
+            }
+            State::Uu(state) => state
+                .clean_remaining()
+                .map_or(Validation::Structural, Validation::Uu),
+            _ => Validation::Structural,
+        }
+    }
+
+    // The caller has checked both structure and encoding, through a final LF.
+    // Advance without reporting; exceptional content retains the usual order
+    // of structural diagnostics followed by transfer-encoding diagnostics.
+    pub(super) fn consume_clean(&mut self, bytes: &[u8], alphabet: usize, lines: usize) {
+        debug_assert_eq!(bytes.last(), Some(&b'\n'));
+        match &mut self.state {
+            State::Base64(state) => state.consume_clean(bytes, alphabet),
+            State::QuotedPrintable(state) => state.consume_clean(),
+            State::Uu(state) => state.consume_clean(),
+        }
+        self.position.offset += bytes.len() as u64;
+        self.position.line_start = self.position.offset;
+        self.position.line += lines as u64;
+    }
+
+    pub(super) fn clean_qp_line(&self, bytes: &[u8]) -> bool {
+        matches!(&self.state, State::QuotedPrintable(state) if state.can_consume_clean())
+            && quoted_printable::QuotedPrintable::is_line_valid(bytes)
+    }
+
     pub(super) fn new(
         encoding: ContentEncoding,
         options: MimeComplianceOptions,

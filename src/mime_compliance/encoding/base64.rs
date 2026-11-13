@@ -6,10 +6,10 @@ use crate::encodings::Base64Decoder;
 
 #[cfg(all(feature = "simd", any(target_arch = "x86", target_arch = "x86_64")))]
 #[path = "base64/x86.rs"]
-mod simd;
+pub(in crate::mime_compliance) mod simd;
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 #[path = "base64/neon.rs"]
-mod simd;
+pub(in crate::mime_compliance) mod simd;
 #[cfg(test)]
 #[path = "base64/tests.rs"]
 mod tests;
@@ -113,6 +113,19 @@ pub(super) struct Base64 {
 }
 
 impl Base64 {
+    pub(super) fn can_consume_clean(&self) -> bool {
+        !self.invalid && self.padding == 0
+    }
+
+    pub(super) fn consume_clean(&mut self, bytes: &[u8], alphabet: usize) {
+        self.quantum = (self.quantum + (alphabet & 3) as u8) & 3;
+        if self.quantum >= 2 && alphabet != 0 {
+            self.last_alphabet = self.last_alphabet(bytes);
+        }
+        self.reported_invalid_character = false;
+        self.reported_comment = false;
+    }
+
     // Recover the last alphabet character only at chunk ends and padding,
     // rather than adding tracking work to every scalar byte and SIMD block.
     fn last_alphabet(&self, bytes: &[u8]) -> u8 {

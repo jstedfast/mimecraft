@@ -4,13 +4,17 @@
 use std::io;
 
 use super::encoding::EncodingValidator;
-use super::scan::Scanner;
+use super::scan::{Scanner, Validation};
 use super::{
     Budget, MimeComplianceIssue, MimeComplianceLogger, MimeComplianceOptions,
     MimeCompliancePositionKind as PositionKind, MimeComplianceValidators as Validators,
     MimeComplianceViolation as Violation,
 };
 use crate::{ContentEncoding, Header, HeaderId, MimeEntityKind, MimeEvent, MimePosition};
+
+#[cfg(test)]
+#[path = "reporting/tests.rs"]
+mod tests;
 
 /// Disabled reads neither allocate reporting state nor scan content for defects.
 pub(crate) struct Reporting<'a, L: MimeComplianceLogger + ?Sized = dyn MimeComplianceLogger + 'a>(
@@ -221,12 +225,14 @@ impl<L: MimeComplianceLogger + ?Sized> Active<'_, L> {
         let Some(mut body) = self.bodies.pop() else {
             return Ok(());
         };
-        let result = body.scan(self, bytes, position).and_then(|()| {
-            if validate && let Some(validator) = &mut body.validator {
-                validator.write(bytes, self)?;
-            }
-            Ok(())
-        });
+        let result = body
+            .scan(self, bytes, position, validate)
+            .and_then(|validated| {
+                if validate && let Some(validator) = &mut body.validator {
+                    validator.write(&bytes[validated..], self)?;
+                }
+                Ok(())
+            });
         self.source_line_start = body.line_start.offset;
         self.bodies.push(body);
         result
@@ -749,7 +755,8 @@ impl Body {
         active: &mut Active<'_, L>,
         mut bytes: &[u8],
         mut position: MimePosition,
-    ) -> io::Result<()> {
+        validate: bool,
+    ) -> io::Result<usize> {
         if position.offset != self.expected {
             // Returning to an ancestor's epilogue skips the child's headers,
             // content and delimiter; those bytes are not one long content line.
@@ -758,12 +765,61 @@ impl Body {
             self.cr = false;
             self.oversized = false;
         }
+        let mut validation = if validate && active.scanner.supports_clean() {
+            self.validator
+                .as_ref()
+                .map_or(Validation::Structural, EncodingValidator::clean_validation)
+        } else {
+            Validation::Structural
+        };
+        let mut validated = 0;
+        let mut fast = true;
         while !bytes.is_empty() {
+            let mut examined = 0;
+            if fast && !self.oversized {
+                let clean = active.scanner.clean_content(
+                    bytes,
+                    validation,
+                    self.column,
+                    self.cr,
+                    self.detect_null,
+                    self.detect_8bit,
+                );
+                if clean.len != 0 {
+                    if validation != Validation::Structural {
+                        self.validator
+                            .as_mut()
+                            .expect("clean encoding validator")
+                            .consume_clean(&bytes[..clean.len], clean.alphabet, clean.lines);
+                        validated += clean.len;
+                        if matches!(validation, Validation::Uu(_)) {
+                            validation = Validation::Uu(-1);
+                        }
+                    }
+                    position.offset += clean.len as u64;
+                    position.line += clean.lines as u64;
+                    self.line_start = position;
+                    self.column = 1;
+                    self.cr = false;
+                    bytes = &bytes[clean.len..];
+                }
+                // Do not retry an examined tail before the per-line fallback.
+                examined = clean.examined - clean.len;
+                if bytes.is_empty() {
+                    break;
+                }
+            }
             // Reuse the header line scanner rather than examining every byte
             // again for NUL and 8-bit detection while compliance is enabled.
-            let scanned = active
-                .scanner
-                .line(bytes, self.detect_null, self.detect_8bit);
+            let scanned =
+                active
+                    .scanner
+                    .line(&bytes[examined..], self.detect_null, self.detect_8bit);
+            let scanned = super::scan::Line {
+                lf: scanned.lf.map(|index| examined + index),
+                null: scanned.null.map(|index| examined + index),
+                eight_bit: scanned.eight_bit.map(|index| examined + index),
+            };
             let length = scanned.lf.map_or(bytes.len(), |i| i + 1);
             let line = &bytes[..length];
             let oversized = if self.oversized {
@@ -822,6 +878,8 @@ impl Body {
                     line[length - 2] == b'\r'
                 };
                 if !cr {
+                    // Do not retry the clean-CRLF kernel on each LF-only line.
+                    fast = false;
                     active.issue(
                         Violation::BareLinefeedInBody,
                         MimePosition {
@@ -843,10 +901,21 @@ impl Body {
                 self.column += length as u64;
             }
             self.cr = line.last() == Some(&b'\r');
+            if validation != Validation::Structural {
+                let validator = self.validator.as_mut().expect("clean encoding validator");
+                if validator.clean_qp_line(line) {
+                    validator.consume_clean(line, 0, 1);
+                    validated += length;
+                } else {
+                    // Leave encoding diagnostics until after this event's
+                    // structural scan. Only the contiguous clean prefix counts.
+                    validation = Validation::Structural;
+                }
+            }
             position.offset += length as u64;
             bytes = &bytes[length..];
         }
         self.expected = position.offset;
-        Ok(())
+        Ok(validated)
     }
 }

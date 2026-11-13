@@ -39,7 +39,7 @@ fn mask(bytes: uint8x16_t) -> u32 {
 }
 
 #[target_feature(enable = "neon")]
-fn is_alphabet(block: uint8x16_t) -> uint8x16_t {
+pub(in crate::mime_compliance) fn is_alphabet(block: uint8x16_t) -> uint8x16_t {
     // Bias the start of each range to i8::MIN. OR'ing with 0x20 folds only
     // uppercase letters into the lowercase range.
     let letters = vcltq_s8(

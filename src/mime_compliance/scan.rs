@@ -11,6 +11,9 @@ mod simd;
 #[cfg(test)]
 mod tests;
 
+mod clean;
+pub(super) use clean::{Clean, Validation};
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct Line {
     pub lf: Option<usize>,
@@ -87,6 +90,77 @@ impl Default for Scanner {
 }
 
 impl Scanner {
+    pub(super) fn supports_clean(self) -> bool {
+        #[cfg(all(
+            feature = "simd",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        {
+            self.accelerator.is_some()
+        }
+        #[cfg(not(all(
+            feature = "simd",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn clean_content(
+        self,
+        input: &[u8],
+        validation: Validation,
+        column: u64,
+        cr: bool,
+        null: bool,
+        eight_bit: bool,
+    ) -> Clean {
+        #[cfg(all(
+            feature = "simd",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        if let Some(accelerator) = self.accelerator {
+            if let Validation::Uu(remaining) = validation {
+                return clean::uu(input, remaining, column, cr);
+            }
+            return accelerator.clean_content(input, validation, column, cr, null, eight_bit);
+        }
+        let _ = (input, validation, column, cr, null, eight_bit);
+        Clean::default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn scalar() -> Self {
+        Self {
+            #[cfg(all(
+                feature = "simd",
+                any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            accelerator: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn available() -> Vec<Self> {
+        let scanners = vec![Self::scalar()];
+        #[cfg(all(
+            feature = "simd",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let scanners = scanners
+            .into_iter()
+            .chain(
+                simd::Accelerator::available()
+                    .into_iter()
+                    .map(|accelerator| Self {
+                        accelerator: Some(accelerator),
+                    }),
+            )
+            .collect();
+        scanners
+    }
+
     // First LF and requested special bytes preceding it, relative to this
     // bounded slice. Unlike MimeKit's callers, no writable sentinel is needed.
     pub fn line(self, input: &[u8], null: bool, eight_bit: bool) -> Line {

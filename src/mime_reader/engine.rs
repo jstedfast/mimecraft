@@ -11,6 +11,9 @@ use crate::{
 
 use super::{EventSink, scan};
 
+mod boundaries;
+use boundaries::Frames;
+
 pub(crate) struct ReadContext<'a, L: MimeComplianceLogger + ?Sized = dyn MimeComplianceLogger + 'a>
 {
     pub(crate) limits: MimeEntityParseOptions,
@@ -174,7 +177,7 @@ impl MarkerParser {
                         bytes,
                         eof,
                         &mut buffer.line,
-                        &[],
+                        &Frames::default(),
                         false,
                         options.max_header_length,
                     )? {
@@ -257,7 +260,7 @@ pub(crate) struct TreeParser {
     bom: Option<usize>,
     // Explicit message and multipart frames avoid recursive calls that
     // could exhaust the call stack on deeply nested input.
-    stack: Vec<Frame>,
+    stack: Frames,
     state: State,
     pending_position: MimePosition,
 }
@@ -275,7 +278,7 @@ impl TreeParser {
         Self {
             input: Lines::new(position, remaining, mbox, buffer.scanner),
             bom: (!mbox).then_some(0),
-            stack: Vec::new(),
+            stack: Frames::default(),
             state: State::headers(
                 NonZeroUsize::new(options.max_header_length).expect("validated limit"),
                 position,
@@ -483,7 +486,7 @@ impl TreeParser {
             // Without any enclosing boundary, MimeKit still constructs the empty
             // embedded message at EOF. With a boundary it leaves the wrapper empty.
             check_depth(stack.len(), options, end)?;
-            if let Some(Frame::Message { begun }) = stack.last_mut() {
+            if let Some(Frame::Message { begun }) = stack.entries.last_mut() {
                 *begun = true;
             }
             callback.event(MimeEvent::MessageBegin { position: end })?;
@@ -539,34 +542,13 @@ enum Frame {
     },
 }
 
-fn find_boundary(stack: &[Frame], line: &[u8]) -> Option<(usize, bool)> {
-    // Like MimeKit's IsPossibleBoundary, reject ordinary lines before walking
-    // ancestors. Otherwise deeply nested headers cause quadratic scanning.
-    // Mbox From-lines are recognized separately by the input scanner.
-    if !line.starts_with(b"--") {
-        return None;
-    }
-    // Check the immediate container before its ancestors, including those
-    // outside an embedded message.
-    stack.iter().enumerate().rev().find_map(|(index, frame)| {
-        if let Frame::Multipart {
-            boundary,
-            closed: false,
-            ..
-        } = frame
-        {
-            boundary
-                .as_deref()
-                .and_then(|boundary| boundary_line(line, boundary).map(|close| (index, close)))
-        } else {
-            None
-        }
-    })
+fn find_boundary(stack: &Frames, line: &[u8]) -> Option<(usize, bool)> {
+    stack.find(line)
 }
 
 fn complete_headers<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     state: &mut State,
-    stack: &mut Vec<Frame>,
+    stack: &mut Frames,
     options: &mut ReadContext<'_, L>,
     header_limit: NonZeroUsize,
     end: MimePosition,
@@ -659,7 +641,7 @@ fn consume_line<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     line: &[u8],
     position: MimePosition,
     state: &mut State,
-    stack: &mut Vec<Frame>,
+    stack: &mut Frames,
     options: &mut ReadContext<'_, L>,
     header_limit: NonZeroUsize,
     callback: &mut F,
@@ -680,7 +662,7 @@ fn consume_line<F: EventSink, L: MimeComplianceLogger + ?Sized>(
                 // and multipart framing, rather than restarting at each block.
                 parser.set_stream_offset(position.offset);
                 *start = position;
-                if let Some(Frame::Message { begun }) = stack.last_mut() {
+                if let Some(Frame::Message { begun }) = stack.entries.last_mut() {
                     *begun = true;
                     callback.event(MimeEvent::MessageBegin { position })?;
                 }
@@ -791,7 +773,7 @@ fn start_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     headers: Vec<Header>,
     position: MimePosition,
     headers_end: MimePosition,
-    stack: &mut Vec<Frame>,
+    stack: &mut Frames,
     options: &mut ReadContext<'_, L>,
     header_limit: NonZeroUsize,
     callback: &mut F,
@@ -931,7 +913,7 @@ fn check_depth<L: MimeComplianceLogger + ?Sized>(
 
 fn at_boundary<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     mut state: State,
-    stack: &mut Vec<Frame>,
+    stack: &mut Frames,
     line: &[u8],
     options: &mut ReadContext<'_, L>,
     position: MimePosition,
@@ -978,12 +960,9 @@ fn at_boundary<F: EventSink, L: MimeComplianceLogger + ?Sized>(
         )?;
         wrap_messages(stack, position, &mut options.reporting, callback)?;
     }
-    let Some(Frame::Multipart { closed, .. }) = stack.last_mut() else {
-        unreachable!("a matched boundary belongs to a multipart")
-    };
     callback.boundary(line, close, marker.1);
     if close {
-        *closed = true;
+        stack.close_boundary();
         let marker_line = line.strip_suffix(b"\n").unwrap_or(line);
         let marker_line = if line.ends_with(b"\n") {
             marker_line.strip_suffix(b"\r").unwrap_or(marker_line)
@@ -1006,7 +985,7 @@ fn at_boundary<F: EventSink, L: MimeComplianceLogger + ?Sized>(
 
 fn finish_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
     state: State,
-    stack: &mut Vec<Frame>,
+    stack: &mut Frames,
     incomplete: io::ErrorKind,
     position: MimePosition,
     diagnostic: (MimePosition, u64),
@@ -1084,7 +1063,7 @@ fn finish_entity<F: EventSink, L: MimeComplianceLogger + ?Sized>(
 }
 
 fn wrap_messages<F: EventSink, L: MimeComplianceLogger + ?Sized>(
-    stack: &mut Vec<Frame>,
+    stack: &mut Frames,
     position: MimePosition,
     reporting: &mut crate::mime_compliance::Reporting<'_, L>,
     callback: &mut F,
@@ -1205,7 +1184,7 @@ impl Lines {
         state: &mut State,
         pending: &mut Vec<u8>,
         pending_position: &mut MimePosition,
-        stack: &[Frame],
+        stack: &Frames,
         reporting: &mut crate::mime_compliance::Reporting<'_, L>,
         callback: &mut F,
     ) -> io::Result<bool> {
@@ -1230,9 +1209,7 @@ impl Lines {
             self.remaining -= 1;
             return Ok(true);
         }
-        let multipart = stack
-            .iter()
-            .any(|frame| matches!(frame, Frame::Multipart { closed: false, .. }));
+        let multipart = stack.has_boundary();
         let mbox = self.mbox && self.position.offset >= self.content_end;
         let possible = |byte: u8| (multipart && byte == b'-') || (mbox && byte == b'F');
         if self.at_line_start && possible(input[0]) {
@@ -1300,7 +1277,7 @@ impl Lines {
         bytes: &mut &[u8],
         eof: bool,
         line: &mut Vec<u8>,
-        stack: &[Frame],
+        stack: &Frames,
         reading_headers: bool,
         max_header_length: usize,
     ) -> io::Result<Piece> {
@@ -1320,19 +1297,7 @@ impl Lines {
                 // yet on the stack. Its size is bounded by the raw header limit.
                 max_header_length.saturating_add(4)
             } else {
-                stack
-                    .iter()
-                    .filter_map(|frame| match frame {
-                        Frame::Multipart {
-                            boundary: Some(boundary),
-                            closed: false,
-                            ..
-                        } => Some(boundary.len() + 4),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    .max(74)
+                stack.max_boundary_length().max(74)
             };
             self.scanning = true;
         }

@@ -72,6 +72,43 @@ const ENCODING_CASES: &[(&[u8], &[u8])] = &[
     ),
 ];
 
+#[test]
+fn upstream_encoder_line_boundaries_preserve_exact_output() {
+    let cases: &[(usize, &[u8], &str)] = &[
+        (2, b"Xb\n", "X=\nb\n"),
+        (3, b"\xffb\n", "=\n=FFb\n"),
+        (4, b"\xffb\n", "=FF=\nb\n"),
+        (3, b"\xff\n", "=FF\n"),
+        (3, b"\xff\r\n", "=FF\n"),
+        (3, b" \nb", "=20\nb=\n"),
+        (3, b"\tb\n", "\tb\n"),
+        (4, b"\xff\rb\n", "=FF=\n=0Db\n"),
+        (3, b"X\rb\n", "X=\n=0Db\n"),
+        (3, b"\rXb\n", "=\n=0DXb\n"),
+    ];
+    for width in 60..=76 {
+        for ending in [NewLineFormat::Dos, NewLineFormat::Unix] {
+            for &(remaining, suffix, expected) in cases {
+                let prefix = "a".repeat(width - remaining);
+                let input = [prefix.as_bytes(), suffix].concat();
+                let newline = if ending == NewLineFormat::Dos {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+                let expected = prefix + &expected.replace('\n', newline);
+                for chunk in 1..=input.len() {
+                    assert_eq!(
+                        encode_with_new_line_format(&input, width, chunk, ending),
+                        expected.as_bytes(),
+                        "width={width}, ending={ending:?}, suffix={suffix:?}, chunk={chunk}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 const DECODING_CASES: &[(&[u8], &[u8])] = &[
     (b"", b""),
     (b"=", b""),

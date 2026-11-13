@@ -197,8 +197,18 @@ impl QuotedPrintableEncoder {
                     self.column = 0;
                 }
                 _ => {
-                    if self.pending.is_some() {
-                        self.write_pending(output, false, false);
+                    if let Some(saved) = self.pending.take() {
+                        // The previous iteration left room for a literal and a soft break.
+                        if matches!(saved, b'\t' | b' '..=b'<' | b'>'..=b'~') {
+                            output.push(saved);
+                            self.column += 1;
+                        } else {
+                            if self.column + 4 > self.line_length {
+                                self.soft_break(output);
+                            }
+                            encode_hex_byte(b'=', saved, output);
+                            self.column += 3;
+                        }
                         if self.column + 1 >= self.line_length {
                             self.soft_break(output);
                         }
