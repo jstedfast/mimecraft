@@ -199,10 +199,22 @@ fn main() {
         "Whole messages: legacy/MAPI selection, recipient/attachment assembly, and final charsets."
     );
     println!(
+        "Convert/ConvertWrite use preloaded messages; the latter also serializes fresh output."
+    );
+    println!(
+        "Conversion includes headers, bodies, attachments, losses, observation, and output drop."
+    );
+    println!("ShortReads affects loading only; all rates count original TNEF wire bytes.");
+    println!("Rtf/RtfHtml render or extract 128 paragraphs; RtfStale keeps stored text/HTML.");
+    println!("Conversion includes RTF decompression/validation; fixture compression is untimed.");
+    println!("HtmlRelated/RtfHtmlRelated group 16 of 32 attachments by CID/resolved location.");
+    println!("RtfImages/RtfImagesFooter place 16 sniffed images by reversed position or footer.");
+    println!("HtmlUnreferenced scans comparable HTML without matching flagged attachments.");
+    println!(
         "Traverse also streams decoded bodies/content and recursively loads embedded messages."
     );
     println!(
-        "Both include fresh readers, model allocation/drop, checksums, and a rejecting logger."
+        "Load/Traverse include fresh readers, model allocation/drop, checksums, and a rejecting logger."
     );
     let cases: Vec<_> = message_workloads::CASES
         .into_iter()
@@ -390,7 +402,14 @@ fn main() {
     println!(
         "Access reads preloaded metadata; Stream reads preloaded raw content, excluding IIDs."
     );
-    println!("One attachment per generated attribute; no whole-message loader or MIME conversion.");
+    println!("Convert creates/drops owned MIME parts; ConvertWrite also serializes fresh output.");
+    println!(
+        "Both use preloaded attachments and observe complete headers, losses, and output bytes."
+    );
+    println!(
+        "Throughput counts original TNEF wire bytes, NOT parser or serialized MIME throughput."
+    );
+    println!("One attachment per generated attribute; no whole-message assembly.");
     let cases: Vec<_> = attachment_workloads::CASES
         .into_iter()
         .map(attachment_workloads::workload)

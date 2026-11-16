@@ -3,24 +3,47 @@
 
 use super::{
     attachment_workloads::{integer, value},
-    embedded_workloads, recipient_workloads,
+    embedded_workloads, recipient_workloads, rtf_compressed_workloads,
 };
 use mimecraft::tnef::{
     TnefAttributeTag as Attribute, TnefMessage, TnefPropertyTag as Tag, TnefPropertyType as Type,
     TnefReader,
 };
+use mimecraft::{MimeEntity, MimeParser};
 use std::{
     hint::black_box,
     io::{self, Read},
 };
 
-pub const CASES: [&str; 5] = ["Legacy", "Mapi", "Mixed", "Embedded", "ShortReads"];
-pub const MODES: [Mode; 2] = [Mode::Load, Mode::Traverse];
+pub const CASES: [&str; 13] = [
+    "Legacy",
+    "Mapi",
+    "Mixed",
+    "Embedded",
+    "ShortReads",
+    "Rtf",
+    "RtfHtml",
+    "RtfStale",
+    "HtmlRelated",
+    "HtmlUnreferenced",
+    "RtfHtmlRelated",
+    "RtfImages",
+    "RtfImagesFooter",
+];
+const RTF_PARAGRAPHS: usize = 128;
+pub const MODES: [Mode; 4] = [
+    Mode::Load,
+    Mode::Traverse,
+    Mode::Convert,
+    Mode::ConvertWrite,
+];
 
 #[derive(Clone, Copy)]
 pub enum Mode {
     Load,
     Traverse,
+    Convert,
+    ConvertWrite,
 }
 
 impl Mode {
@@ -28,6 +51,8 @@ impl Mode {
         match self {
             Self::Load => "Load",
             Self::Traverse => "Traverse",
+            Self::Convert => "Convert",
+            Self::ConvertWrite => "ConvertWrite",
         }
     }
 }
@@ -36,6 +61,9 @@ pub struct Workload {
     pub name: &'static str,
     pub input: Vec<u8>,
     payload: Vec<u8>,
+    message: TnefMessage,
+    rtf: Option<Vec<u8>>,
+    html: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -86,10 +114,71 @@ fn properties(fields: Vec<Vec<u8>>) -> Vec<u8> {
     bytes
 }
 
+fn reference_html(unreferenced: bool) -> String {
+    let mut html = "<p>HTML body</p>".to_owned();
+    for index in (0..32).step_by(2) {
+        let target = index + if unreferenced { 32 } else { 0 };
+        if index % 4 == 0 {
+            html.push_str(&format!("<img data-image='CID:image{target}@EXAMPLE.com'>"));
+        } else {
+            html.push_str(&format!(
+                "<img src='http://EXAMPLE.COM/assets/image{target}.bin'>"
+            ));
+        }
+    }
+    // Unmatched attributes must not grow the candidate index.
+    html.push_str(&"<span data-unrelated='http://elsewhere.example/x'>text</span>".repeat(128));
+    html
+}
+
+fn rtf_source(name: &str) -> Option<Vec<u8>> {
+    if !matches!(
+        name,
+        "Rtf" | "RtfHtml" | "RtfStale" | "RtfHtmlRelated" | "RtfImages" | "RtfImagesFooter"
+    ) {
+        return None;
+    }
+    let encapsulated = matches!(name, "RtfHtml" | "RtfHtmlRelated");
+    let mut bytes = if encapsulated {
+        br"{\rtf1\fromhtml1 {\*\htmltag <html><body>}".to_vec()
+    } else {
+        br"{\rtf1 ".to_vec()
+    };
+    let paragraph = if encapsulated {
+        br"{\*\htmltag <p>}Hello from RTF{\*\htmltag </p>}{\htmlrtf \par }".as_slice()
+    } else {
+        br"Hello from RTF\par "
+    };
+    for index in 0..RTF_PARAGRAPHS {
+        if (name == "RtfImages" && index < 32) || (name == "RtfImagesFooter" && index == 0) {
+            bytes.extend_from_slice(br"Hello\objattph\'20 from RTF\par ");
+        } else {
+            bytes.extend_from_slice(paragraph);
+        }
+    }
+    if name == "RtfHtmlRelated" {
+        bytes.extend_from_slice(br"{\*\htmltag ");
+        bytes.extend_from_slice(reference_html(false).as_bytes());
+        bytes.push(b'}');
+    }
+    if encapsulated {
+        bytes.extend_from_slice(br"{\*\htmltag </body></html>}");
+    }
+    bytes.push(b'}');
+    Some(bytes)
+}
+
 pub fn workload(name: &'static str) -> Workload {
     assert!(CASES.contains(&name));
     let legacy = name != "Mapi";
     let mapi = name != "Legacy";
+    let images = matches!(name, "RtfImages" | "RtfImagesFooter");
+    let rtf = rtf_source(name);
+    let html = if matches!(name, "HtmlRelated" | "HtmlUnreferenced") {
+        reference_html(name == "HtmlUnreferenced")
+    } else {
+        "<p>HTML body</p>".to_owned()
+    };
     let mut input =
         embedded_workloads::document(Attribute::MESSAGE_CLASS, b"IPM.Microsoft Mail.Note\0");
     if legacy {
@@ -97,16 +186,20 @@ pub fn workload(name: &'static str) -> Workload {
         attribute(&mut input, Attribute::BODY, b"Legacy body\0");
     }
     if mapi {
-        attribute(
-            &mut input,
-            Attribute::MAPI_PROPERTIES,
-            &properties(vec![
-                recipient_workloads::property(Tag::SUBJECT_W, "MAPI subject", Type::UNICODE),
-                recipient_workloads::property(Tag::BODY_W, "MAPI body", Type::UNICODE),
-                value(Tag::BODY_HTML_B, b"<p>HTML body</p>"),
-                integer(Tag::INTERNET_CODEPAGE, 65001),
-            ]),
-        );
+        let mut fields = vec![
+            recipient_workloads::property(Tag::SUBJECT_W, "MAPI subject", Type::UNICODE),
+            recipient_workloads::property(Tag::BODY_W, "MAPI body", Type::UNICODE),
+            value(Tag::BODY_HTML_B, html.as_bytes()),
+            integer(Tag::INTERNET_CODEPAGE, 65001),
+        ];
+        if let Some(rtf) = &rtf {
+            let mut builder = rtf_compressed_workloads::Builder::new();
+            builder.literals(rtf);
+            builder.end();
+            fields.push(value(Tag::RTF_COMPRESSED, &builder.build()));
+            fields.push(integer(Tag::RTF_IN_SYNC, i32::from(name != "RtfStale")));
+        }
+        attribute(&mut input, Attribute::MAPI_PROPERTIES, &properties(fields));
     }
     let row = properties(vec![
         recipient_workloads::property(Tag::DISPLAY_NAME_W, "Alice", Type::UNICODE),
@@ -119,13 +212,16 @@ pub fn workload(name: &'static str) -> Workload {
         Attribute::RECIPIENT_TABLE,
         &[&1u32.to_le_bytes()[..], &row].concat(),
     );
-    let payload = if name == "Embedded" {
+    let mut payload = if name == "Embedded" {
         let mut child = embedded_workloads::document(Attribute::SUBJECT, b"Inner\0");
         attribute(&mut child, Attribute::BODY, b"embedded body");
         child
     } else {
         (0..2048).map(|i| (i * 31 + 7) as u8).collect()
     };
+    if images {
+        payload[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    }
     for index in 0..32 {
         let render = [&1u16.to_le_bytes()[..], &(-1i32).to_le_bytes(), &[0; 8]].concat();
         attribute(&mut input, Attribute::ATTACH_RENDER_DATA, &render);
@@ -147,26 +243,60 @@ pub fn workload(name: &'static str) -> Workload {
             } else {
                 payload.clone()
             };
-            attribute(
-                &mut input,
-                Attribute::ATTACHMENT,
-                &properties(vec![
-                    // Exercise retrospective Binary recognition when the method follows data.
-                    value(Tag::ATTACH_DATA_BIN, &bytes),
-                    integer(Tag::ATTACH_METHOD, if name == "Embedded" { 5 } else { 1 }),
-                    recipient_workloads::property(
-                        Tag::ATTACH_LONG_FILENAME_W,
-                        &format!("mapi{index}.bin"),
+            let mut fields = vec![
+                // Exercise retrospective Binary recognition when the method follows data.
+                value(Tag::ATTACH_DATA_BIN, &bytes),
+                integer(Tag::ATTACH_METHOD, if name == "Embedded" { 5 } else { 1 }),
+                recipient_workloads::property(
+                    Tag::ATTACH_LONG_FILENAME_W,
+                    &format!("mapi{index}.bin"),
+                    Type::UNICODE,
+                ),
+            ];
+            if images {
+                fields.push(integer(Tag::RENDERING_POSITION, 31 - index));
+                // Half are displayable; the other half contradict the sniffed type.
+                fields.push(recipient_workloads::property(
+                    Tag::ATTACH_MIME_TAG_W,
+                    if index % 2 == 0 {
+                        "application/octet-stream"
+                    } else {
+                        "application/pdf"
+                    },
+                    Type::UNICODE,
+                ));
+            }
+            if matches!(name, "HtmlRelated" | "HtmlUnreferenced" | "RtfHtmlRelated") {
+                fields.push(integer(Tag::ATTACH_FLAGS, 4));
+                if index % 4 == 0 {
+                    fields.push(recipient_workloads::property(
+                        Tag::ATTACH_CONTENT_ID_W,
+                        &format!("image{index}@example.com"),
                         Type::UNICODE,
-                    ),
-                ]),
-            );
+                    ));
+                } else {
+                    fields.push(recipient_workloads::property(
+                        Tag::ATTACH_CONTENT_LOCATION_W,
+                        &format!("image{index}.bin"),
+                        Type::UNICODE,
+                    ));
+                    fields.push(recipient_workloads::property(
+                        Tag::ATTACH_CONTENT_BASE_W,
+                        "http://example.com/assets/",
+                        Type::UNICODE,
+                    ));
+                }
+            }
+            attribute(&mut input, Attribute::ATTACHMENT, &properties(fields));
         }
     }
     Workload {
         name,
+        message: TnefMessage::load(input.as_slice()).unwrap(),
         input,
         payload,
+        rtf,
+        html,
     }
 }
 
@@ -211,6 +341,36 @@ fn traverse(message: &TnefMessage, summary: &mut Summary, content: bool) {
 }
 
 pub fn read(case: &Workload, mode: Mode) -> Summary {
+    if matches!(mode, Mode::Convert | Mode::ConvertWrite) {
+        let result = black_box(&case.message).to_mime_message().unwrap();
+        let mut message = result.message;
+        let mut summary = Summary {
+            messages: 1,
+            attachments: case.message.attachments().len(),
+            recipients: message.to().addresses.mailboxes().count(),
+            ..Default::default()
+        };
+        for loss in result.losses {
+            summary.bytes(loss.description.as_bytes());
+            summary.checksum = summary.checksum.wrapping_add(loss.kind as u64);
+        }
+        if matches!(mode, Mode::ConvertWrite) {
+            let mut bytes = Vec::new();
+            message.write_to(&mut bytes).unwrap();
+            summary.bytes(black_box(&bytes));
+        } else {
+            for header in message.headers().iter() {
+                summary.bytes(header.raw());
+            }
+            for part in message.leaf_parts() {
+                for header in part.headers().iter() {
+                    summary.bytes(header.raw());
+                }
+                summary.bytes(black_box(part.content().get_ref().get_ref()));
+            }
+        }
+        return summary;
+    }
     let mut reader = TnefReader::new(Source {
         bytes: black_box(&case.input),
         chunk: if case.name == "ShortReads" {
@@ -249,9 +409,19 @@ impl Workload {
         );
         assert_eq!(
             message.html_body().map(|body| body.text().unwrap()),
-            (!legacy).then_some("<p>HTML body</p>".into())
+            (!legacy).then_some(self.html.as_str().into())
         );
-        assert!(message.rtf_body().is_none());
+        assert_eq!(
+            message
+                .rtf_body()
+                .map(|body| {
+                    let mut bytes = Vec::new();
+                    body.open_decoded_read().read_to_end(&mut bytes).unwrap();
+                    bytes
+                })
+                .as_deref(),
+            self.rtf.as_deref()
+        );
         assert_eq!(message.recipients().len(), 1);
         assert_eq!(
             message.recipients()[0].display_name().unwrap().as_deref(),
@@ -298,7 +468,10 @@ impl Workload {
                     .flat_map(u16::to_le_bytes)
                     .collect::<Vec<_>>(),
             );
-            expected.bytes(b"<p>HTML body</p>");
+            expected.bytes(self.html.as_bytes());
+        }
+        if let Some(rtf) = &self.rtf {
+            expected.bytes(rtf);
         }
         for _ in 0..32 {
             if self.name == "Embedded" {
@@ -309,5 +482,236 @@ impl Workload {
             }
         }
         assert_eq!(read(self, Mode::Traverse), expected);
+        self.check_conversion();
+    }
+
+    fn check_conversion(&self) {
+        let legacy = self.name == "Legacy";
+        let images = matches!(self.name, "RtfImages" | "RtfImagesFooter");
+        let mut result = self.message.to_mime_message().unwrap();
+        assert!(result.losses.is_empty(), "{:?}", result.losses);
+        assert_eq!(
+            result.message.subject().unwrap().text,
+            if legacy {
+                "Legacy subject"
+            } else {
+                "MAPI subject"
+            }
+        );
+        assert_eq!(
+            result
+                .message
+                .to()
+                .addresses
+                .mailboxes()
+                .next()
+                .unwrap()
+                .address()
+                .to_string(),
+            "alice@example.com"
+        );
+        let MimeEntity::Multipart(mixed) = result.message.body().unwrap() else {
+            panic!("mixed");
+        };
+        assert_eq!(
+            mixed.content_type().unwrap().unwrap().mime_type(),
+            "multipart/mixed"
+        );
+        let inline = images || matches!(self.name, "HtmlRelated" | "RtfHtmlRelated");
+        assert_eq!(mixed.children().len(), if inline { 17 } else { 33 });
+        let root = if inline {
+            let MimeEntity::Multipart(related) = &mixed.children()[0] else {
+                panic!("related")
+            };
+            let content_type = related.content_type().unwrap().unwrap();
+            assert_eq!(content_type.mime_type(), "multipart/related");
+            assert_eq!(
+                content_type.parameters().get("type"),
+                Some("multipart/alternative")
+            );
+            assert!(content_type.parameters().get("start").is_none());
+            assert_eq!(related.children().len(), 17);
+            &related.children()[0]
+        } else {
+            &mixed.children()[0]
+        };
+        if legacy {
+            let MimeEntity::Part(part) = root else {
+                panic!("plain");
+            };
+            assert_eq!(part.content().get_ref().get_ref(), b"Legacy body");
+        } else {
+            let MimeEntity::Multipart(alternative) = root else {
+                panic!("alternative");
+            };
+            assert_eq!(
+                alternative.content_type().unwrap().unwrap().mime_type(),
+                "multipart/alternative"
+            );
+            assert_eq!(alternative.children().len(), 2);
+            let generated = images || matches!(self.name, "Rtf" | "RtfHtml" | "RtfHtmlRelated");
+            let plain = if generated {
+                "Hello from RTF\r\n".repeat(RTF_PARAGRAPHS)
+            } else {
+                "MAPI body".to_owned()
+            };
+            for (entity, mime, bytes) in [
+                (&alternative.children()[0], "text/plain", plain.as_bytes()),
+                (
+                    &alternative.children()[1],
+                    "text/html",
+                    self.html.as_bytes(),
+                ),
+            ] {
+                let MimeEntity::Part(part) = entity else {
+                    panic!("body part");
+                };
+                assert_eq!(part.content_type().unwrap().unwrap().mime_type(), mime);
+                let content = part.content().get_ref().get_ref();
+                if generated && mime == "text/html" {
+                    let html = std::str::from_utf8(content).unwrap();
+                    assert_eq!(html.matches("from RTF").count(), RTF_PARAGRAPHS);
+                    assert_eq!(html.contains("HTML body"), self.name == "RtfHtmlRelated");
+                    assert!(html.starts_with('<'));
+                    if images {
+                        let parts: Vec<_> = result
+                            .message
+                            .leaf_parts()
+                            .filter(|part| {
+                                part.content_type()
+                                    .unwrap()
+                                    .unwrap()
+                                    .is_mime_type("image", "png")
+                            })
+                            .collect();
+                        assert_eq!(parts.len(), 16);
+                        assert_eq!(html.matches("<img").count(), 16);
+                        let mut previous = 0;
+                        let mut ids = std::collections::HashSet::new();
+                        for part in parts.into_iter().rev() {
+                            let id = part.content_id().unwrap().unwrap();
+                            assert!(ids.insert(id.to_string()));
+                            let image = format!(
+                                "<img src=\"cid:{}\" alt=\"{}\"/>",
+                                id.as_str(),
+                                part.file_name().unwrap().unwrap()
+                            );
+                            let offset = html.find(&image).unwrap();
+                            assert!(offset > previous);
+                            previous = offset;
+                            if self.name == "RtfImages" {
+                                assert!(html.contains(&format!("Hello{image} from RTF")));
+                            } else {
+                                assert!(html.contains(&format!("<div>{image}</div>")));
+                                assert!(offset > html.rfind("from RTF").unwrap());
+                            }
+                        }
+                    }
+                    if matches!(self.name, "RtfHtml" | "RtfHtmlRelated") {
+                        assert_eq!(
+                            html,
+                            format!(
+                                "<html><body>{}{}</body></html>",
+                                "<p>Hello from RTF</p>".repeat(RTF_PARAGRAPHS),
+                                if inline {
+                                    reference_html(false)
+                                } else {
+                                    String::new()
+                                },
+                            )
+                        );
+                    }
+                } else {
+                    assert_eq!(content, bytes);
+                }
+            }
+        }
+        let indices: Vec<_> = if inline {
+            (0..32).step_by(2).chain((1..32).step_by(2)).collect()
+        } else {
+            (0..32).collect()
+        };
+        let parts: Vec<_> = result
+            .message
+            .leaf_parts()
+            .filter(|part| part.file_name().unwrap().is_some())
+            .collect();
+        assert_eq!(parts.len(), 32);
+        for (part, index) in parts.into_iter().zip(indices) {
+            assert_eq!(
+                part.file_name().unwrap(),
+                Some(format!(
+                    "{}{index}.bin",
+                    if legacy { "legacy" } else { "mapi" }
+                ))
+            );
+            assert_eq!(part.content().get_ref().get_ref(), &self.payload);
+            assert_eq!(
+                part.content_disposition().unwrap().unwrap().is_attachment(),
+                !(inline && index % 2 == 0)
+            );
+            assert_eq!(
+                part.content_type().unwrap().unwrap().mime_type(),
+                if self.name == "Embedded" {
+                    "application/ms-tnef"
+                } else if images {
+                    if index % 2 == 0 {
+                        "image/png"
+                    } else {
+                        "application/pdf"
+                    }
+                } else {
+                    "application/octet-stream"
+                }
+            );
+        }
+        let mut wire = Vec::new();
+        result.message.write_to(&mut wire).unwrap();
+        let mut parsed = MimeParser::new(wire.as_slice()).parse_message().unwrap();
+        let MimeEntity::Multipart(mixed) = parsed.body_mut().unwrap() else {
+            panic!("mixed");
+        };
+        assert_eq!(mixed.children().len(), if inline { 17 } else { 33 });
+        let (body, ordinary) = mixed.children_mut().split_at_mut(1);
+        let (root, mut attachments) = if inline {
+            let MimeEntity::Multipart(related) = &mut body[0] else {
+                panic!("related")
+            };
+            assert_eq!(related.children().len(), 17);
+            let (root, images) = related.children_mut().split_at_mut(1);
+            (&mut root[0], images.iter_mut().collect::<Vec<_>>())
+        } else {
+            (&mut body[0], vec![])
+        };
+        attachments.extend(ordinary);
+        if images || matches!(self.name, "Rtf" | "RtfHtml" | "RtfHtmlRelated") {
+            let MimeEntity::Multipart(alternative) = root else {
+                panic!("alternative");
+            };
+            let MimeEntity::Part(plain) = &mut alternative.children_mut()[0] else {
+                panic!("plain");
+            };
+            let mut decoded = Vec::new();
+            plain.content_mut().decode_to(&mut decoded).unwrap();
+            assert_eq!(
+                decoded,
+                "Hello from RTF\r\n".repeat(RTF_PARAGRAPHS).as_bytes()
+            );
+        }
+        for child in attachments {
+            let MimeEntity::Part(part) = child else {
+                panic!("attachment");
+            };
+            let mut decoded = Vec::new();
+            part.content_mut().decode_to(&mut decoded).unwrap();
+            assert_eq!(decoded, self.payload);
+        }
+        for mode in [Mode::Convert, Mode::ConvertWrite] {
+            let summary = read(self, mode);
+            assert_eq!(summary.messages, 1);
+            assert_eq!(summary.attachments, 32);
+            assert_eq!(summary.recipients, 1);
+            assert!(summary.bytes > self.payload.len() * 32);
+        }
     }
 }

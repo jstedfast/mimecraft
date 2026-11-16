@@ -235,6 +235,14 @@ fn prepare_message(name: &'static str) -> message_workloads::Workload {
 }
 
 #[metabench::benchmark(MESSAGE_LOAD, "tnef-messages", "Load")]
+#[bench::RtfImages(&prepare_message("RtfImages"))]
+#[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
+#[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
+#[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
+#[bench::Rtf(&prepare_message("Rtf"))]
+#[bench::RtfHtml(&prepare_message("RtfHtml"))]
+#[bench::RtfStale(&prepare_message("RtfStale"))]
 #[bench::Legacy(&prepare_message("Legacy"))]
 #[bench::Mapi(&prepare_message("Mapi"))]
 #[bench::Mixed(&prepare_message("Mixed"))]
@@ -245,6 +253,14 @@ fn message_load(case: &message_workloads::Workload) -> message_workloads::Summar
 }
 
 #[metabench::benchmark(MESSAGE_TRAVERSE, "tnef-messages", "Traverse")]
+#[bench::RtfImages(&prepare_message("RtfImages"))]
+#[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
+#[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
+#[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
+#[bench::Rtf(&prepare_message("Rtf"))]
+#[bench::RtfHtml(&prepare_message("RtfHtml"))]
+#[bench::RtfStale(&prepare_message("RtfStale"))]
 #[bench::Legacy(&prepare_message("Legacy"))]
 #[bench::Mapi(&prepare_message("Mapi"))]
 #[bench::Mixed(&prepare_message("Mixed"))]
@@ -252,6 +268,42 @@ fn message_load(case: &message_workloads::Workload) -> message_workloads::Summar
 #[bench::ShortReads(&prepare_message("ShortReads"))]
 fn message_traverse(case: &message_workloads::Workload) -> message_workloads::Summary {
     message_workloads::read(case, message_workloads::Mode::Traverse)
+}
+
+#[metabench::benchmark(MESSAGE_CONVERT, "tnef-messages", "Convert")]
+#[bench::RtfImages(&prepare_message("RtfImages"))]
+#[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
+#[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
+#[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
+#[bench::Rtf(&prepare_message("Rtf"))]
+#[bench::RtfHtml(&prepare_message("RtfHtml"))]
+#[bench::RtfStale(&prepare_message("RtfStale"))]
+#[bench::Legacy(&prepare_message("Legacy"))]
+#[bench::Mapi(&prepare_message("Mapi"))]
+#[bench::Mixed(&prepare_message("Mixed"))]
+#[bench::Embedded(&prepare_message("Embedded"))]
+#[bench::ShortReads(&prepare_message("ShortReads"))]
+fn message_convert(case: &message_workloads::Workload) -> message_workloads::Summary {
+    message_workloads::read(case, message_workloads::Mode::Convert)
+}
+
+#[metabench::benchmark(MESSAGE_CONVERT_WRITE, "tnef-messages", "ConvertWrite")]
+#[bench::RtfImages(&prepare_message("RtfImages"))]
+#[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
+#[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
+#[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
+#[bench::Rtf(&prepare_message("Rtf"))]
+#[bench::RtfHtml(&prepare_message("RtfHtml"))]
+#[bench::RtfStale(&prepare_message("RtfStale"))]
+#[bench::Legacy(&prepare_message("Legacy"))]
+#[bench::Mapi(&prepare_message("Mapi"))]
+#[bench::Mixed(&prepare_message("Mixed"))]
+#[bench::Embedded(&prepare_message("Embedded"))]
+#[bench::ShortReads(&prepare_message("ShortReads"))]
+fn message_convert_write(case: &message_workloads::Workload) -> message_workloads::Summary {
+    message_workloads::read(case, message_workloads::Mode::ConvertWrite)
 }
 
 fn prepare_attachment(name: &'static str) -> attachment_workloads::Workload {
@@ -265,6 +317,8 @@ fn prepare_attachment(name: &'static str) -> attachment_workloads::Workload {
 #[bench::BinaryText(&prepare_attachment("BinaryText"))]
 #[bench::Embedded(&prepare_attachment("Embedded"))]
 #[bench::Empty(&prepare_attachment("Empty"))]
+#[bench::Text(&prepare_attachment("Text"))]
+#[bench::Sanitize(&prepare_attachment("Sanitize"))]
 fn attachment_load(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
     attachment_workloads::read(case, attachment_workloads::Mode::Load)
 }
@@ -274,6 +328,8 @@ fn attachment_load(case: &attachment_workloads::Workload) -> attachment_workload
 #[bench::BinaryText(&prepare_attachment("BinaryText"))]
 #[bench::Embedded(&prepare_attachment("Embedded"))]
 #[bench::Empty(&prepare_attachment("Empty"))]
+#[bench::Text(&prepare_attachment("Text"))]
+#[bench::Sanitize(&prepare_attachment("Sanitize"))]
 fn attachment_access(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
     attachment_workloads::read(case, attachment_workloads::Mode::Access)
 }
@@ -283,8 +339,34 @@ fn attachment_access(case: &attachment_workloads::Workload) -> attachment_worklo
 #[bench::BinaryText(&prepare_attachment("BinaryText"))]
 #[bench::Embedded(&prepare_attachment("Embedded"))]
 #[bench::Empty(&prepare_attachment("Empty"))]
+#[bench::Text(&prepare_attachment("Text"))]
+#[bench::Sanitize(&prepare_attachment("Sanitize"))]
 fn attachment_stream(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
     attachment_workloads::read(case, attachment_workloads::Mode::Stream)
+}
+
+#[metabench::benchmark(ATTACHMENT_CONVERT, "tnef-attachments", "Convert")]
+#[bench::Direct(&prepare_attachment("Direct"))]
+#[bench::BinaryText(&prepare_attachment("BinaryText"))]
+#[bench::Embedded(&prepare_attachment("Embedded"))]
+#[bench::Empty(&prepare_attachment("Empty"))]
+#[bench::Text(&prepare_attachment("Text"))]
+#[bench::Sanitize(&prepare_attachment("Sanitize"))]
+fn attachment_convert(case: &attachment_workloads::Workload) -> attachment_workloads::Summary {
+    attachment_workloads::read(case, attachment_workloads::Mode::Convert)
+}
+
+#[metabench::benchmark(ATTACHMENT_CONVERT_WRITE, "tnef-attachments", "ConvertWrite")]
+#[bench::Direct(&prepare_attachment("Direct"))]
+#[bench::BinaryText(&prepare_attachment("BinaryText"))]
+#[bench::Embedded(&prepare_attachment("Embedded"))]
+#[bench::Empty(&prepare_attachment("Empty"))]
+#[bench::Text(&prepare_attachment("Text"))]
+#[bench::Sanitize(&prepare_attachment("Sanitize"))]
+fn attachment_convert_write(
+    case: &attachment_workloads::Workload,
+) -> attachment_workloads::Summary {
+    attachment_workloads::read(case, attachment_workloads::Mode::ConvertWrite)
 }
 
 fn prepare_body(name: &'static str) -> body_workloads::Workload {
@@ -720,7 +802,11 @@ metabench::main!(
         ATTACHMENT_LOAD,
         ATTACHMENT_ACCESS,
         ATTACHMENT_STREAM,
+        ATTACHMENT_CONVERT,
+        ATTACHMENT_CONVERT_WRITE,
         MESSAGE_LOAD,
-        MESSAGE_TRAVERSE
+        MESSAGE_TRAVERSE,
+        MESSAGE_CONVERT,
+        MESSAGE_CONVERT_WRITE
     ]
 );

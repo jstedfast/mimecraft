@@ -3,19 +3,35 @@
 
 use super::{embedded_workloads, recipient_workloads};
 use mimecraft::tnef::{
-    TnefAttachment as Attachment, TnefAttributeTag as Attribute, TnefPropertySet,
-    TnefPropertyTag as Tag, TnefPropertyType as Type, TnefReader,
+    TnefAttachment as Attachment, TnefAttributeTag as Attribute, TnefConversionLossKind as Loss,
+    TnefPropertySet, TnefPropertyTag as Tag, TnefPropertyType as Type, TnefReader,
 };
+use mimecraft::{ContentEncoding, MimeEntity, MimeParser};
 use std::{hint::black_box, io::Read};
 
-pub const CASES: [&str; 4] = ["Direct", "BinaryText", "Embedded", "Empty"];
-pub const MODES: [Mode; 3] = [Mode::Load, Mode::Access, Mode::Stream];
+pub const CASES: [&str; 6] = [
+    "Direct",
+    "BinaryText",
+    "Embedded",
+    "Empty",
+    "Text",
+    "Sanitize",
+];
+pub const MODES: [Mode; 5] = [
+    Mode::Load,
+    Mode::Access,
+    Mode::Stream,
+    Mode::Convert,
+    Mode::ConvertWrite,
+];
 
 #[derive(Clone, Copy)]
 pub enum Mode {
     Load,
     Access,
     Stream,
+    Convert,
+    ConvertWrite,
 }
 
 impl Mode {
@@ -24,6 +40,8 @@ impl Mode {
             Self::Load => "Load",
             Self::Access => "Access",
             Self::Stream => "Stream",
+            Self::Convert => "Convert",
+            Self::ConvertWrite => "ConvertWrite",
         }
     }
 }
@@ -119,10 +137,18 @@ pub fn workload(name: &'static str) -> Workload {
     for index in 0..32 {
         let empty = name == "Empty";
         let embedded = name == "Embedded";
-        let object = !empty && (embedded || index % 2 == 1);
+        let object = !empty && name != "Text" && name != "Sanitize" && (embedded || index % 2 == 1);
         let mut fields = Vec::new();
         let file_name = (!empty).then(|| format!("Caf\u{e9} {index}.bin"));
-        let mime = (!empty).then(|| "application/octet-stream".to_owned());
+        let mime = (!empty).then(|| {
+            match name {
+                "Text" => "text/plain; charset=us-ascii",
+                "Sanitize" if index % 2 == 0 => "multipart/mixed; boundary=forged",
+                "Sanitize" => "message/rfc822",
+                _ => "application/octet-stream",
+            }
+            .to_owned()
+        });
         let cid = (!empty).then(|| format!("part{index}@example.com"));
         let method = if embedded {
             5
@@ -162,7 +188,15 @@ pub fn workload(name: &'static str) -> Workload {
         let content = if empty {
             (index % 2 == 0).then(Vec::new)
         } else {
-            let bytes: Vec<_> = (0..2048).map(|i| (i * 31 + index) as u8).collect();
+            let bytes: Vec<_> = if name == "Text" {
+                let mut bytes = b"Plain ASCII attachment text.\r\n".repeat(64);
+                if index % 2 == 1 {
+                    bytes.extend_from_slice(b"From someone");
+                }
+                bytes
+            } else {
+                (0..2048).map(|i| (i * 31 + index) as u8).collect()
+            };
             Some(if embedded {
                 embedded_workloads::document(Attribute::BODY, &bytes)
             } else {
@@ -246,6 +280,34 @@ pub fn read(case: &Workload, mode: Mode) -> Summary {
             }
             result
         }
+        Mode::Convert | Mode::ConvertWrite => {
+            let mut result = Summary::default();
+            for attachment in black_box(&case.attachments) {
+                result.attachments += 1;
+                let converted = attachment.to_mime_part().unwrap();
+                for loss in &converted.losses {
+                    result.number(loss.kind as u64);
+                    result.text(Some(&loss.description));
+                }
+                result.number(u64::from(converted.part.is_some()));
+                if let Some(mut part) = converted.part {
+                    for header in part.headers().iter() {
+                        result.text(header.field());
+                        for byte in header.raw_value() {
+                            result.number(u64::from(*byte));
+                        }
+                    }
+                    if matches!(mode, Mode::ConvertWrite) {
+                        let mut wire = Vec::new();
+                        part.write_to(&mut wire).unwrap();
+                        result.content(black_box(&wire));
+                    } else {
+                        result.content(black_box(part.content().get_ref().get_ref()));
+                    }
+                }
+            }
+            result
+        }
     }
 }
 
@@ -290,5 +352,99 @@ impl Workload {
         assert_eq!(read(self, Mode::Load), access_expected, "{}", self.name);
         assert_eq!(read(self, Mode::Access), access_expected, "{}", self.name);
         assert_eq!(read(self, Mode::Stream), stream_expected, "{}", self.name);
+        self.check_conversion();
+    }
+
+    fn check_conversion(&self) {
+        let mut wire_bytes = 0;
+        for (index, (attachment, expected)) in
+            self.attachments.iter().zip(&self.expected).enumerate()
+        {
+            let converted = attachment.to_mime_part().unwrap();
+            let losses = if expected.content.is_none() {
+                vec![Loss::AttachmentWithoutContent]
+            } else if expected.method == 6 {
+                vec![Loss::OleObjectNotRendered]
+            } else if self.name == "Sanitize" {
+                vec![Loss::InvalidHeader]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                converted
+                    .losses
+                    .iter()
+                    .map(|loss| loss.kind)
+                    .collect::<Vec<_>>(),
+                losses
+            );
+            let Some(content) = &expected.content else {
+                assert!(converted.part.is_none());
+                continue;
+            };
+            let mut part = converted.part.unwrap();
+            let mime = if expected.embedded {
+                "application/ms-tnef"
+            } else if self.name == "Text" {
+                "text/plain"
+            } else {
+                "application/octet-stream"
+            };
+            let encoding = if self.name == "Text" {
+                if index % 2 == 0 {
+                    ContentEncoding::SevenBit
+                } else {
+                    ContentEncoding::QuotedPrintable
+                }
+            } else {
+                ContentEncoding::Base64
+            };
+            assert_eq!(part.content_type().unwrap().unwrap().mime_type(), mime);
+            assert_eq!(
+                part.file_name().unwrap().as_deref(),
+                expected.name.as_deref()
+            );
+            assert_eq!(
+                part.content_id().unwrap().as_ref().map(|id| id.as_str()),
+                expected.cid.as_deref()
+            );
+            assert_eq!(part.content_transfer_encoding().unwrap(), encoding);
+            assert_eq!(part.content().get_ref().get_ref(), content);
+            let disposition = part.content_disposition().unwrap();
+            assert_eq!(disposition.is_some(), expected.name.is_some());
+            if let Some(disposition) = disposition {
+                assert_eq!(disposition.disposition(), "attachment");
+            }
+            let mut wire = Vec::new();
+            part.write_to(&mut wire).unwrap();
+            wire_bytes += wire.len();
+            let MimeEntity::Part(mut parsed) =
+                MimeParser::new(wire.as_slice()).parse_entity().unwrap()
+            else {
+                panic!("converted attachment became MIME structure");
+            };
+            assert_eq!(parsed.content_type().unwrap().unwrap().mime_type(), mime);
+            assert_eq!(
+                parsed.file_name().unwrap().as_deref(),
+                expected.name.as_deref()
+            );
+            let mut decoded = Vec::new();
+            parsed.content_mut().decode_to(&mut decoded).unwrap();
+            assert_eq!(&decoded, content);
+        }
+        for mode in [Mode::Convert, Mode::ConvertWrite] {
+            let summary = read(self, mode);
+            assert_eq!(summary.attachments, self.expected.len());
+            let bytes = if matches!(mode, Mode::ConvertWrite) {
+                wire_bytes
+            } else {
+                self.expected
+                    .iter()
+                    .filter_map(|expected| expected.content.as_ref())
+                    .map(Vec::len)
+                    .sum()
+            };
+            assert_eq!(summary.bytes, bytes);
+        }
     }
 }

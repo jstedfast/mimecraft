@@ -40,7 +40,7 @@ Rust API, ownership, error-handling, and charset differences.
 
 | Area | Remaining work and current boundary |
 |---|---|
-| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. Low-level iCalendar writing and embedded time-zone rules support UTF-8-safe folding, checked UTC/local conversion, and VTIMEZONE output using dependency-free date types. Recurrence parsing retains raw patterns, deleted/modified dates, and merged exceptions with explicit malformed-tail recovery. Calendar export assembles complete VCALENDAR snapshots, including recipients, stable UIDs, time zones, alarms, RRULE/EXDATE, exception attachments, explicit losses, and count/byte limits, with a UTF-8 text/calendar MIME-part helper. Broader TNEF-to-MIME conversion and OLE helpers remain unported. Benchmarks cover readers, writers, owned models, RTF compression/decompression, whole-message loading, recursive content traversal, calendar output, time zones, recurrence parsing/generation, and complete calendar build/write operations. |
+| TNEF | Synchronous attribute and MAPI property/recipient-row readers are implemented, including named/multivalued properties, native values, owned property snapshots/sets with typed accessors and captured charsets, all MimeKit built-in property tags, owned recipient models with checked fields, date conversion/range diagnostics, checksums, bounded streams, and embedded readers with shared limits. Owned embedded content supports repeatable detached readers with captured context and fresh budgets. Owned text/HTML/compressed-RTF bodies support bounded collection, repeatable raw/decoded reads, charset updates, and explicit text/decompression errors. Owned attachments provide checked metadata, bounded content collection, IID-aware raw cursors, and detached embedded readers. Standalone attachment-to-MIME conversion preserves metadata, sanitizes media types, selects transfer encoding, and reports losses while retaining embedded TNEF and unrendered OLE content. Whole-message loading maps legacy metadata, selects MAPI-over-legacy bodies/content, applies final charsets, groups attachments, enforces limits, and supports repeatable embedded-message loading. Compressed-RTF writing supports LZFu/MELA output with explicit finalization on seekable sinks. TNEF attribute writing provides automatic headers/checksums, strict ordering, typed values, known-length streamed payloads, and unknown-length buffered attribute streams with memory/file scratch storage on forward-only sinks. Buffered MAPI property writing supports native values, typed dates, exact decimal currency scaling, multivalues, named IDs, recipient rows, checked snapshot copying, append-only Binary/Object value streams, LZFu/MELA property encoders, and embedded-message writers with automatic IMessage framing and inherited or explicit codepages. Low-level iCalendar writing and embedded time-zone rules support UTF-8-safe folding, checked UTC/local conversion, and VTIMEZONE output using dependency-free date types. Recurrence parsing retains raw patterns, deleted/modified dates, and merged exceptions with explicit malformed-tail recovery. Calendar export assembles complete VCALENDAR snapshots, including recipients, stable UIDs, time zones, alarms, RRULE/EXDATE, exception attachments, explicit losses, and count/byte limits, with a UTF-8 text/calendar MIME-part helper. Property-based message conversion maps headers and text/HTML/calendar alternatives, preserves ordered attachments, and aggregates indexed losses. RTF best-body selection renders UTF-8 text/HTML or extracts encapsulated HTML, with explicit checksum and interpretation losses. Referenced RenderedInBody attachments join stored/extracted HTML in multipart/related. Ordinary RTF places sniffed images at matching placeholders or in a footer, with unique Content-Ids and related grouping. Custom textual placeholders, skeleton restoration, recursive embedded conversion, and OLE rendering remain unported. Benchmarks cover readers, writers, owned models, attachment/message conversion and serialization (including related resources, RTF images, and rendered/extracted/stale RTF), RTF compression/decompression, whole-message loading, recursive content traversal, calendar output, time zones, recurrence parsing/generation, and complete calendar build/write operations. |
 | Compliance | Deep address compliance validation and general HTML tokenizer compliance logging are not ported. MIME structural/raw-byte reporting, Base64/QP/UU validators, HTML character-reference diagnostics, and RTF lexical/structural/interpreter reporting already exist. |
 | I/O adapters | Async drivers and async model/storage APIs are not ported. MIME, HTML, and RTF tokenization have sans-I/O engines with synchronous drivers. |
 | Text conversion | Streaming-output adapters for RTF and the whole-string plain/flowed converters remain absent. HTML-to-text and HTML-to-HTML already have synchronous reader/writer adapters. Automatic RTF rendering/extraction during MIME text access is not implemented. |
@@ -10183,6 +10183,249 @@ loader below adds grouping, legacy metadata, content precedence, attachment
 limits, and retrospective recognition. `load_embedded_message` and its logger
 variant return independently loaded messages with inherited configuration.
 
+### Standalone TNEF attachment conversion
+
+`TnefAttachment::to_mime_part` returns an independently owned
+`TnefAttachmentConversionResult`, containing an optional
+`MimePart<Cursor<Vec<u8>>>` and ordered `TnefConversionLoss` values.
+The source is unchanged, and converted content survives its destruction.
+This ports the ordinary attachment mapping from `TnefMessageConverter`,
+retaining adapted MS-OXCMAIL rationale and compatibility comments.
+
+The stored MIME type is parsed without filename-extension inference.
+Invalid values, multipart/*, every message/* type, application/applefile, and
+application/mac-binhex40 become application/octet-stream. This prevents
+attachment bytes from being interpreted as attacker-selected MIME structure.
+Text uses the best seven-bit-safe transfer encoding; other content uses
+Base64. The output stores unencoded bytes, copied once; normal MIME writing
+performs the selected transfer encoding.
+
+Metadata includes the stored disposition, long/short filename precedence,
+DisplayName's historical Content-Type-only name override, nonnegative size,
+UTC creation/modification dates, validated Content-Id, relative-or-absolute
+Content-Location, and absolute Content-Base. Disposition parameters survive.
+No inline disposition is inferred from flags without a containing body.
+Missing content is omitted with an explicit loss, distinguishing external
+reference methods from other missing content; present empty values survive.
+Recognized embedded content passes through as application/ms-tnef without a
+fabricated filename or recursive validation. An embedded method without
+recognized content is reported and converted as an ordinary attachment.
+Unrendered OLE retains its exposed raw bytes with an explicit loss.
+Object/embedded IIDs are excluded exactly once through the existing model.
+
+Intentional Rust adaptations: incompatible or multivalued metadata returns a
+checked property error instead of being treated as absent. Invalid or
+unsuitable MIME types, dispositions, and URIs produce `InvalidHeader` losses
+rather than silent substitutions/omissions. URI syntax uses the existing
+RFC 3986 parser rather than .NET coercion. Content-Id prefix parsing is followed
+by authoring validation before a header is created.
+
+Eight tests in `tests/tnef_properties/attachment_conversion.rs` reuse existing
+wire builders and adapt MimeKit's converter, inline-attachment, and legacy
+TnefPart cases. They cover MIME-type sanitization, missing/empty/external
+content, embedded ownership, truncated Object headers, OLE passthrough,
+metadata precedence, encoding choices, header-injection rejection, checked
+property errors, and serialized MIME round trips.
+
+This is the attachment-conversion foundation, not a complete message converter.
+The property-based message converter below adds headers and body assembly.
+The message converter now classifies HTML references and places RTF images
+in multipart/related. Custom textual placeholders, MIME skeleton restoration,
+recursive embedded conversion, and OLE rendering remain follow-on work.
+
+### Property-based TNEF message conversion
+
+`TnefMessage::to_mime_message` returns an independently owned
+`TnefConversionResult` with a `MimeMessage` and ordered conversion losses.
+`to_mime_message_with_options` accepts fallback charset and existing calendar
+policy, including exception limits and deterministic timestamps. It does not
+mutate the source or return a partially authored message on failure.
+This ports the property path from MimeKit's `TnefMessageConverter`, preserving
+adapted inline specification, precedence, and compatibility comments.
+
+Headers include Received in original order/folding, From/Sender precedence,
+To/Cc/Bcc in recipient-table order, subject/date, Message-Id/correlation-key
+fallback, In-Reply-To/References, importance/priority/sensitivity, follow-up
+flags, and named Internet headers. No originator, subject, date, or identifier
+is fabricated. Received headers precede mapped headers; callers resubmitting
+over SMTP must remove them. Mailboxes use SMTP properties/search keys without
+address-book EntryID resolution or IMCEA encapsulation. ReceivedBy is used
+only when there are no recipient rows. Named headers run last, preserve string
+multivalues, and cannot override mapped fields, MIME structure, or excluded
+Exchange-internal fields.
+
+Bodies become text/plain, then text/html, then text/calendar alternatives.
+Unicode bodies are strictly decoded and re-encoded as UTF-8; binary/string
+bodies preserve raw bytes and their selected charset. A recognized HTML meta
+charset overrides the captured charset only when the entire body decodes
+successfully; scanning stops at the body or end of the head. All emitted text
+bodies, including calendars, select a seven-bit-safe transfer encoding.
+Calendar METHOD and charset come from the existing calendar MIME helper.
+
+Ordinary attachments reuse standalone conversion, preserve order, and follow
+the body in multipart/mixed, including attachment-only messages. Only
+successfully exported calendar exception attachments are consumed; failed,
+limited, or disabled exceptions remain ordinary attachments. Calendar and
+attachment losses retain their original index in the new optional
+`TnefConversionLoss::attachment_index`; standalone losses leave it unset.
+
+Intentional Rust adaptations include checked metadata/UTF-16 errors,
+authoring validation after identifier parsing, and explicit losses for
+invalid mailbox syntax and named headers. The existing References iterator
+also reports empty identifiers that MimeKit's enumerator skips. MIME skeletons
+produce explicit unsupported-feature losses. HTML attachment classification
+and related assembly are described below; unreferenced ordinary attachments
+no longer produce a blanket inline-placement loss.
+The RTF increment below adds best-body selection/rendering. Skeleton
+restoration, recursive embedded conversion, and OLE rendering remain
+unimplemented. Embedded content continues to pass through as application/ms-tnef.
+
+Fourteen cases in `tests/tnef_properties/message_conversion.rs` adapt upstream
+header/address/body tests and cover malformed metadata/UTF-16, charset
+selection, ownership, ordered attachment losses, and MIME round trips.
+Two calendar integration cases cover alternative ordering, exception
+consumption/retention, aggregate losses, and non-ASCII calendar serialization.
+The complete property, calendar-builder, and benchmark suites pass (171, 31,
+and 17 tests), as do scalar conversion cases, TNEF doctests, and strict
+all-target Clippy with optional benchmark support.
+
+### RTF body conversion
+
+Property-based message conversion now ports MimeKit's RTF preparation and
+MS-OXBBODY best-body algorithm. NativeBody takes precedence when recognized;
+otherwise available bodies and RtfInSync choose the best representation.
+Missing RtfInSync means false. A native plain/HTML selection still uses RTF
+when it is the only available body. Unknown compression is treated as absent,
+including when NativeBody requests RTF.
+
+When RTF is best, both plain text and HTML are generated from the decoded
+RTF instead of potentially stale stored alternatives. The existing RtfToText
+and RtfToHtml interpreters receive original bytes, respecting RTF codepages.
+The separate RtfHtmlExtractor recovers encapsulated HTML; recognized empty
+HTML is preserved rather than replaced with generated markup. The output is
+UTF-8 without a BOM, with seven-bit-safe transfer encoding. No text/rtf part
+is emitted. Calendar placement remains the final alternative.
+Extracted HTML is untrusted and unsanitized.
+
+Preparation decompresses once and validates even when stored text/HTML wins.
+Unknown compression produces InvalidRtfBody and drops the RTF. Complete LZFu
+with a bad CRC produces RtfChecksumMismatch but retains readable output, as
+MimeKit does. Intentional Rust adaptations preserve checked errors for other
+framing failures, including incomplete headers/content, invalid sizes, and
+nonzero uncompressed CRC. The standalone body reader remains strict about all
+decompression failures; recovery is local to message conversion.
+
+The first interpreter diagnostic for each emitted format becomes an
+RtfRenderingIssue loss, including surrogate replacement and resource-limit
+recovery. Malformed Unicode escapes use replacement characters, not a failed
+UTF-8 encoder or a BOM. Diagnostic storage is bounded to two interpreter
+losses; interpreter state uses its existing defaults. Decoded RTF and generated
+output have no additional size limit. Ordinary RTF currently incurs a
+plain-text pass, an HTML-extraction pass that returns None, and an HTML-rendering
+pass; encapsulated HTML needs only the first two.
+
+RTF attachment images and HTML reference classification are implemented below.
+Default nonimage placeholders emit nothing without a loss, matching MimeKit.
+Custom textual placeholders, MIME skeleton restoration, recursive embedded
+conversion, and OLE rendering remain separate increments. Applicable upstream
+algorithm, charset, malformed-input, and compatibility comments are retained.
+
+Nine cases in `tests/tnef_properties/rtf_conversion.rs` adapt the corresponding
+MimeKit converter cases. They cover LZFu/MELA, the native/synchronization/body
+matrix, encapsulated/empty HTML, bad CRC, unknown compression, malformed framing,
+lone surrogates, independent output ownership, seven-bit MIME round trips,
+default nonimage placeholder omission, and checked metadata errors.
+The complete property, calendar-builder, and benchmark regression suites pass
+(180, 31, and 17 tests), along with scalar message-conversion cases, TNEF
+doctests, and strict all-target Clippy with optional benchmark support.
+
+### HTML inline attachments and related assembly
+
+Property conversion now ports MimeKit's HTML reference index, inline rules, and
+multipart/related assembly, with applicable upstream rationale retained.
+Only attachments with RenderedInBody, an identifier, and an actual reference in
+the emitted HTML become related resources. Embedded-message methods/content
+are excluded, including unrecognized embedded-message data. Missing-content
+slots and consumed calendar exceptions retain their original indices.
+
+CID references are percent-decoded once (not form decoded), trimmed with MIME
+whitespace rules, unbracketed, and compared ignoring ASCII case. Non-ASCII
+characters remain literal, consistent with the port's other ASCII identifier
+comparisons rather than .NET Unicode ordinal folding. Content-Location compares
+literally and by normalized absolute URI, resolving relative locations against
+absolute Content-Base with the existing fluent-uri RFC 3986 implementation.
+Rejected URI headers cannot supply related-location candidates; valid but
+unresolvable bases return a checked UriResolution error.
+
+All HTML attribute values are considered, with character references decoded
+by the existing tokenizer. Attribute substrings, text, CSS URLs, and comments
+are not scanned as references. URLs are never fetched. The index retains only
+attachment identifiers and stops tokenization once all candidates are found.
+Scanning uses the emitted bytes and selected charset, including usable meta
+overrides; malformed-byte replacement reports InvalidHtmlBody without changing
+the output bytes. No candidates means no reference scan or extra HTML decoding.
+
+Stored HTML participates even when accompanying plain text is the best body,
+preserving MimeKit's intentional MS-OXCMAIL deviation. Selected encapsulated
+RTF HTML participates without another extraction pass; generated RTF HTML and
+stale stored HTML do not. The complete body/alternative, including calendar,
+is the first related child with an appropriate type parameter and no start
+parameter. Inline disposition preserves filename and other parameters.
+Unreferenced attachments remain ordered peers of related in outer mixed;
+their original disposition is preserved, even if it already says inline.
+
+Ten focused tests adapt TnefInlineAttachmentTests: flag/reference/body matrices,
+encoded and duplicate IDs, significant non-ASCII whitespace, locations/bases,
+charset matching, missing/rejected metadata, checked failures, embedded
+exclusion, body selection, parameter preservation, and MIME round trips.
+A calendar integration case covers related-root alternatives and exception
+index preservation. Custom textual placeholders, skeleton restoration,
+recursive embedded conversion, and OLE rendering remain unported.
+
+The affected property, calendar-builder, and benchmark suites pass (190, 32,
+and 17 tests), along with 33 scalar message-conversion cases, TNEF doctests,
+and strict all-target Clippy with optional benchmark support.
+
+### RTF attachment images
+
+Ordinary best-body RTF now places browser-displayable attachment images at
+visible `\objattph` placeholders. The eligible attachment list excludes hidden
+attachments and RenderingPosition -1; unsigned positions sort ascending,
+absent positions last, with table order breaking ties. Missing content and
+exported calendar exceptions retain their slots. Equal placeholder/slot counts
+place images inline; otherwise images are appended as individual HTML divs in
+rendering order. Related MIME parts retain attachment-table order.
+
+PNG, JPEG, GIF87a/GIF89a, WebP, and BMP signatures are sniffed, not fully decoded.
+Only declared image/* or application/octet-stream content qualifies; displayed
+parts receive the sniffed type without losing parameters. Embedded-message
+attachments are excluded. Missing or duplicate Content-Ids are replaced with
+generated IDs, checking ASCII-case-insensitive collisions across all converted
+attachments, including hidden and ordinary parts. Generation failures propagate
+as MessageIdGeneration errors. CID URLs percent-encode UTF-8 bytes outside
+RFC 3986 pchar, including literal percent signs; HTML attributes are escaped.
+Filename, or the existing Content-Type name fallback, supplies optional alt text.
+
+The existing plain-text render pass counts visible placeholders, avoiding an
+extra RTF interpretation pass. Nonimage placeholders and default plain-text
+placeholders emit nothing, without InlinePlacementNotApplied losses. Extracted
+HTML bypasses image preparation and uses its own reference classification;
+unselected RTF does not change attachment IDs, types, or placement. The complete
+body/alternative, including calendar, remains the first related child. Early
+attachment conversion preserves original indices and body-before-attachment
+loss ordering. All output remains independently owned.
+
+Eleven property tests adapt MimeKit's default RTF inline-image cases, with
+additional signature, metadata, visibility/recovery, ownership, and round-trip
+coverage. A private helper regression covers absent positions and unnamed
+images; a calendar regression checks consumed-exception slot alignment.
+Custom textual placeholder callbacks, OLE rendering, MIME skeleton restoration,
+and recursive embedded conversion remain separate increments.
+
+The affected property, calendar-builder, and benchmark tests pass (201, 33,
+and 17 cases), as do the private helper case, 44 scalar conversion cases,
+31 TNEF doctests, and strict all-target Clippy with optional benchmark support.
+
 ### Whole TNEF messages
 
 `TnefMessage::load` loads a stream with default options. Configure
@@ -11521,7 +11764,42 @@ the following allocations per operation (count / total bytes, not peak memory):
 
 Binary metadata decoding accounts for the BinaryText access allocations.
 Raw streaming allocates nothing for all four cases. No throughput timings
-were recorded for these new workloads.
+were recorded for these original model workloads.
+
+The attachment-conversion increment extends this shared harness to six cases
+and five modes (30 identities). `Text` alternates plain ASCII and a final
+`From ` line to exercise SevenBit/QuotedPrintable selection; `Sanitize`
+alternates forbidden multipart/message MIME tags. The four original input
+workloads are unchanged.
+
+`Convert` creates and drops fresh owned MIME parts from preloaded attachments,
+observing complete headers, raw content, and loss kinds/descriptions.
+`ConvertWrite` additionally serializes each part to a fresh output buffer and
+observes those bytes. Both include output allocation/destruction but exclude
+fixture loading. Throughput uses original TNEF wire bytes, not parser throughput
+or serialized MIME size. Checks outside measurement independently compare
+types, metadata, encodings, losses, and content, then reparse serialized MIME
+and compare decoded payloads. No upstream TNEF benchmark class exists; these
+are original equivalent workloads, not purported upstream benchmark ports.
+
+Initial Criterion estimates below are microseconds per 32-attachment document,
+including observation overhead (10 samples, 100 ms warmup, 200 ms measurement).
+The shared host produced broad intervals and outliers, especially for embedded
+and text content; these are provisional current baselines, not speedup claims.
+
+| Case | Convert (us) | ConvertWrite (us) |
+| --- | ---: | ---: |
+| Direct | 266.4 | 446.9 |
+| BinaryText | 265.3 | 445.5 |
+| Embedded | 403.1 | 409.3 |
+| Empty | 26.6 | 45.9 |
+| Text | 315.1 | 657.7 |
+| Sanitize | 278.5 | 429.1 |
+
+All 216 TNEF benchmark smoke identities pass. The full property and benchmark
+regression suites pass (157 and 17 tests); attachment-filtered suites also pass
+without default features. The new conversion doctest and strict all-target
+Clippy with optional benchmark support pass.
 
 #### Whole TNEF messages
 
@@ -11566,6 +11844,114 @@ The schema-v9 allocation report is preserved in session artifacts under
 The scoped default/scalar suites pass 170 tests (one existing raw-reader test
 remains ignored). Scoped strict Clippy, ten TNEF doctests, and strict rustdoc
 also pass.
+
+#### Property-based message conversion benchmarks
+
+Ten additional identities under `tnef-messages/{Convert,ConvertWrite}` use the
+same five message fixtures described above. `Convert` creates a fresh owned
+MIME message and observes headers, leaf content, and losses. `ConvertWrite`
+also serializes to a fresh Vec and observes those bytes. Both include output
+allocation/destruction but exclude TNEF loading and fixture validation.
+ShortReads affects only Load/Traverse; its preloaded conversion input is
+identical to Mixed. Throughput counts original TNEF wire bytes, not serialized
+MIME bytes or parsing throughput. Random multipart boundary generation and
+observation overhead are included. Embedded content passes through as TNEF
+rather than undergoing recursive conversion.
+
+Independent expectations check headers, alternative/mixed structure,
+attachment names/types/bytes, losses, and serialized MIME round trips.
+All 226 TNEF benchmark smoke identities pass. Provisional Criterion point
+estimates, in microseconds per message with 32 attachments:
+
+| Case | Convert | ConvertWrite |
+| --- | ---: | ---: |
+| Legacy | 175.8 | 358.3 |
+| Mapi | 193.0 | 299.6 |
+| Mixed | 184.0 | 320.4 |
+| Embedded | 108.1 | 152.0 |
+| ShortReads | 174.6 | 352.5 |
+
+These are short shared-host samples (10 samples, 100 ms warm-up, 200 ms target
+measurement), not isolated performance claims or comparisons to an earlier
+converter. Mixed/ShortReads differences reflect measurement noise, not a
+different conversion path. Logs are retained in session artifacts under
+`files/tnef-message-conversion/`.
+
+The RTF increment adds Rtf, RtfHtml, and RtfStale to all four whole-message
+modes (twelve additional benchmark identities). Each adds 128 RTF paragraphs
+to the existing mixed-message fixture with 32 attachments. Rtf renders both
+alternatives; RtfHtml extracts original paragraph markup; RtfStale decompresses
+and validates but retains the stored plain/HTML alternatives.
+The independent literal encoder runs outside measurement. Convert/ConvertWrite
+include decompression, best-body selection, rendering/extraction as applicable,
+loss reporting, output observation, and destruction, but still exclude TNEF
+loading. Expectations cover decoded RTF bytes, generated text/HTML, untouched
+attachments, and serialized MIME round trips.
+
+All 238 TNEF smoke identities pass. Provisional shared-host Criterion point
+estimates, in microseconds per message:
+
+| Case | Convert | ConvertWrite |
+| --- | ---: | ---: |
+| Rtf | 405.5 | 583.2 |
+| RtfHtml | 511.1 | 935.8 |
+| RtfStale | 209.5 | 297.8 |
+
+These use 10 samples, 100 ms warm-up, and a 200 ms target measurement.
+Intervals are wide; no speedup or cross-case efficiency claim is implied.
+Inputs differ in RTF size and output representation. Logs are retained in
+session artifacts under `files/tnef-rtf-conversion/`.
+
+The HTML inline increment adds HtmlRelated, HtmlUnreferenced, and RtfHtmlRelated
+to all four whole-message modes (twelve additional identities). Related cases
+match 16 of 32 flagged attachments through CIDs and resolved locations, retaining
+the others as ordinary peers. HtmlUnreferenced scans comparably sized stored HTML
+without finding candidates. All include 128 unrelated attribute values; the
+RTF variant also retains 128 rendered paragraphs. Independent checks cover
+related/alternative/mixed structure, disposition, order, payloads, extraction,
+losses, and serialized MIME decoding. Loading and fixture validation remain
+outside Convert/ConvertWrite timing.
+
+All 250 TNEF benchmark smoke identities pass. Provisional Criterion point
+estimates, in microseconds per message:
+
+| Case | Convert | ConvertWrite |
+| --- | ---: | ---: |
+| HtmlRelated | 454.4 | 781.3 |
+| HtmlUnreferenced | 451.9 | 653.6 |
+| RtfHtmlRelated | 1128.7 | 1620.1 |
+
+These are short shared-host samples (10 samples, 100 ms warm-up, 200 ms target
+measurement), not isolated performance claims. The RTF intervals are especially
+wide, with a severe high outlier in ConvertWrite. Logs are retained in session
+artifacts under `files/tnef-html-inline/`.
+
+The RTF-image increment adds RtfImages and RtfImagesFooter to all four message
+modes. Both retain 128 RTF paragraphs and 32 2-KiB attachments, of which 16 have
+a compatible media type and PNG signature. The other 16 declare PDF and must
+not display. Reversed rendering positions exercise ordering independently of
+MIME table order. RtfImages matches 32 placeholders; RtfImagesFooter deliberately
+has just one, appending the displayable images in individual divs.
+
+Fixture checks independently verify related/alternative/mixed structure,
+sniffed media types, unique generated CIDs, markup placement and order,
+disposition, original payloads, plain text, and serialized MIME decoding.
+Conversion timing includes CID generation but excludes fixture setup/loading.
+These are original benchmark workloads; MimeKit has no corresponding TNEF
+benchmark class.
+
+All 258 TNEF benchmark smoke identities pass. Provisional Criterion point
+estimates, in microseconds per message:
+
+| Case | Convert | ConvertWrite |
+| --- | ---: | ---: |
+| RtfImages | 444.2 | 588.6 |
+| RtfImagesFooter | 387.8 | 515.8 |
+
+These use 10 samples, 100 ms warm-up, and a 200 ms target measurement on a
+shared host. Intervals are wide, and the inputs differ; these are baselines,
+not speedup or cross-case efficiency claims. Logs are retained in session
+artifacts under `files/tnef-rtf-images/`.
 
 #### TNEF attribute writing
 

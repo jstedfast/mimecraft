@@ -128,7 +128,7 @@ mod attachment_workloads;
 mod message_workloads;
 
 #[test]
-fn whole_message_workloads_match_independent_content_and_metadata() {
+fn whole_message_workloads_match_content_metadata_and_mime_conversion() {
     for name in message_workloads::CASES {
         let case = message_workloads::workload(name);
         case.check();
@@ -141,7 +141,7 @@ fn whole_message_workloads_match_independent_content_and_metadata() {
 }
 
 #[test]
-fn attachment_workloads_match_metadata_and_content() {
+fn attachment_workloads_match_metadata_content_and_mime_round_trips() {
     for name in attachment_workloads::CASES {
         let case = attachment_workloads::workload(name);
         case.check();

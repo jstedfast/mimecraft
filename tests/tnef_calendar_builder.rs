@@ -560,6 +560,277 @@ fn attendee_address_sources_and_sender_fallback() {
 }
 
 #[test]
+fn message_conversion_places_calendar_last_and_preserves_limited_exceptions() {
+    use mimecraft::{
+        MimeEntity,
+        tnef::{TnefConversionLossKind, TnefConversionOptions},
+    };
+    let mut f = Fixture::recurring(recurrence::weekly());
+    f.properties
+        .tag(Tag::BODY_W, Value::Text("Caf\u{e9}".into()));
+    f.properties
+        .tag(Tag::BODY_HTML_W, Value::Text("<p>Agenda</p>".into()));
+    let mut embedded = Fixture::empty("IPM.Appointment");
+    embedded.properties.named(
+        Name::EXCEPTION_REPLACE_TIME,
+        Value::DateTime(date(2024, 7, 10, 14, 0)),
+    );
+    f.attach(2, embedded.bytes(), None);
+    let source = f.load();
+    let original = source.attachments()[0].as_bytes().unwrap().to_vec();
+    let mut opts = TnefConversionOptions {
+        calendar: options(),
+        ..Default::default()
+    };
+    let mut result = source.to_mime_message_with_options(&opts).unwrap();
+    assert!(result.losses.is_empty(), "{:?}", result.losses);
+    let MimeEntity::Multipart(alternative) = result.message.body().unwrap() else {
+        panic!("alternative");
+    };
+    assert_eq!(
+        alternative.content_type().unwrap().unwrap().mime_type(),
+        "multipart/alternative"
+    );
+    assert_eq!(alternative.children().len(), 3);
+    let MimeEntity::Part(calendar) = &alternative.children()[2] else {
+        panic!("calendar");
+    };
+    assert_eq!(
+        calendar
+            .content_type()
+            .unwrap()
+            .unwrap()
+            .parameters()
+            .get("method"),
+        Some("REQUEST")
+    );
+    let text = std::str::from_utf8(calendar.content().get_ref().get_ref()).unwrap();
+    assert_eq!(text.matches("BEGIN:VEVENT").count(), 2);
+    assert!(text.contains("DESCRIPTION:Caf\u{e9}"));
+    assert!(matches!(
+        calendar.content_transfer_encoding().unwrap(),
+        mimecraft::ContentEncoding::QuotedPrintable | mimecraft::ContentEncoding::Base64
+    ));
+    let expected = text.as_bytes().to_vec();
+    let mut wire = Vec::new();
+    result.message.write_to(&mut wire).unwrap();
+    assert!(wire.is_ascii());
+    let mut parsed = mimecraft::MimeParser::new(wire.as_slice())
+        .parse_message()
+        .unwrap();
+    let MimeEntity::Multipart(alternative) = parsed.body_mut().unwrap() else {
+        panic!("alternative");
+    };
+    let MimeEntity::Part(calendar) = &mut alternative.children_mut()[2] else {
+        panic!("calendar");
+    };
+    let mut decoded = Vec::new();
+    calendar.content_mut().decode_to(&mut decoded).unwrap();
+    assert_eq!(decoded, expected);
+    assert_eq!(source.attachments()[0].as_bytes().unwrap(), original);
+
+    opts.calendar.max_exceptions = 0;
+    let result = source.to_mime_message_with_options(&opts).unwrap();
+    assert!(
+        result
+            .losses
+            .iter()
+            .any(|loss| loss.kind == TnefConversionLossKind::CalendarExceptionLimitExceeded)
+    );
+    let MimeEntity::Multipart(mixed) = result.message.body().unwrap() else {
+        panic!("mixed");
+    };
+    assert_eq!(mixed.children().len(), 2);
+    let MimeEntity::Part(attachment) = &mixed.children()[1] else {
+        panic!("attachment");
+    };
+    assert_eq!(attachment.content().get_ref().get_ref(), &original);
+    assert!(
+        attachment
+            .content_type()
+            .unwrap()
+            .unwrap()
+            .is_mime_type("application", "ms-tnef")
+    );
+
+    opts.calendar.generate_calendar = false;
+    let result = source.to_mime_message_with_options(&opts).unwrap();
+    assert_eq!(result.message.leaf_parts().count(), 3);
+    assert!(
+        !result
+            .losses
+            .iter()
+            .any(|loss| loss.kind == TnefConversionLossKind::CalendarExceptionLimitExceeded)
+    );
+}
+
+#[test]
+fn message_related_root_includes_calendar_and_skipped_exception_indices() {
+    use mimecraft::{MimeEntity, tnef::TnefConversionOptions};
+
+    let mut f = Fixture::recurring(recurrence::weekly());
+    f.properties.tag(Tag::BODY_W, Value::Text("Agenda".into()));
+    f.properties.tag(
+        Tag::BODY_HTML_W,
+        Value::Text("<img src='cid:image@example.com'>".into()),
+    );
+    let mut embedded = Fixture::empty("IPM.Appointment");
+    embedded.properties.named(
+        Name::EXCEPTION_REPLACE_TIME,
+        Value::DateTime(date(2024, 7, 10, 14, 0)),
+    );
+    f.attach(2, embedded.bytes(), None);
+    let mut image = Properties::default();
+    image.tag(Tag::ATTACH_METHOD, Value::I32(1));
+    image.tag(Tag::ATTACH_DATA_BIN, Value::Binary(vec![1, 2, 3]));
+    image.tag(Tag::ATTACH_FLAGS, Value::I32(4));
+    image.tag(
+        Tag::ATTACH_CONTENT_ID_W,
+        Value::Text("image@example.com".into()),
+    );
+    f.attachments.push(image);
+
+    let result = f
+        .load()
+        .to_mime_message_with_options(&TnefConversionOptions {
+            calendar: options(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(result.losses.is_empty(), "{:?}", result.losses);
+    let MimeEntity::Multipart(related) = result.message.body().unwrap() else {
+        panic!("related")
+    };
+    let content_type = related.content_type().unwrap().unwrap();
+    assert_eq!(content_type.mime_type(), "multipart/related");
+    assert_eq!(
+        content_type.parameters().get("type"),
+        Some("multipart/alternative")
+    );
+    assert_eq!(related.children().len(), 2);
+    let MimeEntity::Multipart(alternative) = &related.children()[0] else {
+        panic!("alternative")
+    };
+    assert_eq!(alternative.children().len(), 3);
+    let MimeEntity::Part(calendar) = &alternative.children()[2] else {
+        panic!("calendar")
+    };
+    assert_eq!(
+        calendar.content_type().unwrap().unwrap().mime_type(),
+        "text/calendar"
+    );
+    assert_eq!(
+        std::str::from_utf8(calendar.content().get_ref().get_ref())
+            .unwrap()
+            .matches("BEGIN:VEVENT")
+            .count(),
+        2
+    );
+    let MimeEntity::Part(image) = &related.children()[1] else {
+        panic!("image")
+    };
+    assert_eq!(image.content().get_ref().get_ref(), &[1, 2, 3]);
+    assert!(
+        !image
+            .content_disposition()
+            .unwrap()
+            .unwrap()
+            .is_attachment()
+    );
+}
+
+#[test]
+fn rtf_images_keep_exported_calendar_exception_placeholder_slots() {
+    use mimecraft::{
+        MimeEntity,
+        tnef::{RtfCompressedWriter, RtfCompressionMode, TnefConversionOptions},
+    };
+    use std::io::{Cursor, Write};
+
+    let mut f = Fixture::recurring(recurrence::weekly());
+    let mut rtf =
+        RtfCompressedWriter::new(Cursor::new(Vec::new()), RtfCompressionMode::Compressed).unwrap();
+    rtf.write_all(br"{\rtf1 A\objattph\'20 B\objattph\'20 C}")
+        .unwrap();
+    rtf.finish().unwrap();
+    f.properties.tag(
+        Tag::RTF_COMPRESSED,
+        Value::Binary(rtf.into_inner().into_inner()),
+    );
+    let mut embedded = Fixture::empty("IPM.Appointment");
+    embedded.properties.named(
+        Name::EXCEPTION_REPLACE_TIME,
+        Value::DateTime(date(2024, 7, 10, 14, 0)),
+    );
+    f.attach(2, embedded.bytes(), None);
+    f.attachments[0].tag(Tag::RENDERING_POSITION, Value::I32(0));
+    let mut image = Properties::default();
+    image.tag(Tag::ATTACH_METHOD, Value::I32(1));
+    image.tag(Tag::RENDERING_POSITION, Value::I32(1));
+    image.tag(Tag::ATTACH_DATA_BIN, Value::Binary(b"GIF89a".to_vec()));
+    image.tag(
+        Tag::ATTACH_CONTENT_ID_W,
+        Value::Text("image@example.com".into()),
+    );
+    f.attachments.push(image);
+
+    let result = f
+        .load()
+        .to_mime_message_with_options(&TnefConversionOptions {
+            calendar: options(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(result.losses.is_empty(), "{:?}", result.losses);
+    let MimeEntity::Multipart(related) = result.message.body().unwrap() else {
+        panic!("related")
+    };
+    assert_eq!(
+        related.content_type().unwrap().unwrap().mime_type(),
+        "multipart/related"
+    );
+    assert_eq!(related.children().len(), 2);
+    let MimeEntity::Multipart(alternative) = &related.children()[0] else {
+        panic!("alternative")
+    };
+    assert_eq!(alternative.children().len(), 3);
+    let MimeEntity::Part(html) = &alternative.children()[1] else {
+        panic!("html")
+    };
+    let html = std::str::from_utf8(html.content().get_ref().get_ref()).unwrap();
+    assert!(html.contains("A B<img src=\"cid:image@example.com\"/> C"));
+    let MimeEntity::Part(calendar) = &alternative.children()[2] else {
+        panic!("calendar")
+    };
+    assert_eq!(
+        calendar.content_type().unwrap().unwrap().mime_type(),
+        "text/calendar"
+    );
+    assert_eq!(
+        std::str::from_utf8(calendar.content().get_ref().get_ref())
+            .unwrap()
+            .matches("BEGIN:VEVENT")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn message_conversion_retains_calendar_losses_and_does_not_fabricate_a_body() {
+    use mimecraft::tnef::TnefConversionLossKind;
+    let result = Fixture::empty("IPM.Appointment")
+        .load()
+        .to_mime_message()
+        .unwrap();
+    assert_eq!(result.losses.len(), 1);
+    assert_eq!(
+        result.losses[0].kind,
+        TnefConversionLossKind::InvalidCalendarData
+    );
+    assert!(result.message.body().is_none());
+}
+
+#[test]
 fn recurrence_master_and_embedded_exception_exact_mapping() {
     let mut f = Fixture::recurring(recurrence::weekly());
     let mut embedded = Fixture::empty("IPM.Appointment");

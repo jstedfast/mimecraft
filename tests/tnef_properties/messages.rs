@@ -11,6 +11,9 @@ use mimecraft::tnef::{
 };
 use std::{borrow::Cow, io::Cursor, path::Path};
 
+#[path = "message_conversion.rs"]
+mod conversion;
+
 fn string(tag: Tag, value: &str) -> Vec<u8> {
     let raw = if tag.value_type() == Type::UNICODE {
         unicode(&format!("{value}\0"))

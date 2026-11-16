@@ -25,7 +25,16 @@
 //! Calendar recurrence helpers generate checked RRULE values and local EXDATEs.
 //! Calendar export assembles master/exception events, recipients, alarms and zones,
 //! with explicit losses, resource limits, and a UTF-8 text/calendar MIME-part helper.
-//! Embedded readers share limits and diagnostics; MIME conversion is not yet implemented.
+//! Standalone attachment conversion preserves metadata and embedded TNEF, with explicit losses.
+//! Property-based message conversion maps headers, text/HTML/calendar, and ordered attachments.
+//! RTF best-body selection renders UTF-8 alternatives or extracts encapsulated HTML,
+//! retaining readable checksum-damaged content with explicit losses.
+//! Referenced RenderedInBody attachments join stored/extracted HTML in multipart/related.
+//! Ordinary RTF places sniffed images at matching placeholders or in a footer,
+//! with unique Content-Ids and multipart/related grouping. Nonimage placeholders
+//! emit nothing; caller-defined textual placeholders are not yet supported.
+//! MIME skeleton restoration remains unimplemented, with explicit conversion losses.
+//! Embedded readers share limits and diagnostics.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
 //! supply a fallible logger to stop at the first reported issue.
@@ -33,14 +42,17 @@
 use std::{error::Error, fmt, io};
 
 mod attachment;
+mod attachment_conversion;
 pub mod calendar;
 mod calendar_builder;
 mod calendar_names;
 mod calendar_recurrence;
 mod date_time;
 mod embedded_writer;
+mod html_references;
 mod message;
 mod message_body;
+mod message_conversion;
 mod property_rtf_writer;
 mod property_set;
 mod property_tags;
@@ -51,14 +63,20 @@ mod recipient;
 mod recurrence;
 mod rtf_compressed;
 mod rtf_compressed_writer;
+mod rtf_images;
 mod time_zone;
 mod value_conversion;
 mod writer;
 pub use attachment::{TnefAttachFlags, TnefAttachMethod, TnefAttachment, TnefAttachmentContent};
+pub use attachment_conversion::{
+    TnefAttachmentConversionError, TnefAttachmentConversionResult, TnefConversionLoss,
+    TnefConversionLossKind,
+};
 pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
 pub use embedded_writer::{TnefEmbeddedSink, TnefEmbeddedWriter};
 pub use message::TnefMessage;
 pub use message_body::{TnefBodyError, TnefBodyReader, TnefMessageBody, TnefMessageBodyFormat};
+pub use message_conversion::{TnefConversionError, TnefConversionOptions, TnefConversionResult};
 pub use property_rtf_writer::TnefRtfPropertyWriter;
 pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{

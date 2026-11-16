@@ -90,7 +90,8 @@ impl From<CharsetError> for TnefBodyError {
 /// takes already-owned bytes and imposes no additional size limit.
 ///
 /// This does not render RTF, extract encapsulated HTML, or select among duplicate
-/// or legacy/MAPI bodies. Those are responsibilities of the message loader.
+/// or legacy/MAPI bodies. Loading selects stored bodies; the message converter
+/// selects the best body and performs RTF rendering/HTML extraction.
 ///
 /// ```
 /// use mimecraft::{charsets::Charset, tnef::{TnefMessageBody, TnefPropertyTag}};
