@@ -235,8 +235,15 @@ fn prepare_message(name: &'static str) -> message_workloads::Workload {
 }
 
 #[metabench::benchmark(MESSAGE_LOAD, "tnef-messages", "Load")]
+#[bench::EmbeddedRecursive(&prepare_message("EmbeddedRecursive"))]
+#[bench::OleImages(&prepare_message("OleImages"))]
+#[bench::OleFallback(&prepare_message("OleFallback"))]
+#[bench::MimeSkeleton(&prepare_message("MimeSkeleton"))]
+#[bench::MimeSkeletonFallback(&prepare_message("MimeSkeletonFallback"))]
 #[bench::RtfImages(&prepare_message("RtfImages"))]
 #[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::RtfPlaceholders(&prepare_message("RtfPlaceholders"))]
+#[bench::RtfPlaceholdersFooter(&prepare_message("RtfPlaceholdersFooter"))]
 #[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
 #[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
 #[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
@@ -253,8 +260,15 @@ fn message_load(case: &message_workloads::Workload) -> message_workloads::Summar
 }
 
 #[metabench::benchmark(MESSAGE_TRAVERSE, "tnef-messages", "Traverse")]
+#[bench::EmbeddedRecursive(&prepare_message("EmbeddedRecursive"))]
+#[bench::OleImages(&prepare_message("OleImages"))]
+#[bench::OleFallback(&prepare_message("OleFallback"))]
+#[bench::MimeSkeleton(&prepare_message("MimeSkeleton"))]
+#[bench::MimeSkeletonFallback(&prepare_message("MimeSkeletonFallback"))]
 #[bench::RtfImages(&prepare_message("RtfImages"))]
 #[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::RtfPlaceholders(&prepare_message("RtfPlaceholders"))]
+#[bench::RtfPlaceholdersFooter(&prepare_message("RtfPlaceholdersFooter"))]
 #[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
 #[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
 #[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
@@ -271,8 +285,15 @@ fn message_traverse(case: &message_workloads::Workload) -> message_workloads::Su
 }
 
 #[metabench::benchmark(MESSAGE_CONVERT, "tnef-messages", "Convert")]
+#[bench::EmbeddedRecursive(&prepare_message("EmbeddedRecursive"))]
+#[bench::OleImages(&prepare_message("OleImages"))]
+#[bench::OleFallback(&prepare_message("OleFallback"))]
+#[bench::MimeSkeleton(&prepare_message("MimeSkeleton"))]
+#[bench::MimeSkeletonFallback(&prepare_message("MimeSkeletonFallback"))]
 #[bench::RtfImages(&prepare_message("RtfImages"))]
 #[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::RtfPlaceholders(&prepare_message("RtfPlaceholders"))]
+#[bench::RtfPlaceholdersFooter(&prepare_message("RtfPlaceholdersFooter"))]
 #[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
 #[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
 #[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]
@@ -289,8 +310,15 @@ fn message_convert(case: &message_workloads::Workload) -> message_workloads::Sum
 }
 
 #[metabench::benchmark(MESSAGE_CONVERT_WRITE, "tnef-messages", "ConvertWrite")]
+#[bench::EmbeddedRecursive(&prepare_message("EmbeddedRecursive"))]
+#[bench::OleImages(&prepare_message("OleImages"))]
+#[bench::OleFallback(&prepare_message("OleFallback"))]
+#[bench::MimeSkeleton(&prepare_message("MimeSkeleton"))]
+#[bench::MimeSkeletonFallback(&prepare_message("MimeSkeletonFallback"))]
 #[bench::RtfImages(&prepare_message("RtfImages"))]
 #[bench::RtfImagesFooter(&prepare_message("RtfImagesFooter"))]
+#[bench::RtfPlaceholders(&prepare_message("RtfPlaceholders"))]
+#[bench::RtfPlaceholdersFooter(&prepare_message("RtfPlaceholdersFooter"))]
 #[bench::HtmlRelated(&prepare_message("HtmlRelated"))]
 #[bench::HtmlUnreferenced(&prepare_message("HtmlUnreferenced"))]
 #[bench::RtfHtmlRelated(&prepare_message("RtfHtmlRelated"))]

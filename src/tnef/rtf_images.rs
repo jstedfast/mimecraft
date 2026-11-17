@@ -4,9 +4,9 @@
 use std::{collections::HashMap, io::Cursor};
 
 use super::{TnefAttachMethod, TnefAttachment, TnefConversionError, TnefPropertyTag as Tag};
-use crate::{MessageId, MimePart, text::HtmlWriter};
+use crate::{MessageId, MimeEntity, text::HtmlWriter};
 
-fn sniff_image_subtype(bytes: &[u8]) -> Option<&'static str> {
+pub(super) fn sniff_image_subtype(bytes: &[u8]) -> Option<&'static str> {
     // PNG (ISO/IEC 15948, 5.2): the complete eight-byte signature.
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some("png");
@@ -49,11 +49,9 @@ fn content_id_url(id: &str) -> String {
     url
 }
 
-pub(super) fn prepare_rtf_images(
+pub(super) fn rtf_placeholder_order(
     attachments: &[TnefAttachment],
-    parts: &mut [Option<MimePart<Cursor<Vec<u8>>>>],
-    displayed: &mut [bool],
-) -> Result<Vec<Option<String>>, TnefConversionError> {
+) -> Result<Vec<usize>, TnefConversionError> {
     // MS-OXRTFEX 2.2.3.4: Outlook writes \objattph where each attachment
     // appears in the body. Hidden attachments and position 0xFFFFFFFF are
     // excluded. MS-OXCMAIL 2.1.3.4.1.1 matches the lowest unsigned position
@@ -72,7 +70,15 @@ pub(super) fn prepare_rtf_images(
         }
     }
     positions.sort_unstable();
+    Ok(positions.into_iter().map(|(_, index)| index).collect())
+}
 
+pub(super) fn prepare_rtf_images(
+    attachments: &[TnefAttachment],
+    parts: &mut [Option<MimeEntity<Cursor<Vec<u8>>>>],
+    displayed: &mut [bool],
+    order: &[usize],
+) -> Result<Vec<Option<String>>, TnefConversionError> {
     let mut content_ids = HashMap::<String, usize>::new();
     for part in parts.iter().flatten() {
         if let Some(id) = part.content_id().expect("authored Content-Id") {
@@ -82,12 +88,12 @@ pub(super) fn prepare_rtf_images(
         }
     }
 
-    let mut images = Vec::with_capacity(positions.len());
-    for (_, index) in positions {
+    let mut images = Vec::with_capacity(order.len());
+    for &index in order {
         // Missing content and attachments exported to calendar still occupy
         // slots, so later images remain aligned with their placeholders.
         images.push(None);
-        let Some(part) = &mut parts[index] else {
+        let Some(MimeEntity::Part(part)) = &mut parts[index] else {
             continue;
         };
         // Attached Message objects never become inline, including invalid
@@ -201,10 +207,11 @@ mod tests {
             .collect();
         let mut parts: Vec<_> = attachments
             .iter()
-            .map(|attachment| attachment.to_mime_part().unwrap().part)
+            .map(|attachment| attachment.to_mime_part().unwrap().part.map(Into::into))
             .collect();
         let mut displayed = [false; 3];
-        let images = prepare_rtf_images(&attachments, &mut parts, &mut displayed).unwrap();
+        let order = rtf_placeholder_order(&attachments).unwrap();
+        let images = prepare_rtf_images(&attachments, &mut parts, &mut displayed, &order).unwrap();
         assert_eq!(displayed, [true; 3]);
         for (image, index) in images.iter().zip([2, 1, 0]) {
             let id = parts[index]

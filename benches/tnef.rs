@@ -209,6 +209,10 @@ fn main() {
     println!("Conversion includes RTF decompression/validation; fixture compression is untimed.");
     println!("HtmlRelated/RtfHtmlRelated group 16 of 32 attachments by CID/resolved location.");
     println!("RtfImages/RtfImagesFooter place 16 sniffed images by reversed position or footer.");
+    println!("RtfPlaceholders/RtfPlaceholdersFooter add shared callback text for all 32 slots.");
+    println!("EmbeddedRecursive converts 32 two-level message/rfc822 attachment trees.");
+    println!("OleImages/OleFallback invoke a shared renderer for 32 objects; no native OLE work.");
+    println!("MimeSkeleton restores 32 payloads; MimeSkeletonFallback mismatches the last slot.");
     println!("HtmlUnreferenced scans comparable HTML without matching flagged attachments.");
     println!(
         "Traverse also streams decoded bodies/content and recursively loads embedded messages."

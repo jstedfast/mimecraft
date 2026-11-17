@@ -5,6 +5,9 @@ use super::super::super::bodies::compressed;
 use super::*;
 use mimecraft::{MimePart, tnef::TnefConversionResult};
 
+#[path = "rtf_placeholders.rs"]
+mod placeholders;
+
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
 const JPEG: &[u8] = b"\xff\xd8\xff\xe0\0\x10JFIF\0";
 const TWO: &[u8] = br"{\rtf1 A\objattph\'20 B\objattph\'20 C}";

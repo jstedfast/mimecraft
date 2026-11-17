@@ -1,7 +1,7 @@
 // Adapted from MimeKit's Tnef/TnefMessageConverter.cs property conversion.
 // Copyright (C) 2026 Jeffrey Stedfast. MIT; see LICENSE.
 
-use std::{error::Error, fmt, io};
+use std::{error::Error, fmt, io, sync::Arc};
 
 use super::{
     RtfCompressedToRtf, RtfCompressionMode, RtfDecompressionError, TnefAttachmentConversionError,
@@ -11,7 +11,7 @@ use super::{
     attachment_conversion::create_part,
     calendar::{CalendarLossKind, CalendarOptions, build_calendar},
     html_references::HtmlReferences,
-    rtf_images::prepare_rtf_images,
+    rtf_images::{prepare_rtf_images, rtf_placeholder_order},
 };
 use crate::{
     Address, AddressHeaderFormatError, AddressList, BestEncodingError, ContentDisposition,
@@ -26,6 +26,9 @@ use crate::{
     },
 };
 
+#[path = "mime_skeleton.rs"]
+mod skeleton;
+
 // PS_INTERNET_HEADERS, in Windows GUID byte order.
 const INTERNET_HEADERS: [u8; 16] = [0x86, 3, 2, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 const FLAG_REQUEST: TnefNameId = TnefNameId {
@@ -33,13 +36,72 @@ const FLAG_REQUEST: TnefNameId = TnefNameId {
     name: TnefName::Id(0x8530),
 };
 
-/// Policy for the property-based TNEF-to-MIME conversion.
-#[derive(Clone, Debug)]
+/// Generates optional text for an RTF attachment placeholder.
+///
+/// Receives the original attachment and its converted entity, or `None` for
+/// missing content or an exported calendar exception. Called once per eligible
+/// attachment in rendering order, before image IDs/inline disposition are assigned.
+/// Empty strings and `None` emit nothing. Errors abort conversion; callback side
+/// effects are not rolled back, including when an enclosing skeleton falls back.
+///
+/// The text appears in plain text for every attachment and in generated HTML
+/// only when no image is displayed, with HTML escaping. A count mismatch appends
+/// texts in rendering order, separated by CRLF in plain text and divs in HTML.
+/// Encapsulated HTML stays unchanged, but its generated plain text uses callbacks.
+/// Successful skeleton restoration and non-RTF best bodies bypass the callback.
+///
+/// ```
+/// use std::sync::Arc;
+/// use mimecraft::tnef::TnefConversionOptions;
+/// let options = TnefConversionOptions {
+///     attachment_placeholder_callback: Some(Arc::new(|attachment, _entity| {
+///         Ok(attachment.file_name()?.map(|name| format!("[Attachment: {name}]")))
+///     })),
+///     ..Default::default()
+/// };
+/// ```
+pub type TnefAttachmentPlaceholderCallback = dyn Fn(&super::TnefAttachment, Option<&MimeEntity>) -> Result<Option<String>, TnefConversionError>
+    + Send
+    + Sync;
+
+/// Policy for TNEF-to-MIME conversion.
+#[derive(Clone)]
 pub struct TnefConversionOptions {
     /// Charset when neither the body nor message codepage supplies one.
     pub fallback_charset: Charset,
     /// Calendar generation, exception limits, and deterministic timestamp policy.
+    /// Not consulted when a MIME skeleton is successfully restored.
     pub calendar: CalendarOptions,
+    /// Convert embedded TNEF to message/rfc822; false retains application/ms-tnef.
+    /// A usable MIME skeleton always restores its message/rfc822 children.
+    pub convert_embedded_messages: bool,
+    /// Shared OLE renderer; cloning options shares this instance.
+    /// `None` retains original OLE attachments with an explicit loss.
+    pub ole_object_converter: Option<Arc<dyn super::TnefOleObjectConverter>>,
+    /// Optional shared RTF placeholder text callback; defaults to no text.
+    /// Cloned options and nested conversions share this instance.
+    pub attachment_placeholder_callback: Option<Arc<TnefAttachmentPlaceholderCallback>>,
+}
+
+impl fmt::Debug for TnefConversionOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TnefConversionOptions")
+            .field("fallback_charset", &self.fallback_charset)
+            .field("calendar", &self.calendar)
+            .field("convert_embedded_messages", &self.convert_embedded_messages)
+            .field(
+                "ole_object_converter",
+                &self.ole_object_converter.as_ref().map(|_| "renderer"),
+            )
+            .field(
+                "attachment_placeholder_callback",
+                &self
+                    .attachment_placeholder_callback
+                    .as_ref()
+                    .map(|_| "callback"),
+            )
+            .finish()
+    }
 }
 
 impl Default for TnefConversionOptions {
@@ -47,6 +109,9 @@ impl Default for TnefConversionOptions {
         Self {
             fallback_charset: Charset::from_label("windows-1252").expect("built-in charset"),
             calendar: CalendarOptions::default(),
+            convert_embedded_messages: false,
+            ole_object_converter: None,
+            attachment_placeholder_callback: None,
         }
     }
 }
@@ -55,7 +120,7 @@ impl Default for TnefConversionOptions {
 #[derive(Debug)]
 #[must_use = "inspect conversion losses before using the output"]
 pub struct TnefConversionResult {
-    /// Message assembled from MAPI properties, not a restored MIME skeleton.
+    /// Independently owned message restored from a skeleton or MAPI properties.
     pub message: MimeMessage,
     /// Header, calendar, body, and attachment recoveries in encounter order.
     pub losses: Vec<TnefConversionLoss>,
@@ -64,6 +129,8 @@ pub struct TnefConversionResult {
 /// A conversion failure; no partially authored MIME message is returned.
 #[derive(Debug)]
 pub enum TnefConversionError {
+    /// Embedded loading failed, including inherited resource limits.
+    Embedded(super::TnefReadError),
     /// Incompatible, invalid, or multivalued metadata.
     Property(TnefValueConversionError),
     /// Attachment conversion failed.
@@ -90,7 +157,7 @@ pub enum TnefConversionError {
     TextPart(TextPartError),
     /// Calendar transfer-encoding selection failed.
     Encoding(BestEncodingError),
-    /// HTML tokenization, RTF rendering, or calendar export failed.
+    /// HTML tokenization, RTF rendering, calendar export, or OLE rendering failed.
     Io(io::Error),
 }
 
@@ -112,6 +179,7 @@ macro_rules! conversion_errors {
     };
 }
 conversion_errors! {
+    Embedded(super::TnefReadError),
     Property(TnefValueConversionError),
     Attachment(TnefAttachmentConversionError),
     HeaderFormat(HeaderFormatError),
@@ -135,8 +203,16 @@ impl TnefMessage {
     /// message identifier is invented. Received headers are retained; callers
     /// resubmitting over SMTP must remove them.
     ///
-    /// This is the property path, not the complete MimeKit converter. RTF best-body
-    /// selection generates UTF-8 plain text and HTML, extracting encapsulated HTML
+    /// A nonempty MIME skeleton is tried first, preserving original headers,
+    /// structure, transfer encodings, and unpromoted content. Empty leaf parts
+    /// receive matching attachment/body data. Each content-bearing attachment
+    /// must be consumed. Parsing/matching failures report `InvalidMimeSkeleton`
+    /// and discard tentative output and losses before property-based fallback.
+    /// Parsing uses default MIME limits (64 MiB input, depth 64, 16 KiB headers).
+    /// Successful restoration updates only Importance and X-Message-Flag.
+    ///
+    /// On the property path, RTF best-body selection generates UTF-8 plain text
+    /// and HTML, extracting encapsulated HTML
     /// when present. Extracted HTML is untrusted and is not sanitized.
     /// Stored or extracted HTML groups referenced, RenderedInBody attachments
     /// in multipart/related around the complete body. CID matching ignores ASCII
@@ -146,9 +222,15 @@ impl TnefMessage {
     /// Ordinary RTF places sniffed browser-displayable images at matching
     /// attachment placeholders, or appends them when counts differ. Displayed
     /// images receive unique Content-Ids and join multipart/related; nonimage
-    /// placeholders emit nothing. Custom textual placeholders are not supported.
-    /// MIME skeleton restoration is not implemented and is reported when applicable.
-    /// Embedded messages pass through as TNEF, and OLE remains unrendered.
+    /// placeholders emit nothing unless an attachment placeholder callback is set.
+    /// Embedded messages pass through as TNEF by default; options can request
+    /// recursive message/rfc822 conversion. Skeleton message/rfc822 slots always
+    /// convert matched embedded content. Readers inherit captured depth/limits.
+    /// Invalid embedded headers retain TNEF with a loss; other checked load
+    /// failures propagate. The first recovered reader issue becomes a loss.
+    /// Nested losses name the containing attachment; deeper indices appear in
+    /// their descriptions. Recursive named headers may retain Exchange fields.
+    /// OLE remains unrendered unless a shared caller-provided renderer is set.
     /// Calendar exception attachments are removed only when exported.
     ///
     /// Content and headers are independently owned; the source is unchanged.
@@ -166,7 +248,7 @@ impl TnefMessage {
     ///
     /// Returns metadata, body decoding/decompression, header formatting, calendar-part,
     /// transfer-encoding, HTML tokenization, URI resolution, Content-Id generation,
-    /// or multipart construction errors.
+    /// multipart construction, embedded loading, or OLE renderer/read errors.
     ///
     /// ```
     /// use mimecraft::tnef::TnefMessage;
@@ -194,6 +276,7 @@ impl TnefMessage {
             source: self,
             message: MimeMessage::new(),
             losses: Vec::new(),
+            embedded: false,
         }
         .convert(options)
     }
@@ -203,6 +286,7 @@ struct Converter<'a> {
     source: &'a TnefMessage,
     message: MimeMessage,
     losses: Vec<TnefConversionLoss>,
+    embedded: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -226,11 +310,20 @@ impl Converter<'_> {
         mut self,
         options: &TnefConversionOptions,
     ) -> Result<TnefConversionResult, TnefConversionError> {
-        self.headers()?;
-        if self.source.properties().get(Tag::MIME_SKELETON).is_some() {
-            self.loss(Loss::MimeSkeletonNotRestored, "MIME skeleton restoration is not implemented; the message was assembled from MAPI properties.");
-        }
         let rtf = self.prepare_rtf()?;
+        // MS-OXCMAIL 2.4.3.1: prefer original headers and structure over the
+        // property path's approximation. Prepare RTF first so its validity
+        // and losses are shared by skeleton restoration and fallback.
+        if let Some(bytes) = self.source.properties().get_bytes(Tag::MIME_SKELETON)?
+            && !bytes.is_empty()
+            && let Some(message) = self.try_skeleton(bytes, rtf.as_deref(), options)?
+        {
+            return Ok(TnefConversionResult {
+                message,
+                losses: self.losses,
+            });
+        }
+        self.headers()?;
         let use_rtf = rtf.is_some()
             && (self.best_body(true)? == BestBody::Rtf
                 // NativeBody can name a missing plain/HTML body. If RTF is the
@@ -265,12 +358,12 @@ impl Converter<'_> {
                 converted_attachments.push(None);
                 continue;
             }
-            let converted = attachment.to_mime_part()?;
-            attachment_losses.extend(converted.losses.into_iter().map(|mut loss| {
+            let (part, losses) = self.convert_attachment(attachment, options)?;
+            attachment_losses.extend(losses.into_iter().map(|mut loss| {
                 loss.attachment_index = Some(index);
                 loss
             }));
-            converted_attachments.push(converted.part);
+            converted_attachments.push(part);
         }
         let mut displayed_images = vec![false; converted_attachments.len()];
 
@@ -285,6 +378,7 @@ impl Converter<'_> {
                 rtf.as_deref().expect("available RTF"),
                 &mut converted_attachments,
                 &mut displayed_images,
+                options,
             )?;
         } else {
             for (subtype, body) in [
@@ -327,12 +421,15 @@ impl Converter<'_> {
         // Preserve body-before-attachment loss ordering despite early conversion.
         self.losses.extend(attachment_losses);
         for (index, part) in converted_attachments.into_iter().enumerate() {
-            if let Some(mut part) = part {
+            if let Some(mut entity) = part {
                 if displayed_images[index]
                     || references
                         .as_ref()
                         .is_some_and(|references| references.is_referenced(index))
                 {
+                    let MimeEntity::Part(part) = &mut entity else {
+                        unreachable!("embedded messages are never inline")
+                    };
                     // Keep disposition parameters; non-inline attachments retain
                     // their stored disposition even when it already says inline.
                     let mut disposition = part
@@ -353,9 +450,9 @@ impl Converter<'_> {
                         .expect("related container")
                         .multipart_mut()
                         .children_mut()
-                        .push(part.into());
+                        .push(entity);
                 } else {
-                    attachments.push(part.into());
+                    attachments.push(entity);
                 }
             }
         }
@@ -375,6 +472,98 @@ impl Converter<'_> {
             message: self.message,
             losses: self.losses,
         })
+    }
+
+    fn convert_embedded(
+        &self,
+        attachment: &super::TnefAttachment,
+        options: &TnefConversionOptions,
+    ) -> Result<(Option<MimeMessage>, Vec<TnefConversionLoss>), TnefConversionError> {
+        // MS-OXTNEF 2.1.3.4: nested TNEF carries the attached message. Detached
+        // readers retain depth and limits; each load has fresh byte budgets.
+        let mut issue = None;
+        let source = match attachment.load_embedded_message_with_logger(&mut |value| {
+            issue.get_or_insert(value);
+            Ok(())
+        }) {
+            Ok(source) => source,
+            Err(super::TnefReadError::InvalidMessageHeader) => {
+                return Ok((
+                    None,
+                    vec![TnefConversionLoss {
+                        kind: Loss::InvalidEmbeddedMessage,
+                        description:
+                            "The embedded message header is invalid; original TNEF was retained."
+                                .into(),
+                        attachment_index: None,
+                    }],
+                ));
+            }
+            // Do not downgrade checked limits, metadata or I/O failures into
+            // successful partial conversion.
+            Err(error) => return Err(error.into()),
+        };
+        let mut result = Converter {
+            source: &source,
+            message: MimeMessage::new(),
+            losses: Vec::new(),
+            embedded: true,
+        }
+        .convert(options)?;
+        if let Some(issue) = issue {
+            result.losses.insert(0, TnefConversionLoss {
+                kind: Loss::EmbeddedMessageIssue,
+                description: format!("Embedded loading recovered from {issue:?}; only the first reader issue is reported."),
+                attachment_index: None,
+            });
+        }
+        for loss in &mut result.losses {
+            // The public index names the containing message's attachment.
+            // Preserve deeper indices in the description before remapping it.
+            loss.description = match loss.attachment_index {
+                Some(index) => format!("Embedded attachment {index}: {}", loss.description),
+                None => format!("Embedded message: {}", loss.description),
+            };
+        }
+        Ok((Some(result.message), result.losses))
+    }
+
+    fn convert_attachment(
+        &self,
+        attachment: &super::TnefAttachment,
+        options: &TnefConversionOptions,
+    ) -> Result<(Option<MimeEntity>, Vec<TnefConversionLoss>), TnefConversionError> {
+        let mut losses = Vec::new();
+        if attachment.is_embedded_message() && options.convert_embedded_messages {
+            let (message, nested_losses) = self.convert_embedded(attachment, options)?;
+            losses.extend(nested_losses);
+            if let Some(message) = message {
+                // MS-OXCMAIL 2.1.3.4.5 recommends no wrapper metadata; like
+                // MimeKit, keep filename/disposition/ID for mail-client round trips.
+                let converted = attachment.to_mime_part_with_content(
+                    ContentType::new("message", "rfc822").expect("constant type"),
+                    &[],
+                )?;
+                losses.extend(converted.losses);
+                let (mut headers, _) = converted.part.expect("embedded content").into_parts();
+                // RFC 2046 forbids base64/quoted-printable on message/rfc822.
+                headers.remove_all("Content-Transfer-Encoding");
+                return Ok((
+                    Some(crate::MessagePart::from_parts(headers, Some(message)).into()),
+                    losses,
+                ));
+            }
+        } else if attachment.has_content()
+            && !attachment.is_embedded_message()
+            && attachment.method()? == super::TnefAttachMethod::Ole
+            && let Some(renderer) = &options.ole_object_converter
+            && let Some(converted) = super::ole_converter::convert(renderer.as_ref(), attachment)?
+        {
+            return Ok((converted.part.map(Into::into), converted.losses));
+        }
+        let converted = attachment.to_mime_part()?;
+        losses.extend(converted.losses);
+        Ok((converted.part.map(Into::into), losses))
     }
 
     fn html_references(
@@ -495,26 +684,76 @@ impl Converter<'_> {
     fn rtf_parts(
         &mut self,
         bytes: &[u8],
-        attachments: &mut [Option<crate::MimePart<std::io::Cursor<Vec<u8>>>>],
+        attachments: &mut [Option<MimeEntity>],
         displayed_images: &mut [bool],
+        options: &TnefConversionOptions,
     ) -> Result<(Vec<MimeEntity>, bool), TnefConversionError> {
+        let order = options
+            .attachment_placeholder_callback
+            .as_ref()
+            .map(|_| rtf_placeholder_order(self.source.attachments()))
+            .transpose()?;
+        let mut texts = Vec::new();
+        if let Some(callback) = &options.attachment_placeholder_callback {
+            for &index in order.as_ref().expect("callback order") {
+                // Missing content and calendar exceptions still occupy slots.
+                texts.push(
+                    callback(
+                        &self.source.attachments()[index],
+                        attachments[index].as_ref(),
+                    )?
+                    .filter(|value| !value.is_empty()),
+                );
+            }
+        }
+        let has_text = texts.iter().any(Option::is_some);
+        let mut offsets = Vec::new();
         // RTF declares its own charset (\ansicpg). Feed original decoded bytes
         // to the interpreters, not a UTF-8 re-encoding of the RTF document.
         // Output is UTF-8 without a BOM; malformed \uN surrogates are replaced.
         let mut text_issue = None;
         let mut placeholders = 0;
-        let text = RtfToText::new().convert_with_callbacks(
+        let mut text = RtfToText::new().convert_with_callbacks(
             bytes,
             |issue| {
                 text_issue.get_or_insert(issue);
             },
-            |index, _| {
+            |index, output| {
                 // Both renderers share visible-placeholder indexing. Count in
                 // this existing pass rather than interpreting the RTF again.
                 placeholders = index.saturating_add(1);
+                if has_text && index < texts.len() {
+                    // The plain renderer only appends. Save UTF-8 boundaries,
+                    // bounded by attachment count, instead of rerendering RTF.
+                    offsets.push(output.len());
+                }
             },
         )?;
         self.rtf_issue("plain-text", text_issue);
+        if has_text {
+            if placeholders == texts.len() {
+                let mut substituted = String::with_capacity(text.len());
+                let mut previous = 0;
+                for (offset, value) in offsets.into_iter().zip(&texts) {
+                    substituted.push_str(&text[previous..offset]);
+                    if let Some(value) = value {
+                        substituted.push_str(value);
+                    }
+                    previous = offset;
+                }
+                substituted.push_str(&text[previous..]);
+                text = substituted;
+            } else {
+                // MS-OXCMAIL 2.1.3.4.1.1: only match positions when counts
+                // agree. Otherwise append text in rendering order. Use MIME
+                // CRLF rather than MimeKit's platform-dependent newline.
+                for value in texts.iter().flatten() {
+                    text.push_str("\r\n");
+                    text.push_str(value);
+                }
+                text.push_str("\r\n");
+            }
+        }
         // MS-OXRTFEX 2.1.3.1.2: recover encapsulated HTML rather than rendering
         // its RTF representation. Some(empty) is recognized empty HTML, not a
         // reason to substitute generated markup. Extraction is not sanitization.
@@ -527,31 +766,50 @@ impl Converter<'_> {
             Some(html) => html,
             None => {
                 html_issue = None;
-                let images =
-                    prepare_rtf_images(self.source.attachments(), attachments, displayed_images)?;
+                let order = match order {
+                    Some(order) => order,
+                    None => rtf_placeholder_order(self.source.attachments())?,
+                };
+                let mut markup = prepare_rtf_images(
+                    self.source.attachments(),
+                    attachments,
+                    displayed_images,
+                    &order,
+                )?;
+                // Plain text uses every callback value; HTML prefers an image.
+                // Caller text is never raw markup.
+                for (slot, value) in markup.iter_mut().zip(&texts) {
+                    if slot.is_none()
+                        && let Some(value) = value
+                    {
+                        let mut writer = HtmlWriter::new();
+                        writer.write_text(value);
+                        *slot = Some(writer.finish());
+                    }
+                }
                 let mut converter = RtfToHtml::new();
-                let has_images = images.iter().any(Option::is_some);
-                if has_images && placeholders == images.len() {
+                let has_markup = markup.iter().any(Option::is_some);
+                if has_markup && placeholders == markup.len() {
                     converter.convert_with_callbacks(
                         bytes,
                         |issue| {
                             html_issue.get_or_insert(issue);
                         },
                         |index, writer| {
-                            if let Some(image) = &images[index] {
-                                writer.write_markup_text(image);
+                            if let Some(value) = &markup[index] {
+                                writer.write_markup_text(value);
                             }
                         },
                     )?
                 } else {
                     // MS-OXRTFEX 2.2.3.4: only match positions when counts
-                    // agree. Otherwise append the displayable images, in
+                    // agree. Otherwise append the images and callback text, in
                     // rendering order, to the end of the body.
-                    if has_images {
+                    if has_markup {
                         let mut footer = HtmlWriter::new();
-                        for image in images.iter().flatten() {
+                        for value in markup.iter().flatten() {
                             footer.write_start_tag("div").expect("constant tag");
-                            footer.write_markup_text(image);
+                            footer.write_markup_text(value);
                             footer.write_end_tag("div").expect("constant tag");
                         }
                         converter.footer = Some(footer.finish());
@@ -922,14 +1180,8 @@ impl Converter<'_> {
     }
 
     fn priority(&mut self) -> Result<(), TnefConversionError> {
+        self.importance()?;
         let properties = self.source.properties();
-        // MS-OXCMAIL 2.1.3.2.5: retain Normal so it round-trips; ignore other values.
-        match properties.get_i32(Tag::IMPORTANCE)? {
-            Some(0) => self.message.set_importance(MessageImportance::Low),
-            Some(1) => self.message.set_importance(MessageImportance::Normal),
-            Some(2) => self.message.set_importance(MessageImportance::High),
-            _ => (),
-        }
         // PidTagPriority is not mapped by MS-OXCMAIL. MimeKit emits RFC 2156
         // Priority as an extension: urgent, normal, or non-urgent.
         match properties.get_i32(Tag::PRIORITY)? {
@@ -950,10 +1202,29 @@ impl Converter<'_> {
                 .headers_mut()
                 .add(Header::from_unstructured("Sensitivity", value)?);
         }
+        self.message_flag()
+    }
+
+    fn importance(&mut self) -> Result<(), TnefConversionError> {
+        let properties = self.source.properties();
+        // These properties can change after delivery; apply them even when
+        // the other headers come from a MIME skeleton.
+        match properties.get_i32(Tag::IMPORTANCE)? {
+            Some(0) => self.message.set_importance(MessageImportance::Low),
+            Some(1) => self.message.set_importance(MessageImportance::Normal),
+            Some(2) => self.message.set_importance(MessageImportance::High),
+            _ => (),
+        }
+        Ok(())
+    }
+
+    fn message_flag(&mut self) -> Result<(), TnefConversionError> {
+        let properties = self.source.properties();
         // MS-OXCMAIL 2.1.3.2.25: X-Message-Flag from PidLidFlagRequest.
         if let Some(property) = properties.get_named(&FLAG_REQUEST) {
             let value = property.to_text()?;
             if !value.is_empty() {
+                self.message.headers_mut().remove_all("X-Message-Flag");
                 self.message
                     .headers_mut()
                     .add(Header::from_unstructured("X-Message-Flag", &value)?);
@@ -976,7 +1247,7 @@ impl Converter<'_> {
             };
             if *guid != INTERNET_HEADERS
                 || field.is_empty()
-                || excluded_header(field)
+                || excluded_header(field, self.embedded)
                 || self.message.headers().contains(field)
             {
                 continue;
@@ -995,7 +1266,45 @@ impl Converter<'_> {
             }
             for value in property.values() {
                 if let TnefValue::Text(value) = value {
-                    match Header::from_unstructured(field, value) {
+                    let header = match HeaderId::from_name(field) {
+                        HeaderId::DispositionNotificationTo
+                        | HeaderId::ResentReplyTo
+                        | HeaderId::ResentSender
+                        | HeaderId::ResentFrom
+                        | HeaderId::ResentBcc
+                        | HeaderId::ResentCc
+                        | HeaderId::ResentTo
+                        | HeaderId::ReplyTo
+                        | HeaderId::Sender
+                        | HeaderId::From
+                        | HeaderId::Bcc
+                        | HeaderId::Cc
+                        | HeaderId::To => {
+                            // Like MimeKit's Header formatter, encode address
+                            // display names without encoding the mailbox syntax.
+                            let mut unfolded = value.clone();
+                            crate::utils::unfold_in_place(&mut unfolded);
+                            match AddressList::parse(unfolded.as_bytes()) {
+                                Ok(addresses) => addresses
+                                    .to_header(field)
+                                    .map_err(TnefConversionError::from),
+                                Err(error) => {
+                                    // MimeKit preserves unparsable address headers
+                                    // as text. Retain that fallback, but report it.
+                                    if !unfolded.is_empty() {
+                                        self.loss(Loss::InvalidHeader, format!(
+                                            "The {field} Internet header was preserved as text because its addresses could not be parsed: {error}"
+                                        ));
+                                    }
+                                    Header::from_unstructured(field, value)
+                                        .map_err(TnefConversionError::from)
+                                }
+                            }
+                        }
+                        _ => Header::from_unstructured(field, value)
+                            .map_err(TnefConversionError::from),
+                    };
+                    match header {
                         Ok(header) => self.message.headers_mut().add(header),
                         Err(error) => {
                             self.loss(
@@ -1011,24 +1320,27 @@ impl Converter<'_> {
     }
 }
 
-fn excluded_header(field: &str) -> bool {
+fn excluded_header(field: &str, embedded: bool) -> bool {
     // MIME structure describes the original entity, not the converted one.
-    // MS-OXCMAIL 2.1.3.2.4 also excludes Exchange-internal headers. Recursive
-    // embedded conversion (which relaxes this exclusion) is not implemented.
+    // MS-OXCMAIL 2.1.3.2.4 excludes Exchange-internal headers; 2.1.3.4.5
+    // deliberately lifts that restriction for attached messages.
     field.eq_ignore_ascii_case("MIME-Version")
-        || [
-            "Content-",
-            "X-Microsoft-Exchange-Organization",
-            "X-Microsoft-Exchange-Forest",
-            "X-MS-Exchange-Organization-",
-            "X-MS-Exchange-Forest-",
-        ]
-        .iter()
-        .any(|prefix| {
-            field
-                .get(..prefix.len())
-                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-        })
+        || field
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Content-"))
+        || (!embedded
+            && [
+                "X-Microsoft-Exchange-Organization",
+                "X-Microsoft-Exchange-Forest",
+                "X-MS-Exchange-Organization-",
+                "X-MS-Exchange-Forest-",
+            ]
+            .iter()
+            .any(|prefix| {
+                field
+                    .get(..prefix.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+            }))
 }
 
 fn multipart(subtype: &str, children: Vec<MimeEntity>) -> Result<MimeEntity, MultipartError> {

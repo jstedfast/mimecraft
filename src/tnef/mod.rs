@@ -32,8 +32,11 @@
 //! Referenced RenderedInBody attachments join stored/extracted HTML in multipart/related.
 //! Ordinary RTF places sniffed images at matching placeholders or in a footer,
 //! with unique Content-Ids and multipart/related grouping. Nonimage placeholders
-//! emit nothing; caller-defined textual placeholders are not yet supported.
-//! MIME skeleton restoration remains unimplemented, with explicit conversion losses.
+//! emit nothing by default. A shared attachment placeholder callback supplies
+//! plain text and HTML-escaped labels, with image precedence in generated HTML.
+//! MIME skeletons restore original headers/structure with explicit fallback losses.
+//! Embedded conversion optionally produces recursive message/rfc822 parts.
+//! A shared caller-provided OLE renderer can replace objects with sniffed images.
 //! Embedded readers share limits and diagnostics.
 //! Owned embedded content supports detached readers with inherited context and fresh budgets.
 //! Malformed framing follows MimeKit's recovery rules;
@@ -53,6 +56,7 @@ mod html_references;
 mod message;
 mod message_body;
 mod message_conversion;
+mod ole_converter;
 mod property_rtf_writer;
 mod property_set;
 mod property_tags;
@@ -76,7 +80,11 @@ pub use date_time::{TnefDateTime, TnefDateTimeError, TnefDateTimeKind};
 pub use embedded_writer::{TnefEmbeddedSink, TnefEmbeddedWriter};
 pub use message::TnefMessage;
 pub use message_body::{TnefBodyError, TnefBodyReader, TnefMessageBody, TnefMessageBodyFormat};
-pub use message_conversion::{TnefConversionError, TnefConversionOptions, TnefConversionResult};
+pub use message_conversion::{
+    TnefAttachmentPlaceholderCallback, TnefConversionError, TnefConversionOptions,
+    TnefConversionResult,
+};
+pub use ole_converter::TnefOleObjectConverter;
 pub use property_rtf_writer::TnefRtfPropertyWriter;
 pub use property_set::{TnefProperty, TnefPropertySet};
 pub use property_types::{

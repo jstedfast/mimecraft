@@ -6,16 +6,22 @@ use super::{
     embedded_workloads, recipient_workloads, rtf_compressed_workloads,
 };
 use mimecraft::tnef::{
-    TnefAttributeTag as Attribute, TnefMessage, TnefPropertyTag as Tag, TnefPropertyType as Type,
-    TnefReader,
+    TnefAttachment, TnefAttributeTag as Attribute, TnefConversionLossKind, TnefConversionOptions,
+    TnefMessage, TnefPropertyTag as Tag, TnefPropertyType as Type, TnefReader,
 };
-use mimecraft::{MimeEntity, MimeParser};
+use mimecraft::{MimeEntity, MimeMessage, MimeParser};
 use std::{
     hint::black_box,
-    io::{self, Read},
+    io::{self, Cursor, Read},
+    sync::Arc,
 };
 
-pub const CASES: [&str; 13] = [
+pub const CASES: [&str; 20] = [
+    "EmbeddedRecursive",
+    "OleImages",
+    "OleFallback",
+    "MimeSkeleton",
+    "MimeSkeletonFallback",
     "Legacy",
     "Mapi",
     "Mixed",
@@ -29,6 +35,8 @@ pub const CASES: [&str; 13] = [
     "RtfHtmlRelated",
     "RtfImages",
     "RtfImagesFooter",
+    "RtfPlaceholders",
+    "RtfPlaceholdersFooter",
 ];
 const RTF_PARAGRAPHS: usize = 128;
 pub const MODES: [Mode; 4] = [
@@ -64,6 +72,14 @@ pub struct Workload {
     message: TnefMessage,
     rtf: Option<Vec<u8>>,
     html: String,
+    options: TnefConversionOptions,
+}
+
+fn advanced(name: &str) -> bool {
+    matches!(
+        name,
+        "EmbeddedRecursive" | "OleImages" | "OleFallback" | "MimeSkeleton" | "MimeSkeletonFallback"
+    )
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -132,6 +148,11 @@ fn reference_html(unreferenced: bool) -> String {
 }
 
 fn rtf_source(name: &str) -> Option<Vec<u8>> {
+    let name = match name {
+        "RtfPlaceholders" => "RtfImages",
+        "RtfPlaceholdersFooter" => "RtfImagesFooter",
+        _ => name,
+    };
     if !matches!(
         name,
         "Rtf" | "RtfHtml" | "RtfStale" | "RtfHtmlRelated" | "RtfImages" | "RtfImagesFooter"
@@ -170,9 +191,15 @@ fn rtf_source(name: &str) -> Option<Vec<u8>> {
 
 pub fn workload(name: &'static str) -> Workload {
     assert!(CASES.contains(&name));
+    if advanced(name) {
+        return advanced_workload(name);
+    }
     let legacy = name != "Mapi";
     let mapi = name != "Legacy";
-    let images = matches!(name, "RtfImages" | "RtfImagesFooter");
+    let images = matches!(
+        name,
+        "RtfImages" | "RtfImagesFooter" | "RtfPlaceholders" | "RtfPlaceholdersFooter"
+    );
     let rtf = rtf_source(name);
     let html = if matches!(name, "HtmlRelated" | "HtmlUnreferenced") {
         reference_html(name == "HtmlUnreferenced")
@@ -297,6 +324,130 @@ pub fn workload(name: &'static str) -> Workload {
         payload,
         rtf,
         html,
+        options: TnefConversionOptions {
+            attachment_placeholder_callback: if matches!(
+                name,
+                "RtfPlaceholders" | "RtfPlaceholdersFooter"
+            ) {
+                Some(Arc::new(|attachment, _| {
+                    Ok(attachment.file_name()?.map(|name| format!("<<{name}>>")))
+                }))
+            } else {
+                None
+            },
+            ..Default::default()
+        },
+    }
+}
+
+fn advanced_workload(name: &'static str) -> Workload {
+    let recursive = name == "EmbeddedRecursive";
+    let ole = matches!(name, "OleImages" | "OleFallback");
+    let skeleton = matches!(name, "MimeSkeleton" | "MimeSkeletonFallback");
+    let mut payload: Vec<u8> = (0..2048).map(|i| (i * 31 + 7) as u8).collect();
+    let mut image = payload.clone();
+    image[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    if recursive {
+        let leaf = embedded_workloads::document(Attribute::BODY, b"deep body\0");
+        payload = embedded_workloads::document(Attribute::SUBJECT, b"Inner\0");
+        attribute(&mut payload, Attribute::BODY, b"embedded body\0");
+        let render = [&1u16.to_le_bytes()[..], &(-1i32).to_le_bytes(), &[0; 8]].concat();
+        attribute(&mut payload, Attribute::ATTACH_RENDER_DATA, &render);
+        attribute(
+            &mut payload,
+            Attribute::ATTACHMENT,
+            &properties(vec![
+                value(
+                    Tag::ATTACH_DATA_BIN,
+                    &[embedded_workloads::IID.as_slice(), &leaf].concat(),
+                ),
+                integer(Tag::ATTACH_METHOD, 5),
+            ]),
+        );
+    }
+    let mut fields = vec![
+        recipient_workloads::property(Tag::SUBJECT_W, "Property subject", Type::UNICODE),
+        recipient_workloads::property(Tag::BODY_W, "MAPI body", Type::UNICODE),
+        recipient_workloads::property(
+            Tag::RECEIVED_BY_EMAIL_ADDRESS_W,
+            "alice@example.com",
+            Type::UNICODE,
+        ),
+    ];
+    if skeleton {
+        let mut mime = String::from(
+            "Subject: Skeleton subject\r\nTo: alice@example.com\r\nContent-Type: multipart/mixed; boundary=skeleton\r\n\r\n--skeleton\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
+        );
+        for index in 0..32 {
+            let id = if name == "MimeSkeletonFallback" && index == 31 {
+                32
+            } else {
+                index
+            };
+            mime.push_str(&format!("\r\n--skeleton\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=part{index}.bin\r\nContent-Transfer-Encoding: base64\r\nX-Exchange-MIME-Skeleton-Content-Id: <part{id}@example.com>\r\n\r\n"));
+        }
+        mime.push_str("\r\n--skeleton--\r\n");
+        fields.push(value(Tag::MIME_SKELETON, mime.as_bytes()));
+    }
+    let mut input = embedded_workloads::document(Attribute::MAPI_PROPERTIES, &properties(fields));
+    for index in 0..32 {
+        let render = [&1u16.to_le_bytes()[..], &(-1i32).to_le_bytes(), &[0; 8]].concat();
+        attribute(&mut input, Attribute::ATTACH_RENDER_DATA, &render);
+        let bytes = if recursive {
+            [embedded_workloads::IID.as_slice(), &payload].concat()
+        } else {
+            payload.clone()
+        };
+        attribute(
+            &mut input,
+            Attribute::ATTACHMENT,
+            &properties(vec![
+                value(Tag::ATTACH_DATA_BIN, &bytes),
+                integer(
+                    Tag::ATTACH_METHOD,
+                    if recursive {
+                        5
+                    } else if ole {
+                        6
+                    } else {
+                        1
+                    },
+                ),
+                recipient_workloads::property(
+                    Tag::ATTACH_LONG_FILENAME_W,
+                    &format!("part{index}.bin"),
+                    Type::UNICODE,
+                ),
+                recipient_workloads::property(
+                    Tag::ATTACH_CONTENT_ID_W,
+                    &format!("part{index}@example.com"),
+                    Type::UNICODE,
+                ),
+            ]),
+        );
+    }
+    let mut options = TnefConversionOptions {
+        convert_embedded_messages: recursive,
+        ..Default::default()
+    };
+    if ole {
+        options.ole_object_converter = Some(Arc::new(move |_: &TnefAttachment| {
+            let bytes = if name == "OleImages" {
+                image.clone()
+            } else {
+                b"not an image".to_vec()
+            };
+            Ok(Some(Box::new(Cursor::new(bytes)) as Box<dyn Read>))
+        }));
+    }
+    Workload {
+        name,
+        message: TnefMessage::load(input.as_slice()).unwrap(),
+        input,
+        payload,
+        rtf: None,
+        html: String::new(),
+        options,
     }
 }
 
@@ -342,10 +493,15 @@ fn traverse(message: &TnefMessage, summary: &mut Summary, content: bool) {
 
 pub fn read(case: &Workload, mode: Mode) -> Summary {
     if matches!(mode, Mode::Convert | Mode::ConvertWrite) {
-        let result = black_box(&case.message).to_mime_message().unwrap();
+        let result = black_box(&case.message)
+            .to_mime_message_with_options(&case.options)
+            .unwrap();
         let mut message = result.message;
         let mut summary = Summary {
-            messages: 1,
+            messages: 1 + message
+                .iter()
+                .filter(|entity| matches!(entity, MimeEntity::Message(_)))
+                .count(),
             attachments: case.message.attachments().len(),
             recipients: message.to().addresses.mailboxes().count(),
             ..Default::default()
@@ -362,11 +518,21 @@ pub fn read(case: &Workload, mode: Mode) -> Summary {
             for header in message.headers().iter() {
                 summary.bytes(header.raw());
             }
-            for part in message.leaf_parts() {
-                for header in part.headers().iter() {
+            for entity in message.iter() {
+                for header in entity.headers().iter() {
                     summary.bytes(header.raw());
                 }
-                summary.bytes(black_box(part.content().get_ref().get_ref()));
+                match entity {
+                    MimeEntity::Part(part) => {
+                        summary.bytes(black_box(part.content().get_ref().get_ref()))
+                    }
+                    MimeEntity::Message(part) => {
+                        for header in part.message().unwrap().headers().iter() {
+                            summary.bytes(header.raw());
+                        }
+                    }
+                    MimeEntity::Multipart(_) => (),
+                }
             }
         }
         return summary;
@@ -388,7 +554,156 @@ pub fn read(case: &Workload, mode: Mode) -> Summary {
 }
 
 impl Workload {
+    fn check_advanced(&self) {
+        let recursive = self.name == "EmbeddedRecursive";
+        let mut expected = Summary {
+            messages: 1,
+            attachments: 32,
+            recipients: 0,
+            ..Default::default()
+        };
+        assert_eq!(read(self, Mode::Load), expected);
+        expected.bytes(
+            &"MAPI body"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        for _ in 0..32 {
+            if recursive {
+                expected.messages += 2;
+                expected.attachments += 1;
+                expected.bytes(b"embedded body");
+                expected.bytes(b"deep body");
+            } else {
+                expected.bytes(&self.payload);
+            }
+        }
+        assert_eq!(read(self, Mode::Traverse), expected);
+        let mut result = self
+            .message
+            .to_mime_message_with_options(&self.options)
+            .unwrap();
+        let expected_losses = match self.name {
+            "OleFallback" => vec![TnefConversionLossKind::OleObjectNotRendered; 32],
+            "MimeSkeletonFallback" => vec![TnefConversionLossKind::InvalidMimeSkeleton],
+            _ => vec![],
+        };
+        assert_eq!(
+            result
+                .losses
+                .iter()
+                .map(|loss| loss.kind)
+                .collect::<Vec<_>>(),
+            expected_losses
+        );
+        assert_eq!(
+            result.message.subject().unwrap().text,
+            if self.name == "MimeSkeleton" {
+                "Skeleton subject"
+            } else {
+                "Property subject"
+            }
+        );
+        self.check_advanced_mime(&mut result.message);
+        let mut bytes = Vec::new();
+        result.message.write_to(&mut bytes).unwrap();
+        let mut parsed = MimeParser::new(bytes.as_slice()).parse_message().unwrap();
+        self.check_advanced_mime(&mut parsed);
+        for mode in [Mode::Convert, Mode::ConvertWrite] {
+            let summary = read(self, mode);
+            assert_eq!(summary.messages, if recursive { 65 } else { 1 });
+            assert_eq!(summary.attachments, 32);
+            assert_eq!(summary.recipients, 1);
+            assert!(
+                summary.bytes
+                    > 32 * if recursive {
+                        b"deep body".len()
+                    } else {
+                        self.payload.len()
+                    }
+            );
+        }
+    }
+
+    fn check_advanced_mime(&self, message: &mut MimeMessage) {
+        let MimeEntity::Multipart(mixed) = message.body_mut().unwrap() else {
+            panic!("mixed")
+        };
+        assert_eq!(mixed.children().len(), 33);
+        let MimeEntity::Part(body) = &mut mixed.children_mut()[0] else {
+            panic!("plain body")
+        };
+        let mut decoded = Vec::new();
+        body.content_mut().decode_to(&mut decoded).unwrap();
+        assert_eq!(decoded, b"MAPI body");
+        for (index, entity) in mixed.children_mut()[1..].iter_mut().enumerate() {
+            assert!(
+                !entity
+                    .headers()
+                    .contains("X-Exchange-MIME-Skeleton-Content-Id")
+            );
+            if self.name == "EmbeddedRecursive" {
+                let MimeEntity::Message(part) = entity else {
+                    panic!("recursive message")
+                };
+                let nested = part.message_mut().unwrap();
+                assert_eq!(nested.subject().unwrap().text, "Inner");
+                let MimeEntity::Multipart(mixed) = nested.body_mut().unwrap() else {
+                    panic!("inner mixed")
+                };
+                assert_eq!(mixed.children().len(), 2);
+                let MimeEntity::Part(body) = &mut mixed.children_mut()[0] else {
+                    panic!("inner body")
+                };
+                decoded.clear();
+                body.content_mut().decode_to(&mut decoded).unwrap();
+                assert_eq!(decoded, b"embedded body");
+                let MimeEntity::Message(part) = &mut mixed.children_mut()[1] else {
+                    panic!("deep message")
+                };
+                let MimeEntity::Part(body) = part.message_mut().unwrap().body_mut().unwrap() else {
+                    panic!("deep body")
+                };
+                decoded.clear();
+                body.content_mut().decode_to(&mut decoded).unwrap();
+                assert_eq!(decoded, b"deep body");
+            } else {
+                let MimeEntity::Part(part) = entity else {
+                    panic!("attachment")
+                };
+                let image = self.name == "OleImages";
+                assert_eq!(
+                    part.file_name().unwrap(),
+                    Some(format!(
+                        "part{index}.bin{}",
+                        if image { ".png" } else { "" }
+                    ))
+                );
+                assert_eq!(
+                    part.content_type().unwrap().unwrap().mime_type(),
+                    if image {
+                        "image/png"
+                    } else {
+                        "application/octet-stream"
+                    }
+                );
+                decoded.clear();
+                part.content_mut().decode_to(&mut decoded).unwrap();
+                let mut expected = self.payload.clone();
+                if image {
+                    expected[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+                }
+                assert_eq!(decoded, expected);
+            }
+        }
+    }
+
     pub fn check(&self) {
+        if advanced(self.name) {
+            self.check_advanced();
+            return;
+        }
         let message = TnefMessage::load(self.input.as_slice()).unwrap();
         let legacy = self.name == "Legacy";
         assert_eq!(
@@ -485,10 +800,34 @@ impl Workload {
         self.check_conversion();
     }
 
+    fn expected_rtf_text(&self) -> String {
+        let mut text = String::new();
+        for index in 0..RTF_PARAGRAPHS {
+            if self.name == "RtfPlaceholders" && index < 32 {
+                text.push_str(&format!("Hello<<mapi{}.bin>> from RTF\r\n", 31 - index));
+            } else {
+                text.push_str("Hello from RTF\r\n");
+            }
+        }
+        if self.name == "RtfPlaceholdersFooter" {
+            for index in (0..32).rev() {
+                text.push_str(&format!("\r\n<<mapi{index}.bin>>"));
+            }
+            text.push_str("\r\n");
+        }
+        text
+    }
+
     fn check_conversion(&self) {
         let legacy = self.name == "Legacy";
-        let images = matches!(self.name, "RtfImages" | "RtfImagesFooter");
-        let mut result = self.message.to_mime_message().unwrap();
+        let images = matches!(
+            self.name,
+            "RtfImages" | "RtfImagesFooter" | "RtfPlaceholders" | "RtfPlaceholdersFooter"
+        );
+        let mut result = self
+            .message
+            .to_mime_message_with_options(&self.options)
+            .unwrap();
         assert!(result.losses.is_empty(), "{:?}", result.losses);
         assert_eq!(
             result.message.subject().unwrap().text,
@@ -551,7 +890,7 @@ impl Workload {
             assert_eq!(alternative.children().len(), 2);
             let generated = images || matches!(self.name, "Rtf" | "RtfHtml" | "RtfHtmlRelated");
             let plain = if generated {
-                "Hello from RTF\r\n".repeat(RTF_PARAGRAPHS)
+                self.expected_rtf_text()
             } else {
                 "MAPI body".to_owned()
             };
@@ -599,11 +938,30 @@ impl Workload {
                             let offset = html.find(&image).unwrap();
                             assert!(offset > previous);
                             previous = offset;
-                            if self.name == "RtfImages" {
+                            if matches!(self.name, "RtfImages" | "RtfPlaceholders") {
                                 assert!(html.contains(&format!("Hello{image} from RTF")));
                             } else {
                                 assert!(html.contains(&format!("<div>{image}</div>")));
                                 assert!(offset > html.rfind("from RTF").unwrap());
+                            }
+                        }
+                        if matches!(self.name, "RtfPlaceholders" | "RtfPlaceholdersFooter") {
+                            let mut previous = 0;
+                            for index in (0..32).rev() {
+                                let label = format!("&lt;&lt;mapi{index}.bin&gt;&gt;");
+                                if index % 2 == 0 {
+                                    assert!(!html.contains(&label));
+                                } else {
+                                    let offset = html.find(&label).unwrap();
+                                    assert!(offset > previous);
+                                    previous = offset;
+                                    if self.name == "RtfPlaceholders" {
+                                        assert!(html.contains(&format!("Hello{label} from RTF")));
+                                    } else {
+                                        assert!(html.contains(&format!("<div>{label}</div>")));
+                                        assert!(offset > html.rfind("from RTF").unwrap());
+                                    }
+                                }
                             }
                         }
                     }
@@ -693,10 +1051,7 @@ impl Workload {
             };
             let mut decoded = Vec::new();
             plain.content_mut().decode_to(&mut decoded).unwrap();
-            assert_eq!(
-                decoded,
-                "Hello from RTF\r\n".repeat(RTF_PARAGRAPHS).as_bytes()
-            );
+            assert_eq!(decoded, self.expected_rtf_text().as_bytes());
         }
         for child in attachments {
             let MimeEntity::Part(part) = child else {

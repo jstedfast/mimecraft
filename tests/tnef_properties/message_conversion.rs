@@ -7,6 +7,8 @@ use mimecraft::{
     tnef::{TnefConversionError, TnefConversionLossKind as Loss},
 };
 
+#[path = "advanced_conversion.rs"]
+mod advanced;
 #[path = "inline_conversion.rs"]
 mod inline;
 #[path = "rtf_conversion.rs"]
@@ -113,6 +115,154 @@ fn upstream_named_headers_preserve_multivalues_and_do_not_override_structure() {
     message.write_to(&mut bytes).unwrap();
     let parsed = MimeParser::new(bytes.as_slice()).parse_message().unwrap();
     assert!(!parsed.headers().contains("Injected"));
+}
+
+#[test]
+fn named_address_headers_encode_names_without_hiding_mailbox_or_group_syntax() {
+    use mimecraft::{Address, AddressList};
+
+    for field in [
+        "fRoM",
+        "To",
+        "Cc",
+        "Bcc",
+        "Sender",
+        "Reply-To",
+        "Resent-From",
+        "Resent-To",
+        "Resent-Cc",
+        "Resent-Bcc",
+        "Resent-Sender",
+        "Resent-Reply-To",
+        "Disposition-Notification-To",
+    ] {
+        let values = [
+            "\"Doe, J\u{f6}hn\" <john@example.com>",
+            "\"Gr\u{fc}ppe\": Ren\u{e9}e <renee@example.com>;",
+        ];
+        let mut message = converted(&[named(1, field, &values)]);
+        let mut wire = Vec::new();
+        message.write_to(&mut wire).unwrap();
+        assert!(wire.is_ascii());
+        let parsed = MimeParser::new(wire.as_slice()).parse_message().unwrap();
+        let headers: Vec<_> = parsed.headers().get_all(field).collect();
+        assert_eq!(headers.len(), 2, "{field}");
+        let addresses = AddressList::parse(headers[0].raw_value()).unwrap();
+        let mailbox = addresses.mailboxes().next().unwrap();
+        assert_eq!(mailbox.display_name(), "Doe, J\u{f6}hn", "{field}");
+        assert_eq!(mailbox.address().to_string(), "john@example.com", "{field}");
+        let addresses = AddressList::parse(headers[1].raw_value()).unwrap();
+        let Address::Group(group) = &addresses.as_slice()[0] else {
+            panic!("{field}: group syntax was lost");
+        };
+        assert_eq!(group.display_name(), "Gr\u{fc}ppe");
+        let mailbox = group.members().mailboxes().next().unwrap();
+        assert_eq!(mailbox.display_name(), "Ren\u{e9}e");
+        assert_eq!(mailbox.address().to_string(), "renee@example.com");
+    }
+}
+
+#[test]
+fn named_address_header_fallback_and_formatting_failures_are_reported() {
+    let mut result = message(&[
+        named(1, "From", &["<bad@@>"]),
+        named(2, "To", &["J\u{f6}hn <caf\u{e9}@example.com>"]),
+        named(3, "Cc", &[" \r\n "]),
+        named(4, "Reply-To", &[" J\u{f6}hn\r\n <john@example.com> "]),
+    ])
+    .to_mime_message()
+    .unwrap();
+    assert_eq!(result.losses.len(), 2, "{:?}", result.losses);
+    assert!(
+        result
+            .losses
+            .iter()
+            .all(|loss| loss.kind == Loss::InvalidHeader)
+    );
+    assert_eq!(
+        result
+            .message
+            .headers()
+            .get("From")
+            .unwrap()
+            .decode_value()
+            .text,
+        "<bad@@>"
+    );
+    assert!(!result.message.headers().contains("To"));
+    assert_eq!(
+        result
+            .message
+            .headers()
+            .get("Cc")
+            .unwrap()
+            .decode_value()
+            .text,
+        ""
+    );
+    let mut wire = Vec::new();
+    result.message.write_to(&mut wire).unwrap();
+    let parsed = MimeParser::new(wire.as_slice()).parse_message().unwrap();
+    let addresses =
+        mimecraft::AddressList::parse(parsed.headers().get("Reply-To").unwrap().raw_value())
+            .unwrap();
+    let mailbox = addresses.mailboxes().next().unwrap();
+    assert_eq!(mailbox.display_name(), "J\u{f6}hn");
+    assert_eq!(mailbox.address().to_string(), "john@example.com");
+}
+
+#[test]
+fn upstream_long_subject_conversion_respects_parser_budgets_and_round_trips() {
+    use mimecraft::{
+        HeaderTooLong, MimeEntityParseOptions, MimePartWriteOptions, encodings::NewLineFormat,
+    };
+
+    let subject = "\u{e9}".repeat(6000);
+    let mut input = empty();
+    attr(&mut input, Attribute::OEM_CODEPAGE, &1252u32.to_le_bytes());
+    let mut value = vec![0xe9; 6000];
+    value.push(0);
+    attr(&mut input, Attribute::SUBJECT, &value);
+    let mut result = load(&input).to_mime_message().unwrap();
+    assert!(result.losses.is_empty(), "{:?}", result.losses);
+    assert_eq!(result.message.subject().unwrap().text, subject);
+    for format in [NewLineFormat::Dos, NewLineFormat::Unix] {
+        let options = MimePartWriteOptions {
+            new_line_format: format,
+            ..Default::default()
+        };
+        let mut wire = Vec::new();
+        result
+            .message
+            .write_to_with_options(&mut wire, &options)
+            .unwrap();
+        // A generated RFC 2047 header can exceed the parser's default input budget.
+        assert!(wire.len() > MimeEntityParseOptions::default().max_header_length);
+        let error = MimeParser::new(wire.as_slice())
+            .parse_message()
+            .unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<HeaderTooLong>()
+                .is_some()
+        );
+        let mut parsed = MimeParser::with_options(
+            wire.as_slice(),
+            MimeEntityParseOptions {
+                max_header_length: wire.len(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .parse_message()
+        .unwrap();
+        assert_eq!(parsed.subject().unwrap().text, subject);
+        let mut second = Vec::new();
+        parsed.write_to_with_options(&mut second, &options).unwrap();
+        assert_eq!(second, wire);
+    }
 }
 
 #[test]
@@ -445,7 +595,7 @@ fn upstream_html_meta_charset_overrides_only_when_usable_and_in_head() {
 }
 
 #[test]
-fn unknown_rtf_and_deferred_skeleton_are_reported_instead_of_silently_discarded() {
+fn unknown_rtf_and_invalid_skeleton_are_reported_instead_of_silently_discarded() {
     let mut unknown = vec![0; 16];
     unknown[..4].copy_from_slice(&12i32.to_le_bytes());
     let result = message(&[
@@ -461,7 +611,7 @@ fn unknown_rtf_and_deferred_skeleton_are_reported_instead_of_silently_discarded(
             .iter()
             .map(|loss| loss.kind)
             .collect::<Vec<_>>(),
-        [Loss::MimeSkeletonNotRestored, Loss::InvalidRtfBody]
+        [Loss::InvalidRtfBody, Loss::InvalidMimeSkeleton]
     );
     assert_eq!(raw_body(result.message.body().unwrap()), b"plain");
 }

@@ -22,7 +22,7 @@ pub enum TnefConversionLossKind {
     UnsupportedAttachMethod,
     /// An attachment has no content value and was omitted.
     AttachmentWithoutContent,
-    /// An embedded-message method lacks recognized embedded content.
+    /// Embedded content is unrecognized or has an invalid message header.
     InvalidEmbeddedMessage,
     /// An OLE object was retained rather than rendered as an image.
     OleObjectNotRendered,
@@ -38,7 +38,7 @@ pub enum TnefConversionLossKind {
     RtfRenderingIssue,
     /// HTML decoding replaced malformed bytes while matching inline references.
     InvalidHtmlBody,
-    /// Conversion used MAPI properties instead of restoring the MIME skeleton.
+    /// Reserved legacy loss; failed restoration now reports `InvalidMimeSkeleton`.
     MimeSkeletonNotRestored,
     /// Reserved for unsupported inline placement; current default conversion
     /// supports HTML references and RTF images and does not emit this loss.
@@ -49,6 +49,10 @@ pub enum TnefConversionLossKind {
     UnsupportedCalendarData,
     /// The calendar exception count or byte limit was reached.
     CalendarExceptionLimitExceeded,
+    /// A MIME skeleton could not be parsed or matched; properties were used.
+    InvalidMimeSkeleton,
+    /// Loading an embedded message recovered from malformed input.
+    EmbeddedMessageIssue,
 }
 
 /// A recoverable conversion loss, in encounter order.
@@ -59,6 +63,7 @@ pub struct TnefConversionLoss {
     /// Explanation of the omitted, substituted, or uninterpreted information.
     pub description: String,
     /// Original attachment index in whole-message conversion, when applicable.
+    /// Nested losses use the outer index and retain deeper indices in the description.
     /// Standalone attachment conversion leaves this unset.
     pub attachment_index: Option<usize>,
 }
@@ -156,6 +161,21 @@ impl TnefAttachment {
     pub fn to_mime_part(
         &self,
     ) -> Result<TnefAttachmentConversionResult, TnefAttachmentConversionError> {
+        self.convert_part(None)
+    }
+
+    pub(super) fn to_mime_part_with_content(
+        &self,
+        content_type: ContentType,
+        content: &[u8],
+    ) -> Result<TnefAttachmentConversionResult, TnefAttachmentConversionError> {
+        self.convert_part(Some((content_type, content)))
+    }
+
+    fn convert_part(
+        &self,
+        replacement: Option<(ContentType, &[u8])>,
+    ) -> Result<TnefAttachmentConversionResult, TnefAttachmentConversionError> {
         let properties = self.properties();
         let file_name = self.file_name()?;
         let display_name = properties.get_text(Tag::DISPLAY_NAME_W)?;
@@ -190,7 +210,13 @@ impl TnefAttachment {
             return Ok(TnefAttachmentConversionResult { part: None, losses });
         };
 
-        let mut content_type = if self.is_embedded_message() {
+        let (replacement_type, content) = match replacement {
+            Some((content_type, bytes)) => (Some(content_type), bytes),
+            None => (None, content),
+        };
+        let mut content_type = if let Some(content_type) = replacement_type {
+            content_type
+        } else if self.is_embedded_message() {
             // The nested TNEF stream is passed through so the caller can process
             // it later. Do not fabricate winmail.dat or a disposition.
             ContentType::new("application", "ms-tnef").expect("constant media type")

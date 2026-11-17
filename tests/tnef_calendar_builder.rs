@@ -22,6 +22,57 @@ fn options() -> CalendarOptions {
         ..CalendarOptions::default()
     }
 }
+
+#[test]
+fn mime_skeleton_bypasses_calendar_generation_and_applies_current_flag_only() {
+    let mut fixture = Fixture::appointment("IPM.Appointment");
+    fixture
+        .properties
+        .tag(Tag::BODY_W, Value::Text("promoted body".into()));
+    fixture.properties.tag(Tag::MIME_SKELETON, Value::Binary(
+            b"Subject: Original\r\nX-Message-Flag: old\r\nX-Message-Flag: duplicate\r\nPriority: non-urgent\r\n\r\n".to_vec(),
+        ));
+    fixture.properties.named(
+        Name {
+            guid: [8, 32, 6, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46],
+            name: mimecraft::tnef::TnefName::Id(0x8530),
+        },
+        Value::Text("Follow up".into()),
+    );
+    fixture.properties.tag(Tag::PRIORITY, Value::I32(1));
+    let source = fixture.load();
+    assert!(
+        build_calendar(&source, &options())
+            .unwrap()
+            .calendar
+            .is_some()
+    );
+    let result = source.to_mime_message().unwrap();
+    assert!(result.losses.is_empty(), "{:?}", result.losses);
+    assert_eq!(result.message.subject().unwrap().text, "Original");
+    assert_eq!(
+        result.message.priority().unwrap(),
+        mimecraft::MessagePriority::NonUrgent
+    );
+    assert_eq!(
+        result.message.headers().get_all("X-Message-Flag").count(),
+        1
+    );
+    assert_eq!(
+        result
+            .message
+            .headers()
+            .get("X-Message-Flag")
+            .unwrap()
+            .decode_value()
+            .text,
+        "Follow up"
+    );
+    let mimecraft::MimeEntity::Part(part) = result.message.body().unwrap() else {
+        panic!("no calendar alternative")
+    };
+    assert_eq!(part.content().get_ref().get_ref(), b"promoted body");
+}
 fn convert(fixture: &Fixture) -> CalendarBuildResult {
     build_calendar(&fixture.load(), &options()).unwrap()
 }
@@ -813,6 +864,48 @@ fn rtf_images_keep_exported_calendar_exception_placeholder_slots() {
             .count(),
         2
     );
+
+    let result = f
+        .load()
+        .to_mime_message_with_options(&TnefConversionOptions {
+            calendar: options(),
+            attachment_placeholder_callback: Some(std::sync::Arc::new(|attachment, entity| {
+                // Calendar-consumed attachments still occupy their placeholder.
+                if attachment.is_embedded_message() {
+                    assert!(entity.is_none());
+                    Ok(Some("[exception]".into()))
+                } else {
+                    assert!(entity.is_some());
+                    Ok(None)
+                }
+            })),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(result.losses.is_empty());
+    for (subtype, expected) in [
+        ("plain", "A[exception] B C"),
+        (
+            "html",
+            "A[exception] B<img src=\"cid:image@example.com\"/> C",
+        ),
+    ] {
+        let part = result
+            .message
+            .leaf_parts()
+            .find(|part| {
+                part.content_type()
+                    .unwrap()
+                    .unwrap()
+                    .is_mime_type("text", subtype)
+            })
+            .unwrap();
+        assert!(
+            std::str::from_utf8(part.content().get_ref().get_ref())
+                .unwrap()
+                .contains(expected)
+        );
+    }
 }
 
 #[test]
